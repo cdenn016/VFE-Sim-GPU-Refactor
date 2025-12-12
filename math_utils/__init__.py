@@ -18,10 +18,8 @@ PyTorch (GPU):
 """
 
 # NumPy utilities
-from .transport import (
-    compute_transport_operator as np_transport_operator,
-    transport_gaussian as np_transport_gaussian,
-)
+from .transport import compute_transport as np_transport_operator
+from .push_pull import push_gaussian as np_transport_gaussian
 from .generators import generate_so3_generators
 from .sigma import safe_inv, symmetrize, ensure_spd as np_ensure_spd
 
