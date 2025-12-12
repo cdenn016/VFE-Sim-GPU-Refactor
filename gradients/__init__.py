@@ -20,9 +20,10 @@ from .gradient_engine import compute_natural_gradients
 from .gradient_terms import (
     grad_self_wrt_q,
     grad_self_wrt_p,
-    grad_belief_align_wrt_i,
-    grad_belief_align_wrt_j,
-    grad_prior_align_wrt_i,
+    grad_kl_source,
+    grad_kl_target,
+    grad_kl_wrt_transport,
+    cholesky_gradient,
 )
 from .free_energy_clean import compute_total_free_energy
 from .softmax_grads import compute_beta_matrix, compute_gamma_matrix
@@ -42,9 +43,10 @@ __all__ = [
     'compute_natural_gradients',
     'grad_self_wrt_q',
     'grad_self_wrt_p',
-    'grad_belief_align_wrt_i',
-    'grad_belief_align_wrt_j',
-    'grad_prior_align_wrt_i',
+    'grad_kl_source',
+    'grad_kl_target',
+    'grad_kl_wrt_transport',
+    'cholesky_gradient',
     'compute_total_free_energy',
     'compute_beta_matrix',
     'compute_gamma_matrix',
