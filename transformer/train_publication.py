@@ -655,9 +655,10 @@ class PublicationTrainer(FastTrainer):
             )
             loss.backward()
 
-        # Compute gradient norms BEFORE clipping (only at log intervals for speed)
-        # This is computed conditionally in train() loop now
-        grad_norms = None
+        # Compute gradient norms BEFORE clipping
+        # Check if this is a log step (need to check global_step here)
+        is_log_step = (self.global_step + 1) % self.config.log_interval == 0
+        grad_norms = self._compute_gradient_norms() if is_log_step else None
 
         # Clip and step (with scaler if AMP enabled)
         if self.scaler is not None:
@@ -782,14 +783,12 @@ class PublicationTrainer(FastTrainer):
                 train_iterator = iter(self.train_loader)
                 batch = next(train_iterator)
 
-            # Train step with full metrics
-            metrics, _ = self.train_step(batch)
+            # Train step with full metrics (grad_norms computed inside before zero_grad)
+            metrics, grad_norms = self.train_step(batch)
 
             step_time = time.time() - step_start
 
-            # Only compute gradient norms at log intervals (expensive for large models)
             is_log_step = (step + 1) % self.config.log_interval == 0
-            grad_norms = self._compute_gradient_norms() if is_log_step else None
 
             # Get learning rates
             lrs = {group['name']: group['lr'] for group in self.optimizer.param_groups}
