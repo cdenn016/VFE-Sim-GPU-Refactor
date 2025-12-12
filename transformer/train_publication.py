@@ -724,10 +724,12 @@ class PublicationTrainer(FastTrainer):
 
     def _compute_gradient_norms(self) -> Dict[str, float]:
         """Compute gradient norms for different parameter groups."""
-        norms = {'total': 0, 'mu': 0, 'ffn': 0}
+        norms = {'total': 0, 'mu': 0, 'sigma': 0, 'phi': 0, 'ffn': 0}
 
         total_norm = 0
         mu_norm = 0
+        sigma_norm = 0
+        phi_norm = 0
         ffn_norm = 0
 
         for name, param in self.model.named_parameters():
@@ -735,13 +737,19 @@ class PublicationTrainer(FastTrainer):
                 param_norm = param.grad.data.norm(2).item()
                 total_norm += param_norm ** 2
 
-                if 'mu_embed' in name:
+                if 'mu_embed' in name or 'mu' in name.lower():
                     mu_norm += param_norm ** 2
+                elif 'sigma_embed' in name or 'sigma' in name.lower() or 'L_embed' in name:
+                    sigma_norm += param_norm ** 2
+                elif 'phi_embed' in name or 'phi' in name.lower():
+                    phi_norm += param_norm ** 2
                 elif 'ffn' in name:
                     ffn_norm += param_norm ** 2
 
         norms['total'] = math.sqrt(total_norm)
         norms['mu'] = math.sqrt(mu_norm)
+        norms['sigma'] = math.sqrt(sigma_norm)
+        norms['phi'] = math.sqrt(phi_norm)
         norms['ffn'] = math.sqrt(ffn_norm)
 
         return norms
@@ -824,8 +832,17 @@ class PublicationTrainer(FastTrainer):
 
                 if use_tqdm:
                     pbar.set_description(log_msg)
+                    # Print gradient norms using tqdm.write for proper display
+                    if grad_norms:
+                        tqdm.write(f"  [GRAD] total: {grad_norms['total']:.3e} | "
+                                   f"mu: {grad_norms['mu']:.3e} | sigma: {grad_norms['sigma']:.3e} | "
+                                   f"phi: {grad_norms['phi']:.3e} | ffn: {grad_norms['ffn']:.3e}")
                 else:
                     print(log_msg)
+                    if grad_norms:
+                        print(f"  [GRAD] total: {grad_norms['total']:.3e} | "
+                              f"mu: {grad_norms['mu']:.3e} | sigma: {grad_norms['sigma']:.3e} | "
+                              f"phi: {grad_norms['phi']:.3e} | ffn: {grad_norms['ffn']:.3e}")
 
             # Validation
             if (step + 1) % self.config.eval_interval == 0:
