@@ -50,17 +50,17 @@ CONFIG = {
     # VFE parameters
     'alpha': 0.01,                # Self-coupling weight KL(q||p)
     'lambda_belief': 1.0,         # Belief alignment weight
-    'kappa': 1.0,                 # Attention temperature
+    'kappa': 0.1,                 # Attention temperature (LOWER = sharper attention!)
 
     # Learning rates (natural gradient allows larger steps!)
-    'mu_lr': 0.1,                 # Belief mean update
+    'mu_lr': 0.05,                # Belief mean update (slightly reduced for stability)
     'sigma_lr': 0.025,            # Belief variance update
-    'prior_lr': 0.05,             # Prior update (slower = learning timescale)
+    'prior_lr': 0.1,              # Prior update (FASTER learning)
     'phi_lr': 0.05,               # Gauge frame update
 
-    # Timescales
-    'n_vfe_steps': 1,             # VFE iterations per forward pass
-    'prior_update_interval': 10,  # Steps between hierarchical prior updates
+    # Timescales - CRITICAL FOR LEARNING!
+    'n_vfe_steps': 5,             # VFE iterations per forward pass (MORE = better convergence)
+    'prior_update_interval': 5,   # Steps between hierarchical prior updates (FASTER)
 
     # Stability
     'grad_clip': 1.0,
@@ -68,7 +68,7 @@ CONFIG = {
     # Training
     'batch_size': 32,
     'epochs': 10,
-    'log_interval': 100,
+    'log_interval': 50,           # More frequent logging
 
     # Data
     'dataset': 'synthetic',       # 'synthetic' or 'wikitext2'
