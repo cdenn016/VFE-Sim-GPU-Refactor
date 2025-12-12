@@ -200,6 +200,12 @@ class PureFEPLayer(nn.Module):
         # This is necessary for grounding to observations (cross-entropy)
         self.output_proj = nn.Linear(embed_dim, config.vocab_size, bias=False)
 
+        # PERSISTENT PRIORS - these survive across batches and represent "learning"!
+        # Shape (K,) - broadcast across batch and sequence dimensions
+        # Initialized as uninformative (zero mean, unit variance)
+        self.register_buffer('prior_mu', torch.zeros(embed_dim))
+        self.register_buffer('prior_sigma', torch.ones(embed_dim))
+
         # Timescale tracking
         self.info_accumulator = 0.0
         self.timescale_threshold = 10.0 ** scale
@@ -217,7 +223,7 @@ class PureFEPLayer(nn.Module):
         Initialize beliefs, priors, and gauge frames from input.
 
         Beliefs are initialized from input embeddings.
-        Priors start as broad Gaussians (uninformative).
+        Priors are loaded from PERSISTENT learned state (the key to learning!).
         Gauge frames start at identity (zero angle).
 
         Returns:
@@ -233,9 +239,10 @@ class PureFEPLayer(nn.Module):
         mu_q = x.clone()
         sigma_q = torch.ones(B, N, K, device=device) * 0.1  # Small initial variance
 
-        # Priors start uninformative (centered at zero, large variance)
-        mu_p = torch.zeros(B, N, K, device=device)
-        sigma_p = torch.ones(B, N, K, device=device) * 1.0  # Broad prior
+        # Priors from PERSISTENT learned state - broadcast across batch and sequence
+        # This is the key to learning! These persist across batches.
+        mu_p = self.prior_mu.unsqueeze(0).unsqueeze(0).expand(B, N, K).clone()
+        sigma_p = self.prior_sigma.unsqueeze(0).unsqueeze(0).expand(B, N, K).clone()
 
         # Gauge frames start at identity
         phi = torch.zeros(B, N, 3, device=device)
@@ -456,6 +463,31 @@ class PureFEPLayer(nn.Module):
 
         return mu_p_new, sigma_p_new
 
+    def update_persistent_prior(
+        self,
+        mu_p_batch: torch.Tensor,    # (B, N, K) batch prior means
+        sigma_p_batch: torch.Tensor,  # (B, N, K) batch prior variances
+    ):
+        """
+        Update persistent priors from batch estimates.
+
+        This is where LEARNING is stored! The batch-averaged prior becomes
+        the persistent prior for future forward passes.
+
+        Uses exponential moving average for stability.
+        """
+        # Average across batch and sequence to get (K,) template
+        mu_p_avg = mu_p_batch.mean(dim=(0, 1))  # (K,)
+        sigma_p_avg = sigma_p_batch.mean(dim=(0, 1))  # (K,)
+
+        # Exponential moving average update (prior_lr controls learning speed)
+        blend = self.config.prior_lr
+        self.prior_mu.lerp_(mu_p_avg, blend)
+        self.prior_sigma.lerp_(sigma_p_avg, blend)
+
+        # Ensure sigma stays positive
+        self.prior_sigma.clamp_(min=self.config.eps)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -480,6 +512,10 @@ class PureFEPLayer(nn.Module):
         """
         B, N, K = x.shape
         device = x.device
+
+        # Detach input - VFE dynamics should not backprop to embeddings
+        # The model-level backprop handles embedding updates separately
+        x = x.detach()
 
         # Initialize beliefs from input
         mu_q, sigma_q, mu_p, sigma_p, phi = self.init_beliefs(x, device)
@@ -653,6 +689,8 @@ class PureFEPTransformer(nn.Module):
         - These flow down as priors to lower layers
         - Lower layers must now explain observations under these priors
         - This shapes what the network "knows"
+
+        CRITICAL: Updates are persisted to layer.prior_mu/prior_sigma buffers!
         """
         # Process top-down: layer L-1 → layer 0
         for i in range(len(self.layers) - 1, 0, -1):
@@ -678,8 +716,19 @@ class PureFEPTransformer(nn.Module):
                 self.layers[i].generators,
             )
 
-            # Store updated priors (for next forward pass)
+            # PERSIST the learning! Update the layer's stored priors.
+            child_layer.update_persistent_prior(new_mu_p, new_sigma_p)
+
+            # Store updated priors in info dict too (for current pass)
             child_info['priors'] = (new_mu_p, new_sigma_p)
+
+        # Also update top layer's prior from its own beliefs (self-supervision)
+        if len(self.layers) > 0:
+            top_layer = self.layers[-1]
+            top_info = layer_infos[-1]
+            top_mu_q, top_sigma_q = top_info['beliefs']
+            # Top layer learns from its own beliefs (no parent)
+            top_layer.update_persistent_prior(top_mu_q, top_sigma_q)
 
     def train_step(
         self,
@@ -707,13 +756,18 @@ class PureFEPTransformer(nn.Module):
             Dict of training metrics
         """
         self.train()
+        B, N = input_ids.shape
 
-        # Forward pass with VFE
+        # Forward pass with VFE (VFE dynamics are internally detached)
         logits, info = self(input_ids, targets=targets, n_vfe_steps=n_vfe_steps)
 
-        # Cross-entropy loss for embedding/output_proj update
+        # The VFE forward pass is detached from embeddings.
+        # Compute a separate grounding loss that connects embedding → output_proj
+        # This is how discrete observations update the embedding/output layers.
+        x_embed = self.embedding(input_ids) + self.pos_encoding[:, :N, :]
+        logits_for_grad = self.output_proj(x_embed)
         ce_loss = F.cross_entropy(
-            logits.view(-1, self.config.vocab_size),
+            logits_for_grad.view(-1, self.config.vocab_size),
             targets.view(-1),
         )
 
@@ -734,11 +788,17 @@ class PureFEPTransformer(nn.Module):
                     param.sub_(self.config.mu_lr * param.grad)
                     param.grad.zero_()
 
-        # Perplexity
-        ppl = torch.exp(ce_loss).item()
+        # Perplexity (use the VFE-processed logits for reporting)
+        with torch.no_grad():
+            report_loss = F.cross_entropy(
+                logits.view(-1, self.config.vocab_size),
+                targets.view(-1),
+            )
+        ppl = torch.exp(report_loss).item()
 
         metrics = {
-            'ce_loss': ce_loss.item(),
+            'ce_loss': report_loss.item(),
+            'grounding_loss': ce_loss.item(),
             'perplexity': ppl,
             **info['metrics'],
         }
