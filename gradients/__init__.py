@@ -26,7 +26,11 @@ from .gradient_terms import (
     cholesky_gradient,
 )
 from .free_energy_clean import compute_total_free_energy
-from .softmax_grads import compute_beta_matrix, compute_gamma_matrix
+from .softmax_grads import (
+    compute_softmax_weights,
+    compute_softmax_derivative_fields,
+    compute_softmax_coupling_gradients,
+)
 from .update_engine import UpdateEngine
 
 # PyTorch-based (GPU with autograd)
@@ -48,8 +52,9 @@ __all__ = [
     'grad_kl_wrt_transport',
     'cholesky_gradient',
     'compute_total_free_energy',
-    'compute_beta_matrix',
-    'compute_gamma_matrix',
+    'compute_softmax_weights',
+    'compute_softmax_derivative_fields',
+    'compute_softmax_coupling_gradients',
     'UpdateEngine',
     # PyTorch (GPU)
     'FreeEnergy',
