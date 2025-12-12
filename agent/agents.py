@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 """
 Agent as Smooth Section of Associated Bundle (Hybrid BaseManifold Version)
 ===========================================================================
@@ -20,18 +22,20 @@ Date: November 2025
 """
 
 import numpy as np
-from typing import Tuple, Optional
-from dataclasses import dataclass  
+from typing import Tuple, Optional, TYPE_CHECKING
+from dataclasses import dataclass
 
 from geometry.geometry_base import (
-    BaseManifold, 
+    BaseManifold,
     TopologyType,
     SupportRegion,
     create_full_support
 )
 
-
-from config import AgentConfig  
+# Use TYPE_CHECKING to avoid circular import
+# config.py imports agent.masking, which triggers agent/__init__.py, which imports this file
+if TYPE_CHECKING:
+    from config import AgentConfig
 
 from math_utils.push_pull import GaussianDistribution
 
