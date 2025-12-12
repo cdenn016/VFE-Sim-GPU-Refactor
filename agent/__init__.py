@@ -3,46 +3,12 @@
 Agent Module
 ============
 
-Contains agent implementations for both NumPy (CPU) and PyTorch (GPU).
-
-NumPy (CPU):
-    - Agent: Standard agent with smooth sections
-    - MultiAgentSystem: Multi-agent system with energy/gradient computation
-
-PyTorch (GPU):
-    - TensorAgent: GPU-accelerated agent with autograd
-    - TensorSystem: Batched multi-agent system
-    - TensorTrainer: GPU training with automatic differentiation
+Import directly from submodules:
+    from agent.agents import Agent
+    from agent.system import MultiAgentSystem
+    from agent.trainer import Trainer, TrainingConfig, TrainingHistory
+    from agent.masking import SupportRegionSmooth, MaskConfig
+    from agent.tensor_agent import TensorAgent
+    from agent.tensor_system import TensorSystem
+    from agent.tensor_trainer import TensorTrainer
 """
-
-# NumPy-based agents (original)
-from .agents import Agent
-from .system import MultiAgentSystem
-from .trainer import Trainer, TrainingConfig, TrainingHistory
-from .hamiltonian_trainer import HamiltonianTrainer, HamiltonianHistory
-from .masking import SupportRegionSmooth, SupportPatternsSmooth, MaskConfig
-
-# PyTorch-based agents (GPU)
-from .tensor_agent import TensorAgent
-from .tensor_system import TensorSystem
-from .tensor_trainer import TensorTrainer, TensorTrainingConfig, TensorTrainingHistory
-
-__all__ = [
-    # NumPy
-    'Agent',
-    'MultiAgentSystem',
-    'Trainer',
-    'TrainingConfig',
-    'TrainingHistory',
-    'HamiltonianTrainer',
-    'HamiltonianHistory',
-    'SupportRegionSmooth',
-    'SupportPatternsSmooth',
-    'MaskConfig',
-    # PyTorch
-    'TensorAgent',
-    'TensorSystem',
-    'TensorTrainer',
-    'TensorTrainingConfig',
-    'TensorTrainingHistory',
-]
