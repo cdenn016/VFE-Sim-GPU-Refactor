@@ -278,6 +278,7 @@ def compute_free_energy_loss(
     lambda_beta: float = 1.0,     # Belief alignment weight
     lambda_gamma: float = 0.0,    # Model alignment weight
     kappa_gamma: float = 1.0,     # Temperature for γ_ij coupling weights
+    pad_token_id: int = -100,     # Token ID to ignore in loss (padding)
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute COMPLETE free energy loss with all gauge-theoretic terms.
@@ -308,6 +309,7 @@ def compute_free_energy_loss(
         lambda_beta: Weight for belief alignment term (default: 1.0)
         lambda_gamma: Weight for model alignment term (default: 0.0)
         kappa_gamma: Temperature for γ_ij coupling weights (default: 1.0)
+        pad_token_id: Token ID for padding (ignored in loss). Default -100.
 
     Returns:
         total_loss: Scalar loss for backprop
@@ -353,7 +355,7 @@ def compute_free_energy_loss(
         logits.reshape(-1, logits.size(-1)),  # (B*N, V)
         targets.reshape(-1),                   # (B*N,)
         reduction='mean',
-        ignore_index=-1,
+        ignore_index=pad_token_id,  # Ignore padding tokens in loss
     )
 
     # =================================================================
@@ -623,6 +625,10 @@ class Trainer:
         self.val_loader = val_loader
         self.config = config or TrainingConfig()
 
+        # Get pad_token_id from dataset for proper loss masking
+        # Default to -100 (PyTorch's default ignore_index) if not available
+        self.pad_token_id = getattr(train_loader.dataset, 'pad_token_id', -100)
+
         # Move model to device
         self.device = torch.device(self.config.device)
         self.model = self.model.to(self.device)
@@ -851,6 +857,7 @@ class Trainer:
                 lambda_beta=self.config.lambda_beta,
                 lambda_gamma=self.config.lambda_gamma,
                 kappa_gamma=self.config.kappa_gamma,
+                pad_token_id=self.pad_token_id,
             )
 
             # Scale loss for gradient accumulation
@@ -936,6 +943,7 @@ class Trainer:
                 self.model, token_ids, targets,
                 alpha=self.config.alpha,
                 lambda_beta=self.config.lambda_beta,
+                pad_token_id=self.pad_token_id,
             )
 
             total_loss += loss.item()
