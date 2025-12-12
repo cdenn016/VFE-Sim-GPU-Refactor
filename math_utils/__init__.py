@@ -21,7 +21,21 @@ PyTorch (GPU):
 from .transport import compute_transport as np_transport_operator
 from .push_pull import push_gaussian as np_transport_gaussian
 from .generators import generate_so3_generators
-from .sigma import safe_inv, symmetrize, ensure_spd as np_ensure_spd
+from .numerical_utils import safe_inv
+
+# Simple NumPy utilities (not in separate module)
+import numpy as np
+
+def symmetrize(M: np.ndarray) -> np.ndarray:
+    """Symmetrize a matrix: (M + M^T) / 2"""
+    return 0.5 * (M + np.swapaxes(M, -1, -2))
+
+def np_ensure_spd(Sigma: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Ensure matrix is symmetric positive definite (NumPy version)."""
+    Sigma = symmetrize(Sigma)
+    K = Sigma.shape[-1]
+    Sigma = Sigma + eps * np.eye(K, dtype=Sigma.dtype)
+    return Sigma
 
 # PyTorch utilities
 from .migration import (
