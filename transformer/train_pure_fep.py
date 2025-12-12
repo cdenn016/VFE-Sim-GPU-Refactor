@@ -37,6 +37,16 @@ CONFIG = {
     'seq_length': 128,            # Max sequence length
     'vocab_size': 10000,          # Will be overwritten if using dataset
 
+    # Irrep structure for SO(3) decomposition
+    # Each tuple: (label, multiplicity, dim) where dim is 1,3,5,7,...
+    # Total must equal embed_dim. Set None for auto-generation.
+    # Example for K=127: 32×1 + 15×3 + 10×5 = 32 + 45 + 50 = 127
+    'irrep_spec': [
+        ('ℓ0', 32, 1),   # 32 scalars
+        ('ℓ1', 15, 3),   # 45 dims (vectors)
+        ('ℓ2', 10, 5),   # 50 dims (rank-2 tensors)
+    ],  # = 127 total
+
     # VFE parameters
     'alpha': 0.01,                # Self-coupling weight KL(q||p)
     'lambda_belief': 1.0,         # Belief alignment weight
@@ -267,6 +277,7 @@ def main():
         num_layers=config['num_layers'],
         seq_length=config['seq_length'],
         vocab_size=vocab_size,
+        irrep_spec=config.get('irrep_spec'),  # None = auto-generate
         alpha=config['alpha'],
         lambda_belief=config['lambda_belief'],
         kappa=config['kappa'],
@@ -281,6 +292,7 @@ def main():
 
     print(f"\nModel config:")
     print(f"  embed_dim (K): {model_config.embed_dim}")
+    print(f"  irrep_spec: {model_config.irrep_spec}")
     print(f"  num_layers: {model_config.num_layers}")
     print(f"  mu_lr: {model_config.mu_lr}")
     print(f"  prior_lr: {model_config.prior_lr}")
