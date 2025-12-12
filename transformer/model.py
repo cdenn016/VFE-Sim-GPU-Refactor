@@ -322,17 +322,11 @@ class GaugeTransformerLM(nn.Module):
         mu_prior = mu_q.clone()
 
         # =================================================================
-        # 3. NO POSITION ENCODING - Testing semantic-only attention
+        # 3. Position Encoding - Compose with token phi
         # =================================================================
-        # EXPERIMENT: Remove ALL position encoding to test if KL-based attention
-        # can work purely on semantic content. The causal mask still provides
-        # implicit position information (position i only sees tokens 0..i).
-        #
-        # If attention patterns become content-based (not distance-dependent),
-        # this confirms position encoding was causing the diagonal bias.
-        #
-        # To re-enable position encoding, uncomment:
-        # phi = self.pos_encoding.compose(phi, num_agents, device=device)
+        # Position encoding adds position-dependent gauge rotation to token phi.
+        # This gives each position a unique frame even for identical tokens.
+        phi = self.pos_encoding.compose(phi, num_agents, device=device)
 
         # Record embeddings for trajectory tracking
         if recorder is not None and recorder.enabled:
