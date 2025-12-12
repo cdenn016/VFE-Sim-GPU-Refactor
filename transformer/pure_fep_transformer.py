@@ -48,8 +48,8 @@ Date: December 2025
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Any
-from dataclasses import dataclass
+from typing import Optional, Tuple, List, Dict, Any, Union
+from dataclasses import dataclass, field
 import math
 
 # Import existing VFE components
@@ -74,6 +74,12 @@ class PureFEPConfig:
     num_layers: int = 2           # Number of hierarchical scales
     seq_length: int = 128         # N - sequence length (agents)
     vocab_size: int = 10000       # For language modeling
+
+    # Irrep structure for SO(3) decomposition
+    # Each tuple: (label, multiplicity, dim) where dim must be odd (1,3,5,7,...)
+    # Total dims must equal embed_dim
+    # Example for K=127: 32×1 + 15×3 + 10×5 = 32 + 45 + 50 = 127
+    irrep_spec: List[Tuple[str, int, int]] = None  # Will be auto-generated if None
 
     # VFE parameters
     alpha: float = 0.01           # Self-coupling: KL(q||p)
@@ -104,6 +110,58 @@ class PureFEPConfig:
                 f"embed_dim must be ODD for SO(3) irreps (got {self.embed_dim}). "
                 f"Try {self.embed_dim - 1} or {self.embed_dim + 1}."
             )
+
+        # Auto-generate irrep_spec if not provided
+        if self.irrep_spec is None:
+            self.irrep_spec = self._generate_irrep_spec(self.embed_dim)
+
+        # Validate irrep_spec sums to embed_dim
+        total_dim = sum(mult * dim for _, mult, dim in self.irrep_spec)
+        if total_dim != self.embed_dim:
+            raise ValueError(
+                f"irrep_spec dimensions ({total_dim}) must equal embed_dim ({self.embed_dim}). "
+                f"Current spec: {self.irrep_spec}"
+            )
+
+    @staticmethod
+    def _generate_irrep_spec(K: int) -> List[Tuple[str, int, int]]:
+        """
+        Auto-generate a reasonable irrep decomposition for dimension K.
+
+        Strategy: Mix of scalars (ℓ=0), vectors (ℓ=1), and rank-2 tensors (ℓ=2)
+        with roughly equal representation of each type.
+        """
+        # Target: ~40% scalars, ~35% vectors, ~25% rank-2 tensors
+        n_ℓ2 = K // 15         # Each ℓ=2 irrep is 5-dim
+        n_ℓ1 = K // 9          # Each ℓ=1 irrep is 3-dim
+        remaining = K - (n_ℓ2 * 5 + n_ℓ1 * 3)
+        n_ℓ0 = remaining       # Rest as scalars
+
+        # Adjust to hit exact K
+        current = n_ℓ0 * 1 + n_ℓ1 * 3 + n_ℓ2 * 5
+        while current < K:
+            n_ℓ0 += 1
+            current += 1
+        while current > K:
+            if n_ℓ0 > 0:
+                n_ℓ0 -= 1
+                current -= 1
+            elif n_ℓ1 > 0:
+                n_ℓ1 -= 1
+                current -= 3
+            elif n_ℓ2 > 0:
+                n_ℓ2 -= 1
+                current -= 5
+
+        spec = []
+        if n_ℓ0 > 0:
+            spec.append(('ℓ0', n_ℓ0, 1))
+        if n_ℓ1 > 0:
+            spec.append(('ℓ1', n_ℓ1, 3))
+        if n_ℓ2 > 0:
+            spec.append(('ℓ2', n_ℓ2, 5))
+
+        return spec
 
 
 class PureFEPLayer(nn.Module):
