@@ -1,7 +1,72 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sat Nov  8 13:22:54 2025
+Math Utilities Module
+=====================
 
-@author: chris and christine
+Mathematical utilities for both NumPy (CPU) and PyTorch (GPU) backends.
+
+NumPy (CPU):
+    - transport: Gauge transport operators
+    - push_pull: Gaussian push-pull operations
+    - sigma: Covariance utilities
+    - generators: SO(3) Lie algebra generators
+
+PyTorch (GPU):
+    - migration: NumPy <-> Tensor conversion utilities
+    - batched_ops: Compiled batched operations for GPU
+    - torch_backend: PyTorch backend utilities
 """
 
+# NumPy utilities
+from .transport import (
+    compute_transport_operator as np_transport_operator,
+    transport_gaussian as np_transport_gaussian,
+)
+from .generators import generate_so3_generators
+from .sigma import safe_inv, symmetrize, ensure_spd as np_ensure_spd
+
+# PyTorch utilities
+from .migration import (
+    numpy_to_tensor,
+    tensor_to_numpy,
+    create_tensor_agent_from_agent,
+    create_tensor_system_from_system,
+    get_device,
+    get_device_info,
+)
+from .batched_ops import (
+    batched_kl_divergence,
+    batched_transport_operator,
+    batched_transport_gaussian,
+    compute_all_pairwise_kl,
+    compute_softmax_attention,
+    ensure_spd,
+    project_to_principal_ball,
+    is_compiled,
+)
+
+__all__ = [
+    # NumPy
+    'np_transport_operator',
+    'np_transport_gaussian',
+    'generate_so3_generators',
+    'safe_inv',
+    'symmetrize',
+    'np_ensure_spd',
+    # PyTorch migration
+    'numpy_to_tensor',
+    'tensor_to_numpy',
+    'create_tensor_agent_from_agent',
+    'create_tensor_system_from_system',
+    'get_device',
+    'get_device_info',
+    # PyTorch batched ops
+    'batched_kl_divergence',
+    'batched_transport_operator',
+    'batched_transport_gaussian',
+    'compute_all_pairwise_kl',
+    'compute_softmax_attention',
+    'ensure_spd',
+    'project_to_principal_ball',
+    'is_compiled',
+]
