@@ -98,3 +98,65 @@ def random_spd_matrix(rng):
 @pytest.fixture
 def temp_dir(tmp_path):
     return tmp_path
+
+
+# =============================================================================
+# Tensor Agent Fixtures (PyTorch)
+# =============================================================================
+
+@pytest.fixture
+def torch_device():
+    """Device for tensor tests - CPU for CI compatibility."""
+    import torch
+    return 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
+@pytest.fixture
+def tensor_agent(torch_device):
+    """Single TensorAgent for testing."""
+    from agent.tensor_agent import TensorAgent
+    agent = TensorAgent(K=3, spatial_shape=(), device=torch_device)
+    agent.initialize(seed=42)
+    return agent
+
+
+@pytest.fixture
+def tensor_agent_cholesky(torch_device):
+    """TensorAgent with Cholesky parameterization."""
+    from agent.tensor_agent import TensorAgent
+    agent = TensorAgent(
+        K=3, spatial_shape=(), device=torch_device,
+        use_cholesky_param=True
+    )
+    agent.initialize(seed=42)
+    return agent
+
+
+@pytest.fixture
+def tensor_system(torch_device):
+    """TensorSystem with multiple agents."""
+    from agent.tensor_system import TensorSystem
+    system = TensorSystem(
+        N=3, K=3, spatial_shape=(), device=torch_device,
+        lambda_self=1.0, lambda_belief=0.5
+    )
+    system.initialize(seed=42)
+    return system
+
+
+@pytest.fixture
+def so3_generators(torch_device):
+    """SO(3) Lie algebra generators."""
+    import torch
+    K = 3
+    generators = torch.zeros(3, K, K, device=torch_device)
+    # J_1
+    generators[0, 1, 2] = -1.0
+    generators[0, 2, 1] = 1.0
+    # J_2
+    generators[1, 0, 2] = 1.0
+    generators[1, 2, 0] = -1.0
+    # J_3
+    generators[2, 0, 1] = -1.0
+    generators[2, 1, 0] = 1.0
+    return generators
