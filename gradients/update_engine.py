@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 """
 Created on Sun Nov 16 15:30:18 2025
 
@@ -26,12 +28,16 @@ Date: November 2025
 """
 
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from dataclasses import dataclass
 
 from gradients.retraction import retract_spd
 from gradients.gauge_fields import retract_to_principal_ball
-from agent.agents import Agent
+
+# Use TYPE_CHECKING to avoid circular import
+# agent/__init__.py imports trainer.py which imports this module
+if TYPE_CHECKING:
+    from agent.agents import Agent
 
 
 class GradientApplier:
