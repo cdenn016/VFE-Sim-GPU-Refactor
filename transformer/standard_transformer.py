@@ -231,11 +231,13 @@ class StandardTransformerLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        pad_token_id: int = -100,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
             input_ids: (B, N) token indices
             labels: (B, N) target tokens (for loss computation)
+            pad_token_id: Token ID for padding (ignored in loss). Default -100.
 
         Returns:
             Dictionary with 'logits' and optionally 'loss'
@@ -274,7 +276,8 @@ class StandardTransformerLM(nn.Module):
             loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
-                reduction='mean'
+                reduction='mean',
+                ignore_index=pad_token_id,  # Ignore padding tokens in loss
             )
             output['loss'] = loss
 

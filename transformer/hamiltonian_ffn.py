@@ -979,6 +979,7 @@ class HamiltonianPotential(nn.Module):
         beta: Optional[torch.Tensor] = None,  # (B, N, N) attention weights
         targets: Optional[torch.Tensor] = None,  # (B, N) for CE loss
         W_out: Optional[torch.Tensor] = None,    # (V, K) output projection
+        pad_token_id: int = -100,                # Token ID for padding (ignored in loss)
     ) -> Tuple[torch.Tensor, dict]:
         """
         Compute potential energy V (free energy functional).
@@ -990,6 +991,7 @@ class HamiltonianPotential(nn.Module):
             beta: (B, N, N) attention weights from attention layer
             targets: (B, N) target token IDs for CE term
             W_out: (V, K) output projection for logits
+            pad_token_id: Token ID for padding (ignored in loss). Default -100.
 
         Returns:
             V: (B,) total potential energy per batch
@@ -1102,11 +1104,12 @@ class HamiltonianPotential(nn.Module):
             # Compute logits from means
             logits = torch.einsum('bnk,vk->bnv', state.mu, W_out)  # (B, N, V)
 
-            # Cross-entropy loss
+            # Cross-entropy loss (ignoring padding tokens)
             V_ce = F.cross_entropy(
                 logits.view(-1, logits.shape[-1]),
                 targets.view(-1),
-                reduction='none'
+                reduction='none',
+                ignore_index=pad_token_id,  # Ignore padding tokens in loss
             ).view(B, N).sum(dim=-1)
 
         # =====================================================================
