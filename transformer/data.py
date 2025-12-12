@@ -225,6 +225,7 @@ class WikiText2Dataset(Dataset):
         vocab_size: Optional[int] = None,
         tokenizer_name: str = 'gpt2',
         cache_dir: Optional[str] = None,
+        vocab_mapping: Optional[Dict[int, int]] = None,
     ):
         """
         Initialize WikiText-2 dataset.
@@ -235,6 +236,10 @@ class WikiText2Dataset(Dataset):
             vocab_size: If provided, restrict to top K tokens
             tokenizer_name: HuggingFace tokenizer name
             cache_dir: Optional cache directory for dataset
+            vocab_mapping: Pre-built vocabulary mapping (original_token -> new_id).
+                          If provided, uses this mapping instead of building from
+                          this split's frequencies. Essential for ensuring train/val
+                          consistency when vocab restriction is used.
         """
         # Only transformers is required - datasets has fallback
         assert TRANSFORMERS_AVAILABLE, "transformers required for BPE tokenization! pip install transformers"
@@ -275,8 +280,14 @@ class WikiText2Dataset(Dataset):
 
         # Restrict vocabulary if requested
         if vocab_size is not None and vocab_size < len(self.tokenizer):
-            print(f"  Restricting vocabulary to {vocab_size} most frequent tokens...")
-            tokens = self._restrict_vocab(tokens, vocab_size)
+            if vocab_mapping is not None:
+                # Use provided mapping (ensures train/val consistency)
+                print(f"  Using provided vocabulary mapping ({len(vocab_mapping)} tokens)...")
+                tokens = self._apply_vocab_mapping(tokens, vocab_mapping)
+            else:
+                # Build mapping from this split's frequencies (only for train!)
+                print(f"  Restricting vocabulary to {vocab_size} most frequent tokens...")
+                tokens = self._restrict_vocab(tokens, vocab_size)
 
         self.tokens = torch.tensor(tokens, dtype=torch.long)
 
@@ -330,6 +341,25 @@ class WikiText2Dataset(Dataset):
         self._restricted_vocab_size = len(token_to_id)
 
         return [token_to_id.get(tok, token_to_id[unk_token_id]) for tok in restricted_tokens]
+
+    def _apply_vocab_mapping(self, tokens: List[int], vocab_mapping: Dict[int, int]) -> List[int]:
+        """
+        Apply a pre-built vocabulary mapping to tokens.
+
+        Used to ensure train/val consistency when vocab restriction is enabled.
+        Tokens not in the mapping are mapped to UNK (highest ID in mapping).
+        """
+        self._vocab_mapping = vocab_mapping
+        self._restricted_vocab_size = len(vocab_mapping)
+
+        # UNK is the highest ID in the mapping
+        unk_id = max(vocab_mapping.values())
+
+        return [vocab_mapping.get(tok, unk_id) for tok in tokens]
+
+    def get_vocab_mapping(self) -> Optional[Dict[int, int]]:
+        """Return the vocabulary mapping if vocab restriction was applied."""
+        return getattr(self, '_vocab_mapping', None)
 
     def get_vocab_size(self) -> int:
         """Return effective vocabulary size."""
@@ -390,6 +420,7 @@ class WikiText2TiktokenDataset(Dataset):
         max_seq_len: int = 128,
         vocab_size: Optional[int] = None,
         cache_dir: Optional[str] = None,
+        vocab_mapping: Optional[Dict[int, int]] = None,
     ):
         """
         Initialize WikiText-2 dataset with tiktoken.
@@ -399,6 +430,10 @@ class WikiText2TiktokenDataset(Dataset):
             max_seq_len: Maximum sequence length (T)
             vocab_size: If provided, restrict to top K tokens
             cache_dir: Optional cache directory for dataset
+            vocab_mapping: Pre-built vocabulary mapping (original_token -> new_id).
+                          If provided, uses this mapping instead of building from
+                          this split's frequencies. Essential for ensuring train/val
+                          consistency when vocab restriction is used.
         """
         assert TIKTOKEN_AVAILABLE, "tiktoken required! pip install tiktoken"
 
@@ -434,8 +469,14 @@ class WikiText2TiktokenDataset(Dataset):
 
         # Restrict vocabulary if requested
         if vocab_size is not None and vocab_size < self._full_vocab_size:
-            print(f"  Restricting vocabulary to {vocab_size} most frequent tokens...")
-            tokens = self._restrict_vocab(tokens, vocab_size)
+            if vocab_mapping is not None:
+                # Use provided mapping (ensures train/val consistency)
+                print(f"  Using provided vocabulary mapping ({len(vocab_mapping)} tokens)...")
+                tokens = self._apply_vocab_mapping(tokens, vocab_mapping)
+            else:
+                # Build mapping from this split's frequencies (only for train!)
+                print(f"  Restricting vocabulary to {vocab_size} most frequent tokens...")
+                tokens = self._restrict_vocab(tokens, vocab_size)
 
         self.tokens = torch.tensor(tokens, dtype=torch.long)
 
@@ -458,15 +499,33 @@ class WikiText2TiktokenDataset(Dataset):
         unk_id = target_vocab_size - 1
         top_k_minus_1 = set([tok for tok, _ in sorted_tokens[:target_vocab_size - 1]])
 
-        # Build mapping
+        # Build mapping: original_token_id -> new_contiguous_id
         non_unk_tokens = sorted(top_k_minus_1)
         token_to_id = {tok: i for i, tok in enumerate(non_unk_tokens)}
-        token_to_id['UNK'] = unk_id
+        # Note: UNK is implicit - any token not in mapping maps to unk_id
 
         self._vocab_mapping = token_to_id
         self._restricted_vocab_size = target_vocab_size
+        self._unk_id = unk_id
 
         return [token_to_id.get(tok, unk_id) for tok in tokens]
+
+    def _apply_vocab_mapping(self, tokens: List[int], vocab_mapping: Dict[int, int]) -> List[int]:
+        """
+        Apply a pre-built vocabulary mapping to tokens.
+
+        Used to ensure train/val consistency when vocab restriction is enabled.
+        Tokens not in the mapping are mapped to UNK (highest ID in mapping).
+        """
+        self._vocab_mapping = vocab_mapping
+        self._restricted_vocab_size = len(vocab_mapping) + 1  # +1 for UNK
+        self._unk_id = len(vocab_mapping)  # UNK is the last ID
+
+        return [vocab_mapping.get(tok, self._unk_id) for tok in tokens]
+
+    def get_vocab_mapping(self) -> Optional[Dict[int, int]]:
+        """Return the vocabulary mapping if vocab restriction was applied."""
+        return getattr(self, '_vocab_mapping', None)
 
     def get_vocab_size(self) -> int:
         if hasattr(self, '_restricted_vocab_size'):
@@ -973,6 +1032,8 @@ def create_dataloaders(
         print("(Using direct download fallback - datasets package not available)")
 
     # Create datasets - prefer tiktoken
+    # IMPORTANT: Train dataset builds vocab mapping, val dataset reuses it
+    # This ensures consistent token->id mapping across splits
     if TIKTOKEN_AVAILABLE:
         train_dataset = WikiText2TiktokenDataset(
             split='train',
@@ -981,11 +1042,15 @@ def create_dataloaders(
             cache_dir=cache_dir,
         )
 
+        # Get vocab mapping from train to ensure consistency
+        train_vocab_mapping = train_dataset.get_vocab_mapping()
+
         val_dataset = WikiText2TiktokenDataset(
             split='validation',
             max_seq_len=max_seq_len,
             vocab_size=vocab_size,
             cache_dir=cache_dir,
+            vocab_mapping=train_vocab_mapping,  # Use train's mapping!
         )
     else:
         train_dataset = WikiText2Dataset(
@@ -996,12 +1061,16 @@ def create_dataloaders(
             cache_dir=cache_dir,
         )
 
+        # Get vocab mapping from train to ensure consistency
+        train_vocab_mapping = train_dataset.get_vocab_mapping()
+
         val_dataset = WikiText2Dataset(
             split='validation',
             max_seq_len=max_seq_len,
             vocab_size=vocab_size,
             tokenizer_name=tokenizer_name,
             cache_dir=cache_dir,
+            vocab_mapping=train_vocab_mapping,  # Use train's mapping!
         )
 
     # Get actual vocabulary size (may differ from requested if restricted)
