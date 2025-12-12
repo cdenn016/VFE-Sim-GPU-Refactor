@@ -919,9 +919,100 @@ kl_values = 0.5 * (tr(Σ_p⁻¹ Σ_q) + δμᵀ Σ_p⁻¹ δμ - K + log|Σ_p| -
 
 ---
 
+## Pure FEP Transformer (Dec 2025)
+
+A new module `transformer/pure_fep_transformer.py` implements a transformer that learns **entirely through VFE minimization**, without backpropagation or external optimizers (Adam, SGD, etc.).
+
+### Key Principles
+
+1. **Belief Update (fast timescale - perception)**:
+   ```
+   μ_q ← μ_q - η_μ · ∂F/∂μ_q
+   ```
+   Where F = α·KL(q||p) + λ·Σ_j β_ij·KL(q_i||Ω_ij·q_j) + CE(output, target)
+
+2. **Prior Update (slow timescale - learning)**:
+   ```
+   p_child ← Ω · q_parent    (hierarchical top-down flow)
+   ```
+   This IS the learning mechanism! Meta-agents at scale ζ+1 form beliefs, which flow down as priors to scale ζ. Credit assignment happens through the hierarchy - no backprop needed.
+
+3. **Two-Timescale Dynamics**:
+   - Fast: VFE gradient descent on beliefs (perception)
+   - Slow: Hierarchical prior updates (learning)
+
+   The timescale separation emerges naturally from information accumulation: τ_ζ ∝ 10^ζ
+
+### Architecture
+
+```
+PureFEPTransformer
+├── Token Embeddings (learned - grounded to observations)
+├── Position Encoding (sinusoidal)
+├── PureFEPLayer[0] (scale ζ=0)
+│   ├── Beliefs q_i = N(μ_q, Σ_q)
+│   ├── Priors p_i = N(μ_p, Σ_p)  ← receives from parent layer
+│   └── Gauge frames φ_i
+├── PureFEPLayer[1] (scale ζ=1)
+│   ├── Beliefs q_i
+│   ├── Priors p_i  ← receives from parent layer
+│   └── Gauge frames φ_i
+└── Output Projection (learned - grounded to observations)
+```
+
+### Information Flow
+
+**Bottom-Up (perception)**:
+- Embeddings → Layer 0 beliefs → Layer 1 beliefs → ... → Output
+- Each layer runs VFE gradient descent to minimize local free energy
+
+**Top-Down (learning)**:
+- Layer L beliefs → Layer L-1 priors → ... → Layer 0 priors
+- Higher layer beliefs become constraints (priors) for lower layers
+- This shapes what the network "knows" over time
+
+### Key Insight: No Backprop Needed
+
+In standard transformers:
+- Backprop computes ∂Loss/∂W across the entire computational graph
+- Credit assignment is non-local (gradients flow backwards)
+
+In pure FEP:
+- "Weights" are implicit in the prior structure
+- Learning = evolution of priors under VFE pressure
+- Credit assignment = hierarchical message passing (local!)
+
+### Usage
+
+```python
+from transformer.pure_fep_transformer import PureFEPConfig, PureFEPTransformer
+
+config = PureFEPConfig(
+    embed_dim=128,
+    num_layers=2,
+    vocab_size=10000,
+    mu_lr=0.1,       # Natural gradient allows larger steps
+    prior_lr=0.05,   # Slower timescale for learning
+)
+
+model = PureFEPTransformer(config)
+metrics = model.train_step(input_ids, targets, n_vfe_steps=1)
+```
+
+### Minimal Backprop
+
+The ONLY backprop in pure FEP is for:
+1. `embedding.weight` - grounds system to discrete inputs
+2. `output_proj.weight` - grounds system to discrete outputs
+
+This is necessary because discrete tokens can't be handled by VFE gradient descent (which operates on continuous distributions). The embedding/output layers translate between discrete observations and continuous beliefs.
+
+---
+
 ## References
 
 - PyTorch Autograd: https://pytorch.org/docs/stable/autograd.html
 - torch.compile: https://pytorch.org/docs/stable/torch.compiler.html
 - Symplectic Integrators: Hairer, Lubich, Wanner - "Geometric Numerical Integration"
 - Information Geometry: Amari - "Information Geometry and Its Applications"
+- Free Energy Principle: Friston - "The free-energy principle: a unified brain theory?"
