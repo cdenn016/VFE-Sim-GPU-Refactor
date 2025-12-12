@@ -315,16 +315,15 @@ class PureFEPLayer(nn.Module):
 
             # Gradient of CE w.r.t. mu_q (chain rule through output_proj)
             # ∂CE/∂μ = W_out^T @ ∂CE/∂logits
-            with torch.enable_grad():
-                mu_q_grad = mu_q.clone().requires_grad_(True)
-                logits_grad = self.output_proj(mu_q_grad)
-                ce_grad = F.cross_entropy(
-                    logits_grad.view(-1, self.config.vocab_size),
-                    targets.view(-1),
-                    reduction='sum'
-                )
-                ce_grad.backward()
-                grad_mu_ce = mu_q_grad.grad.detach()
+            # Use autograd.grad to get gradient directly
+            mu_q_for_grad = mu_q.detach().requires_grad_(True)
+            logits_for_grad = self.output_proj(mu_q_for_grad)
+            ce_for_grad = F.cross_entropy(
+                logits_for_grad.view(-1, self.config.vocab_size),
+                targets.view(-1),
+                reduction='sum'
+            )
+            grad_mu_ce = torch.autograd.grad(ce_for_grad, mu_q_for_grad)[0]
 
             # Add to VFE gradient (observation term in free energy)
             grad_mu = grad_mu + grad_mu_ce
