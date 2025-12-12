@@ -844,6 +844,81 @@ VFE-Sim-GPU-Refactor/
 
 ---
 
+## Transformer VFE Implementation - Bug Fixes & Architecture Notes
+
+### Critical Bugs Fixed (Dec 2025)
+
+| Commit | Bug | Impact | Fix |
+|--------|-----|--------|-----|
+| `0bef864` | OOV tokens in val but not train | Val sees unknown tokens | Pass train vocab_mapping to val dataset |
+| `7e9f0ab` | Padding not masked in loss | Loss computed on pad tokens | Add `pad_token_id` param, use as `ignore_index` |
+| `85ee4df` | Fallback URLs downloaded PTB instead of WikiText-2 | Wrong dataset distribution | Update URLs to WikiText-2 sources |
+| `e3b7376` | **CRITICAL**: `.detach()` on VFE outputs | **All gradients broken** | Remove `.detach()` from `VFE_dynamic` returns |
+
+### Architecture: FEP, Not EM
+
+The VFE transformer does **NOT** use traditional E-M steps. It implements **Free Energy Principle (FEP)** variational inference:
+
+```
+Algorithm: Iterative VFE Minimization with Fixed Priors
+─────────────────────────────────────────────────────────
+For each forward pass:
+  1. Initialize beliefs from embeddings: μ = embed(tokens), σ = σ_init
+  2. For n_iterations VFE steps:
+     a. Recompute attention β from current beliefs (dynamic-β)
+     b. Compute VFE gradients: ∂F/∂μ, ∂F/∂σ
+     c. Apply Fisher preconditioning (natural gradient)
+     d. Update beliefs: μ ← μ - lr · ∇_nat F
+  3. Return final beliefs μ_final, σ_final
+  4. Backprop through μ_final updates embeddings (learning)
+```
+
+**Key insight**: This is principled FEP with two timescales:
+- **Fast (perception)**: VFE iterations minimize F w.r.t. beliefs q(z)
+- **Slow (learning)**: Backprop minimizes F w.r.t. generative model θ (embeddings)
+
+The M-step option (`m_step_interval > 0`) is **disabled by default** and is experimental online prior adaptation, not core FEP.
+
+### Known Issues (Not Yet Fixed)
+
+| Issue | Location | Status |
+|-------|----------|--------|
+| Position encoding disabled | `model.py:335` (commented out) | Needs decision |
+| Double `token_embed()` call | `model.py:433,566` | Potential redundancy |
+| Observation gradient uses `no_grad()` | `variational_ffn.py` | By design (observation is fixed) |
+
+### Additional Bug Fixed
+
+| Commit | Bug | Impact | Fix |
+|--------|-----|--------|-----|
+| (pending) | KL in VFE gradient used only Mahalanobis term | Softmax coupling gradient was incorrect | Added full KL with trace + logdet terms |
+
+The VFE gradient computation in `compute_vfe_gradients_gpu()` was computing KL values for the softmax coupling term using only the Mahalanobis (quadratic) term:
+```python
+# BEFORE (incomplete):
+kl_values = 0.5 * δμᵀ Σ⁻¹ δμ
+
+# AFTER (full KL):
+kl_values = 0.5 * (tr(Σ_p⁻¹ Σ_q) + δμᵀ Σ_p⁻¹ δμ - K + log|Σ_p| - log|Σ_q|)
+```
+
+### Files Modified
+
+- `transformer/data.py` - Vocab mapping, fallback URLs, embedded sample cleanup
+- `transformer/train.py` - `pad_token_id` parameter for loss masking
+- `transformer/standard_transformer.py` - `pad_token_id` in forward
+- `transformer/hamiltonian_ffn.py` - `pad_token_id` in potential energy
+- `transformer/variational_ffn.py` - **CRITICAL**: Removed `.detach()` from VFE outputs, fixed full KL computation
+
+### Recommended Next Actions
+
+1. **Run training experiments** to verify fixes improve learning
+2. **Re-enable position encoding** if sequence order matters
+3. **Profile VFE iteration count** - may be able to reduce `n_iterations` for speed
+4. **Add gradient norm logging** to monitor VFE dynamics during training
+
+---
+
 ## References
 
 - PyTorch Autograd: https://pytorch.org/docs/stable/autograd.html
