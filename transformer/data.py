@@ -576,6 +576,7 @@ class WikiText2CharDataset(Dataset):
         max_seq_len: int = 32,
         vocab_size: int = 256,
         cache_dir: Optional[str] = None,
+        vocab_mapping: Optional[Dict[str, int]] = None,
     ):
         """
         Initialize character-level WikiText-2 dataset.
@@ -585,6 +586,10 @@ class WikiText2CharDataset(Dataset):
             max_seq_len: Maximum sequence length (N)
             vocab_size: Maximum vocabulary size (default 256 for extended ASCII)
             cache_dir: Optional cache directory for dataset
+            vocab_mapping: Pre-built character-to-id mapping (from train split).
+                          If provided, uses this mapping instead of building from
+                          this split's frequencies. Essential for ensuring train/val
+                          consistency.
         """
         self.split = split
         self.max_seq_len = max_seq_len
@@ -606,24 +611,32 @@ class WikiText2CharDataset(Dataset):
 
         print(f"  Total characters: {len(full_text):,}")
 
-        # Build character vocabulary
-        # Use first vocab_size most frequent characters
-        char_counts = {}
-        for char in full_text:
-            char_counts[char] = char_counts.get(char, 0) + 1
-
-        # Sort by frequency
-        sorted_chars = sorted(char_counts.items(), key=lambda x: x[1], reverse=True)
-
-        # Take top vocab_size - 2 (reserve for PAD and UNK)
-        top_chars = [char for char, _ in sorted_chars[:vocab_size - 2]]
-
-        # Build vocabulary: PAD=0, UNK=1, then top characters
+        # Build or use provided character vocabulary
         self.pad_token_id = 0
         self.unk_token_id = 1
-        self.char_to_id = {'<PAD>': 0, '<UNK>': 1}
-        for i, char in enumerate(top_chars):
-            self.char_to_id[char] = i + 2
+
+        if vocab_mapping is not None:
+            # Use provided mapping (ensures train/val consistency)
+            print(f"  Using provided vocabulary mapping ({len(vocab_mapping)} chars)...")
+            self.char_to_id = vocab_mapping.copy()
+        else:
+            # Build vocabulary from this split's frequencies (only for train!)
+            print(f"  Building vocabulary from {split} frequencies...")
+            # Count character frequencies
+            char_counts = {}
+            for char in full_text:
+                char_counts[char] = char_counts.get(char, 0) + 1
+
+            # Sort by frequency
+            sorted_chars = sorted(char_counts.items(), key=lambda x: x[1], reverse=True)
+
+            # Take top vocab_size - 2 (reserve for PAD and UNK)
+            top_chars = [char for char, _ in sorted_chars[:vocab_size - 2]]
+
+            # Build vocabulary: PAD=0, UNK=1, then top characters
+            self.char_to_id = {'<PAD>': 0, '<UNK>': 1}
+            for i, char in enumerate(top_chars):
+                self.char_to_id[char] = i + 2
 
         # Create reverse mapping for decoding
         self.id_to_char = {v: k for k, v in self.char_to_id.items()}
@@ -648,6 +661,10 @@ class WikiText2CharDataset(Dataset):
     def get_vocab_size(self) -> int:
         """Return actual vocabulary size."""
         return len(self.char_to_id)
+
+    def get_vocab_mapping(self) -> Dict[str, int]:
+        """Return the character-to-id vocabulary mapping."""
+        return self.char_to_id.copy()
 
     def decode(self, indices: torch.Tensor) -> str:
         """Decode indices back to text."""
@@ -715,6 +732,7 @@ class WikiText2ByteDataset(Dataset):
         max_seq_len: int = 32,
         vocab_size: int = 256,
         cache_dir: Optional[str] = None,
+        vocab_mapping: Optional[Dict[int, int]] = None,
     ):
         """
         Initialize byte-level WikiText-2 dataset.
@@ -724,6 +742,10 @@ class WikiText2ByteDataset(Dataset):
             max_seq_len: Maximum sequence length (N)
             vocab_size: Maximum vocabulary size (up to 256)
             cache_dir: Optional cache directory for dataset
+            vocab_mapping: Pre-built byte-to-id mapping (from train split).
+                          If provided, uses this mapping instead of building from
+                          this split's frequencies. Essential for ensuring train/val
+                          consistency when vocab restriction is used.
         """
         self.split = split
         self.max_seq_len = max_seq_len
@@ -752,19 +774,28 @@ class WikiText2ByteDataset(Dataset):
 
         # If restricting vocab, find most frequent bytes and remap
         if self.vocab_size < 256:
-            # Count byte frequencies
-            byte_counts = {}
-            for b in text_bytes:
-                byte_counts[b] = byte_counts.get(b, 0) + 1
+            if vocab_mapping is not None:
+                # Use provided mapping (ensures train/val consistency)
+                print(f"  Using provided vocabulary mapping ({len(vocab_mapping)} bytes)...")
+                self.byte_to_id = vocab_mapping.copy()
+                self.unk_id = self.vocab_size  # Last position for unknown
+                self._actual_vocab_size = self.vocab_size
+            else:
+                # Build mapping from this split's frequencies (only for train!)
+                print(f"  Building vocabulary from {split} frequencies...")
+                # Count byte frequencies
+                byte_counts = {}
+                for b in text_bytes:
+                    byte_counts[b] = byte_counts.get(b, 0) + 1
 
-            # Get top (vocab_size - 1) bytes (reserve 0 for PAD)
-            sorted_bytes = sorted(byte_counts.items(), key=lambda x: x[1], reverse=True)
-            top_bytes = [b for b, _ in sorted_bytes[:self.vocab_size - 1]]
+                # Get top (vocab_size - 1) bytes (reserve 0 for PAD)
+                sorted_bytes = sorted(byte_counts.items(), key=lambda x: x[1], reverse=True)
+                top_bytes = [b for b, _ in sorted_bytes[:self.vocab_size - 1]]
 
-            # Build mapping: byte -> token_id (1 to vocab_size-1), unknown -> vocab_size-1
-            self.byte_to_id = {b: i + 1 for i, b in enumerate(top_bytes)}
-            self.unk_id = self.vocab_size  # Last position for unknown
-            self._actual_vocab_size = self.vocab_size
+                # Build mapping: byte -> token_id (1 to vocab_size-1), unknown -> vocab_size-1
+                self.byte_to_id = {b: i + 1 for i, b in enumerate(top_bytes)}
+                self.unk_id = self.vocab_size  # Last position for unknown
+                self._actual_vocab_size = self.vocab_size
 
             # Convert bytes to token IDs
             byte_indices = []
@@ -776,6 +807,7 @@ class WikiText2ByteDataset(Dataset):
         else:
             # Full 256 bytes: token_id = byte_value + 1 (0 reserved for PAD)
             self._actual_vocab_size = 257  # 0=PAD, 1-256=bytes
+            self.byte_to_id = None  # No mapping needed for full vocab
             byte_indices = [b + 1 for b in text_bytes]
 
         self.tokens = torch.tensor(byte_indices, dtype=torch.long)
@@ -790,6 +822,12 @@ class WikiText2ByteDataset(Dataset):
     def get_vocab_size(self) -> int:
         """Return actual vocabulary size."""
         return self._actual_vocab_size
+
+    def get_vocab_mapping(self) -> Optional[Dict[int, int]]:
+        """Return the byte-to-id vocabulary mapping if vocab restriction was applied."""
+        if self.byte_to_id is not None:
+            return self.byte_to_id.copy()
+        return None
 
     def __len__(self) -> int:
         return self.num_sequences
@@ -851,11 +889,16 @@ def create_byte_dataloaders(
         cache_dir=cache_dir,
     )
 
+    # Get vocab mapping from train to ensure consistency
+    # (only relevant when vocab_size < 256)
+    train_vocab_mapping = train_dataset.get_vocab_mapping()
+
     val_dataset = WikiText2ByteDataset(
         split='validation',
         max_seq_len=max_seq_len,
         vocab_size=vocab_size,
         cache_dir=cache_dir,
+        vocab_mapping=train_vocab_mapping,  # Use train's mapping!
     )
 
     actual_vocab_size = train_dataset.get_vocab_size()
@@ -927,6 +970,8 @@ def create_char_dataloaders(
         print("(Using direct download fallback - datasets package not available)")
 
     # Create datasets
+    # IMPORTANT: Train dataset builds vocab mapping, val dataset reuses it
+    # This ensures consistent char->id mapping across splits
     train_dataset = WikiText2CharDataset(
         split='train',
         max_seq_len=max_seq_len,
@@ -934,11 +979,15 @@ def create_char_dataloaders(
         cache_dir=cache_dir,
     )
 
+    # Get vocab mapping from train to ensure consistency
+    train_vocab_mapping = train_dataset.get_vocab_mapping()
+
     val_dataset = WikiText2CharDataset(
         split='validation',
         max_seq_len=max_seq_len,
         vocab_size=vocab_size,
         cache_dir=cache_dir,
+        vocab_mapping=train_vocab_mapping,  # Use train's mapping!
     )
 
     # Get actual vocabulary size
