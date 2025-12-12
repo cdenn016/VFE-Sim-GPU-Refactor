@@ -592,20 +592,6 @@ class TrainingConfig:
     use_amp: bool = False
 
 
-# Backward compatibility: FastTrainingConfig is now an alias with use_param_groups=True
-@dataclass
-class FastTrainingConfig(TrainingConfig):
-    """
-    DEPRECATED: Use TrainingConfig with use_param_groups=True instead.
-
-    This class exists for backward compatibility with existing code.
-    """
-    use_param_groups: bool = True  # Enable multi-group optimization by default
-    max_steps: int = 1000
-    warmup_steps: int = 50
-    alpha: float = 1.0             # Different default than base TrainingConfig
-
-
 # =============================================================================
 # Trainer Class
 # =============================================================================
@@ -1091,16 +1077,3 @@ class Trainer:
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
 
         print(f"✓ Loaded checkpoint from step {self.step}")
-
-
-# =============================================================================
-# FastTrainer Alias (Backward Compatibility)
-# =============================================================================
-
-# DEPRECATED: FastTrainer is now an alias to the unified Trainer class.
-# Use Trainer with config.use_param_groups=True instead.
-#
-# This alias exists for backward compatibility with existing code.
-# The unified Trainer class supports both simple and multi-group optimization
-# modes via the use_param_groups configuration flag.
-FastTrainer = Trainer
