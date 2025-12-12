@@ -70,7 +70,7 @@ class PureFEPConfig:
     """Configuration for Pure FEP Transformer."""
 
     # Architecture
-    embed_dim: int = 128          # K - embedding dimension
+    embed_dim: int = 127          # K - embedding dimension (MUST be odd for SO(3))
     num_layers: int = 2           # Number of hierarchical scales
     seq_length: int = 128         # N - sequence length (agents)
     vocab_size: int = 10000       # For language modeling
@@ -96,6 +96,14 @@ class PureFEPConfig:
     # Numerical stability
     eps: float = 1e-6
     grad_clip: float = 1.0
+
+    def __post_init__(self):
+        """Validate configuration."""
+        if self.embed_dim % 2 == 0:
+            raise ValueError(
+                f"embed_dim must be ODD for SO(3) irreps (got {self.embed_dim}). "
+                f"Try {self.embed_dim - 1} or {self.embed_dim + 1}."
+            )
 
 
 class PureFEPLayer(nn.Module):
@@ -766,9 +774,9 @@ if __name__ == '__main__':
     print("PURE FEP TRANSFORMER TEST")
     print("=" * 70)
 
-    # Config
+    # Config (embed_dim must be ODD for SO(3) irreps)
     config = PureFEPConfig(
-        embed_dim=64,
+        embed_dim=63,  # Must be odd!
         num_layers=2,
         seq_length=32,
         vocab_size=1000,
