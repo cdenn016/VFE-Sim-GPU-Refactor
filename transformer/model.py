@@ -429,8 +429,8 @@ class GaugeTransformerLM(nn.Module):
         # Save priors (position-independent semantics)
         mu_prior = mu_q.clone()
 
-        # NO POSITION ENCODING - Testing semantic-only attention
-        # To re-enable: phi = self.pos_encoding.compose(phi, num_agents, device=device)
+        # Position encoding - compose token phi with positional phi
+        phi = self.pos_encoding.compose(phi, num_agents, device=device)
 
         # Attention mask (causal + optional sparsity)
         mask = create_attention_mask(
