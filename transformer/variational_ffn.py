@@ -1203,10 +1203,16 @@ class VariationalFFNDynamic(nn.Module):
                 mu_p_current = mu_p_current + self.m_step_rate * (mu_current.detach() - mu_p_current)
 
         # Return results
+        # NOTE: Previously returned .detach() which BREAKS gradient flow!
+        # The VFE descent is an "inner loop" optimization, but we still need
+        # gradients to flow through the final result to train the embeddings.
+        # The detach was likely added to prevent backprop through all iterations,
+        # but it completely breaks learning. If memory is an issue, consider
+        # gradient checkpointing instead.
         if self.update_sigma:
-            return mu_current.detach(), sigma_current.detach(), beta_history
+            return mu_current, sigma_current, beta_history
         else:
-            return mu_current.detach(), None, beta_history
+            return mu_current, None, beta_history
 
     def extra_repr(self) -> str:
         return (
@@ -1549,10 +1555,12 @@ class VariationalFFNDynamicStable(nn.Module):
                 mu_p_current = mu_p_current + self.m_step_rate * (mu_current.detach() - mu_p_current)
 
         # Return results
+        # NOTE: Previously returned .detach() which BREAKS gradient flow!
+        # See comment in VariationalFFNDynamic for explanation.
         if self.update_sigma:
-            return mu_current.detach(), sigma_current.detach(), beta_history
+            return mu_current, sigma_current, beta_history
         else:
-            return mu_current.detach(), None, beta_history
+            return mu_current, None, beta_history
 
     def extra_repr(self) -> str:
         return (
