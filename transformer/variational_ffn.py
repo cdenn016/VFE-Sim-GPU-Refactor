@@ -203,9 +203,29 @@ def compute_vfe_gradients_gpu(
         # ∂KL_ij/∂μ_i = Σ_j_transported^{-1} @ (μ_i - μ_j_transported)
         grad_kl_per_pair = torch.einsum('bijkl,bijl->bijk', sigma_j_inv, delta_mu_ij)  # (B, N, N, K)
 
-        # Compute KL values (Mahalanobis distance with transported covariance)
-        # KL_ij = 0.5 * δμ^T @ Σ_j_transported^{-1} @ δμ
-        kl_values = 0.5 * torch.einsum('bijk,bijk->bij', delta_mu_ij, grad_kl_per_pair)  # (B, N, N)
+        # Compute FULL KL values (not just Mahalanobis - include trace and logdet!)
+        # KL(q_i || Ω_ij[q_j]) = 0.5 * (tr(Σ_j_t^{-1} Σ_i) + mahal - K + log|Σ_j_t| - log|Σ_i|)
+
+        # Mahalanobis term: δμ^T @ Σ_j_transported^{-1} @ δμ
+        mahal_term = torch.einsum('bijk,bijk->bij', delta_mu_ij, grad_kl_per_pair)  # (B, N, N)
+
+        # Trace term: tr(Σ_j_transported^{-1} @ Σ_i)
+        # Σ_i is diagonal: diag(σ_q[i]) expanded to all pairs
+        sigma_i_diag = torch.diag_embed(sigma_q.clamp(min=eps))  # (B, N, K, K)
+        sigma_i_expanded = sigma_i_diag[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
+        trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_expanded))
+
+        # Log-determinant terms
+        # For transported covariance (full matrix): use Cholesky
+        L_j_t = torch.linalg.cholesky(sigma_j_reg)  # (B, N, N, K, K)
+        logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N, N)
+        # For source covariance (diagonal): log|diag(σ)| = sum(log(σ))
+        logdet_i = torch.sum(torch.log(sigma_q.clamp(min=eps)), dim=-1)  # (B, N)
+        logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
+
+        # Full KL divergence
+        kl_values = 0.5 * (trace_term + mahal_term - K + logdet_j_t - logdet_i_expanded)
+        kl_values = kl_values.clamp(min=0.0)  # (B, N, N)
 
         # =================================================================
         # 2a. Direct term: Σ_j β_ij · ∂KL_ij/∂μ_i
@@ -259,8 +279,28 @@ def compute_vfe_gradients_gpu(
         # ∂KL_ij/∂μ_i
         grad_kl_per_pair = torch.einsum('bijkl,bijl->bijk', sigma_j_inv, delta_mu_ij)
 
-        # Compute KL values (Mahalanobis term only, ignoring trace/logdet)
-        kl_values = 0.5 * torch.einsum('bijk,bijk->bij', delta_mu_ij, grad_kl_per_pair)
+        # Compute FULL KL values (not just Mahalanobis - include trace and logdet!)
+        # KL(q_i || Ω_ij[q_j]) = 0.5 * (tr(Σ_j_t^{-1} Σ_i) + mahal - K + log|Σ_j_t| - log|Σ_i|)
+
+        # Mahalanobis term: δμ^T @ Σ_j_transported^{-1} @ δμ
+        mahal_term = torch.einsum('bijk,bijk->bij', delta_mu_ij, grad_kl_per_pair)  # (B, N, N)
+
+        # Trace term: tr(Σ_j_transported^{-1} @ Σ_i)
+        sigma_i_expanded = sigma_q[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
+        trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_expanded))
+
+        # Log-determinant terms using Cholesky
+        L_j_t = torch.linalg.cholesky(sigma_j_reg)  # (B, N, N, K, K)
+        logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N, N)
+
+        sigma_i_reg = sigma_q + eps * torch.eye(K, device=device, dtype=dtype)
+        L_i = torch.linalg.cholesky(sigma_i_reg)  # (B, N, K, K)
+        logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N)
+        logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
+
+        # Full KL divergence
+        kl_values = 0.5 * (trace_term + mahal_term - K + logdet_j_t - logdet_i_expanded)
+        kl_values = kl_values.clamp(min=0.0)  # (B, N, N)
 
         # Direct term
         grad_mu_direct = lambda_belief * torch.einsum('bij,bijk->bik', beta, grad_kl_per_pair)

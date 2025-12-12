@@ -886,7 +886,21 @@ The M-step option (`m_step_interval > 0`) is **disabled by default** and is expe
 | Position encoding disabled | `model.py:335` (commented out) | Needs decision |
 | Double `token_embed()` call | `model.py:433,566` | Potential redundancy |
 | Observation gradient uses `no_grad()` | `variational_ffn.py` | By design (observation is fixed) |
-| KL ignores trace/logdet terms | `variational_ffn.py:1095` | Simplification, may need review |
+
+### Additional Bug Fixed
+
+| Commit | Bug | Impact | Fix |
+|--------|-----|--------|-----|
+| (pending) | KL in VFE gradient used only Mahalanobis term | Softmax coupling gradient was incorrect | Added full KL with trace + logdet terms |
+
+The VFE gradient computation in `compute_vfe_gradients_gpu()` was computing KL values for the softmax coupling term using only the Mahalanobis (quadratic) term:
+```python
+# BEFORE (incomplete):
+kl_values = 0.5 * δμᵀ Σ⁻¹ δμ
+
+# AFTER (full KL):
+kl_values = 0.5 * (tr(Σ_p⁻¹ Σ_q) + δμᵀ Σ_p⁻¹ δμ - K + log|Σ_p| - log|Σ_q|)
+```
 
 ### Files Modified
 
@@ -894,15 +908,14 @@ The M-step option (`m_step_interval > 0`) is **disabled by default** and is expe
 - `transformer/train.py` - `pad_token_id` parameter for loss masking
 - `transformer/standard_transformer.py` - `pad_token_id` in forward
 - `transformer/hamiltonian_ffn.py` - `pad_token_id` in potential energy
-- `transformer/variational_ffn.py` - **CRITICAL**: Removed `.detach()` from VFE outputs
+- `transformer/variational_ffn.py` - **CRITICAL**: Removed `.detach()` from VFE outputs, fixed full KL computation
 
 ### Recommended Next Actions
 
-1. **Run training experiments** to verify `.detach()` fix improves learning
+1. **Run training experiments** to verify fixes improve learning
 2. **Re-enable position encoding** if sequence order matters
 3. **Profile VFE iteration count** - may be able to reduce `n_iterations` for speed
 4. **Add gradient norm logging** to monitor VFE dynamics during training
-5. **Consider precision-weighted VFE** - current natural gradient is good, but could add learned precisions
 
 ---
 
