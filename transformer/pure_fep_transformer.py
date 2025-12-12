@@ -560,13 +560,19 @@ class PureFEPTransformer(nn.Module):
         self.step_count = 0
 
     def _create_pos_encoding(self, max_len: int, d_model: int) -> torch.Tensor:
-        """Create sinusoidal position encoding."""
+        """Create sinusoidal position encoding (handles odd dimensions)."""
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        # Handle odd d_model: sin gets ceil(d/2), cos gets floor(d/2)
+        n_sin = (d_model + 1) // 2  # ceil
+        n_cos = d_model // 2        # floor
+
+        div_term_sin = torch.exp(torch.arange(0, n_sin).float() * (-math.log(10000.0) / d_model) * 2)
+        div_term_cos = torch.exp(torch.arange(0, n_cos).float() * (-math.log(10000.0) / d_model) * 2)
+
+        pe[:, 0::2] = torch.sin(position * div_term_sin)
+        pe[:, 1::2] = torch.cos(position * div_term_cos)
 
         return pe.unsqueeze(0)  # (1, max_len, d_model)
 
