@@ -31,7 +31,7 @@ from .softmax_grads import (
     compute_softmax_derivative_fields,
     compute_softmax_coupling_gradients,
 )
-from .update_engine import UpdateEngine
+from .update_engine import GradientApplier
 
 # PyTorch-based (GPU with autograd)
 from .torch_energy import (
@@ -55,7 +55,7 @@ __all__ = [
     'compute_softmax_weights',
     'compute_softmax_derivative_fields',
     'compute_softmax_coupling_gradients',
-    'UpdateEngine',
+    'GradientApplier',
     # PyTorch (GPU)
     'FreeEnergy',
     'kl_divergence_gaussian',
