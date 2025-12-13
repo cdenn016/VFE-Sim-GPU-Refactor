@@ -1221,7 +1221,14 @@ class PureFEPLayer(nn.Module):
         if self.config.gradient_prior_updates:
             # GRADIENT-BASED PRIOR UPDATE
             # ∂F/∂μ_p ∝ (μ_p - μ_q) / σ_p²
-            grad_mu_p = (self.prior_mu[:N_prior, :] - mu_p_new) / self.prior_sigma[:N_prior, :].clamp(min=self.config.eps)**2
+            # Use larger minimum (1e-4) to avoid explosion when σ² → 0
+            sigma_squared = self.prior_sigma[:N_prior, :].clamp(min=1e-4) ** 2
+            grad_mu_p = (self.prior_mu[:N_prior, :] - mu_p_new) / sigma_squared
+
+            # Clip gradient to prevent explosion
+            grad_norm = grad_mu_p.norm()
+            if grad_norm > self.config.grad_clip:
+                grad_mu_p = grad_mu_p * (self.config.grad_clip / grad_norm)
 
             # Gradient descent on prior
             self.prior_mu[:N_prior, :].sub_(self.config.prior_grad_lr * grad_mu_p)
@@ -1784,7 +1791,18 @@ class PureFEPTransformer(nn.Module):
 
             # Apply gradients (manual SGD)
             with torch.no_grad():
-                for param in [self.embedding.weight, self.output_proj.weight]:
+                # Collect parameters that exist and have gradients
+                params_to_update = []
+                if self.embedding is not None:
+                    params_to_update.append(self.embedding.weight)
+                if self.output_proj is not None:
+                    params_to_update.append(self.output_proj.weight)
+                if self.prior_bank is not None:
+                    params_to_update.append(self.prior_bank.prior_mu)
+                    if self.prior_bank.learnable_sigma:
+                        params_to_update.append(self.prior_bank.log_prior_sigma)
+
+                for param in params_to_update:
                     if param.grad is not None:
                         grad_norm = param.grad.norm()
                         if grad_norm > self.config.grad_clip:
@@ -1793,7 +1811,7 @@ class PureFEPTransformer(nn.Module):
                         param.grad.zero_()
 
                 for layer in self.layers:
-                    if layer.output_proj.weight.grad is not None:
+                    if layer.output_proj is not None and layer.output_proj.weight.grad is not None:
                         grad_norm = layer.output_proj.weight.grad.norm()
                         if grad_norm > self.config.grad_clip:
                             layer.output_proj.weight.grad.mul_(self.config.grad_clip / grad_norm)

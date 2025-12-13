@@ -244,7 +244,7 @@ def evaluate(model, dataloader, device, vocab_size):
         total_tokens += targets.numel()
 
     avg_loss = total_loss / total_tokens
-    ppl = math.exp(min(avg_loss, 100))  # Clamp to avoid overflow
+    ppl = math.exp(min(avg_loss, 20))  # Clamp to avoid overflow (exp(20) ≈ 485M)
 
     return {'loss': avg_loss, 'perplexity': ppl}
 

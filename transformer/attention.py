@@ -129,6 +129,8 @@ def create_attention_mask(
 def compute_transport_operators(
     phi: torch.Tensor,         # (B, N, 3) gauge frames
     generators: torch.Tensor,  # (3, K, K) SO(3) generators
+    use_fast_exp: bool = False,  # Use Taylor approximation for small angles
+    exp_order: int = 4,          # Order of Taylor expansion (if use_fast_exp=True)
 ) -> dict:
     """
     Precompute transport operators for caching when phi is fixed.
@@ -139,6 +141,10 @@ def compute_transport_operators(
     Args:
         phi: Gauge frames (B, N, 3) in so(3)
         generators: SO(3) generators (3, K, K)
+        use_fast_exp: If True, use Taylor series approximation instead of torch.matrix_exp.
+                      Faster but only accurate for small angles (|φ| < 0.5).
+        exp_order: Order of Taylor expansion when use_fast_exp=True.
+                   Higher = more accurate but slower. Default 4 is good for |φ| < 0.3.
 
     Returns:
         dict with:
@@ -150,8 +156,14 @@ def compute_transport_operators(
     phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)  # (B, N, K, K)
 
     # Matrix exponentials (the expensive operations!)
-    exp_phi = torch.matrix_exp(phi_matrix)       # (B, N, K, K)
-    exp_neg_phi = torch.matrix_exp(-phi_matrix)  # (B, N, K, K)
+    if use_fast_exp:
+        # Taylor series: exp(A) ≈ I + A + A²/2! + A³/3! + ...
+        # Faster than torch.matrix_exp for small angles
+        exp_phi = _taylor_matrix_exp(phi_matrix, order=exp_order)
+        exp_neg_phi = _taylor_matrix_exp(-phi_matrix, order=exp_order)
+    else:
+        exp_phi = torch.matrix_exp(phi_matrix)       # (B, N, K, K)
+        exp_neg_phi = torch.matrix_exp(-phi_matrix)  # (B, N, K, K)
 
     # Full pairwise transport: Ω_ij = exp(φ_i) @ exp(-φ_j)
     Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)  # (B, N, N, K, K)
@@ -161,6 +173,37 @@ def compute_transport_operators(
         'exp_neg_phi': exp_neg_phi,
         'Omega': Omega,
     }
+
+
+def _taylor_matrix_exp(A: torch.Tensor, order: int = 4) -> torch.Tensor:
+    """
+    Compute matrix exponential using Taylor series approximation.
+
+    exp(A) ≈ I + A + A²/2! + A³/3! + ... + A^n/n!
+
+    This is faster than torch.matrix_exp for small matrices and small |A|,
+    but less accurate for large |A|. Use only when |A| < 0.5.
+
+    Args:
+        A: Input matrix (..., K, K)
+        order: Number of terms in Taylor series (default 4)
+
+    Returns:
+        exp(A): Matrix exponential approximation (..., K, K)
+    """
+    K = A.shape[-1]
+    device = A.device
+    dtype = A.dtype
+
+    # Start with identity
+    result = torch.eye(K, device=device, dtype=dtype).expand_as(A).clone()
+    term = result.clone()  # Current term A^n / n!
+
+    for n in range(1, order + 1):
+        term = torch.matmul(term, A) / n  # A^n / n! = (A^{n-1} / (n-1)!) @ A / n
+        result = result + term
+
+    return result
 
 
 # =============================================================================

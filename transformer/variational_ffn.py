@@ -87,6 +87,7 @@ def compute_vfe_gradients_gpu(
     lambda_belief: float = 1.0,  # Belief alignment weight
     kappa: float = 1.0,        # Temperature (for normalization)
     eps: float = 1e-6,
+    cached_transport: Optional[dict] = None,  # Precomputed transport operators
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute VFE gradients entirely on GPU using PyTorch.
@@ -110,6 +111,8 @@ def compute_vfe_gradients_gpu(
         lambda_belief: Weight for belief alignment term
         kappa: Temperature parameter
         eps: Numerical stability
+        cached_transport: Optional dict with precomputed 'Omega' from compute_transport_operators().
+                         When provided, avoids redundant matrix exponential computations.
 
     Returns:
         grad_mu: Gradient w.r.t. μ_q, shape (B, N, K)
@@ -166,14 +169,18 @@ def compute_vfe_gradients_gpu(
     #   ∂β_ij/∂μ_i = β_ij · [∂KL_ij/∂μ_i - Σ_k β_ik · ∂KL_ik/∂μ_i] / κ
 
     if is_diagonal:
-        # Compute transport operators (vectorized)
-        phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)  # (B, N, K, K)
-        exp_phi = torch.matrix_exp(phi_matrix)       # (B, N, K, K)
-        exp_neg_phi = torch.matrix_exp(-phi_matrix)  # (B, N, K, K)
+        # Get transport operators (use cached if available)
+        if cached_transport is not None and 'Omega' in cached_transport:
+            Omega = cached_transport['Omega']
+        else:
+            # Compute transport operators (vectorized)
+            phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)  # (B, N, K, K)
+            exp_phi = torch.matrix_exp(phi_matrix)       # (B, N, K, K)
+            exp_neg_phi = torch.matrix_exp(-phi_matrix)  # (B, N, K, K)
 
-        # Transport: Ω_ij = exp(φ_i) @ exp(-φ_j)
-        # For all pairs: (B, N, N, K, K)
-        Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
+            # Transport: Ω_ij = exp(φ_i) @ exp(-φ_j)
+            # For all pairs: (B, N, N, K, K)
+            Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
 
         # Transport all μ_j to frame i: μ_j_transported[i,j] = Ω_ij @ μ_j
         mu_j_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_q)  # (B, N, N, K)
@@ -216,9 +223,15 @@ def compute_vfe_gradients_gpu(
         trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_expanded))
 
         # Log-determinant terms
-        # For transported covariance (full matrix): use Cholesky
-        L_j_t = torch.linalg.cholesky(sigma_j_reg)  # (B, N, N, K, K)
-        logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N, N)
+        # For transported covariance (full matrix): use Cholesky with fallback
+        try:
+            L_j_t = torch.linalg.cholesky(sigma_j_reg)  # (B, N, N, K, K)
+            logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N, N)
+        except RuntimeError:
+            # Cholesky failed - use eigenvalue decomposition as fallback
+            # This is slower but more robust for ill-conditioned matrices
+            eigvals = torch.linalg.eigvalsh(sigma_j_reg)  # (B, N, N, K)
+            logdet_j_t = torch.sum(torch.log(eigvals.clamp(min=eps)), dim=-1)  # (B, N, N)
         # For source covariance (diagonal): log|diag(σ)| = sum(log(σ))
         logdet_i = torch.sum(torch.log(sigma_q.clamp(min=eps)), dim=-1)  # (B, N)
         logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
@@ -257,10 +270,14 @@ def compute_vfe_gradients_gpu(
         grad_sigma_align = torch.zeros_like(sigma_q)
     else:
         # Full covariance belief alignment
-        phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)
-        exp_phi = torch.matrix_exp(phi_matrix)
-        exp_neg_phi = torch.matrix_exp(-phi_matrix)
-        Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
+        # Get transport operators (use cached if available)
+        if cached_transport is not None and 'Omega' in cached_transport:
+            Omega = cached_transport['Omega']
+        else:
+            phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)
+            exp_phi = torch.matrix_exp(phi_matrix)
+            exp_neg_phi = torch.matrix_exp(-phi_matrix)
+            Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
 
         # Transport means
         mu_j_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_q)
@@ -289,13 +306,21 @@ def compute_vfe_gradients_gpu(
         sigma_i_expanded = sigma_q[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
         trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_expanded))
 
-        # Log-determinant terms using Cholesky
-        L_j_t = torch.linalg.cholesky(sigma_j_reg)  # (B, N, N, K, K)
-        logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N, N)
+        # Log-determinant terms using Cholesky with fallback
+        try:
+            L_j_t = torch.linalg.cholesky(sigma_j_reg)  # (B, N, N, K, K)
+            logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N, N)
+        except RuntimeError:
+            eigvals = torch.linalg.eigvalsh(sigma_j_reg)
+            logdet_j_t = torch.sum(torch.log(eigvals.clamp(min=eps)), dim=-1)
 
         sigma_i_reg = sigma_q + eps * torch.eye(K, device=device, dtype=dtype)
-        L_i = torch.linalg.cholesky(sigma_i_reg)  # (B, N, K, K)
-        logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N)
+        try:
+            L_i = torch.linalg.cholesky(sigma_i_reg)  # (B, N, K, K)
+            logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N)
+        except RuntimeError:
+            eigvals = torch.linalg.eigvalsh(sigma_i_reg)
+            logdet_i = torch.sum(torch.log(eigvals.clamp(min=eps)), dim=-1)
         logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
 
         # Full KL divergence
