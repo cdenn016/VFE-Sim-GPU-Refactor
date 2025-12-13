@@ -61,6 +61,7 @@ import numpy as np
 # Import existing VFE components
 from transformer.attention import (
     compute_attention_weights,
+    compute_attention_weights_local,
     aggregate_messages,
     compute_transport_operators,
 )
@@ -471,6 +472,28 @@ class PureFEPConfig:
     layer_spawn_threshold: float = 0.5   # VFE gradient threshold for spawning
     max_layers: int = 8                   # Maximum allowed layers
 
+    # =========================================================================
+    # PERFORMANCE OPTIMIZATIONS
+    # =========================================================================
+    # Transport caching: cache Ω_ij when gauge frames don't evolve
+    cache_transport: bool = True          # Cache transport operators across VFE steps
+
+    # Local attention: O(N×W) instead of O(N²)
+    use_local_attention: bool = False     # Use local window attention
+    attention_window: int = 16            # Window size for local attention
+
+    # VFE acceleration: momentum for faster convergence
+    use_vfe_momentum: bool = True         # Use momentum in VFE updates
+    vfe_momentum: float = 0.9             # Momentum coefficient
+
+    # Fast matrix exponential: Taylor approximation for small angles
+    use_fast_matrix_exp: bool = True      # Use Taylor approximation
+    matrix_exp_order: int = 4             # Order of Taylor expansion
+
+    # torch.compile: JIT compilation for kernel fusion
+    use_torch_compile: bool = False       # Enable torch.compile (experimental)
+    compile_mode: str = "reduce-overhead" # "default", "reduce-overhead", or "max-autotune"
+
     def __post_init__(self):
         """Validate configuration."""
         if self.embed_dim % 2 == 0:
@@ -607,6 +630,28 @@ class PureFEPLayer(nn.Module):
         self.total_vfe_steps = 0
         self.total_prior_updates = 0
 
+        # VFE momentum buffers (will be initialized on first use)
+        self._momentum_mu = None
+        self._momentum_sigma = None
+
+        # Optional torch.compile for kernel fusion (applied after __init__)
+        self._compiled = False
+
+    def maybe_compile(self):
+        """Optionally compile VFE step with torch.compile for faster execution."""
+        if self.config.use_torch_compile and not self._compiled:
+            try:
+                # Compile the core VFE step
+                self._vfe_step_compiled = torch.compile(
+                    self._vfe_step_core,
+                    mode=self.config.compile_mode,
+                    fullgraph=False,  # Allow graph breaks for flexibility
+                )
+                self._compiled = True
+            except Exception as e:
+                print(f"Warning: torch.compile failed: {e}")
+                self._compiled = True  # Don't retry
+
     def init_beliefs(
         self,
         x: torch.Tensor,  # (B, N, K) input embeddings
@@ -677,6 +722,8 @@ class PureFEPLayer(nn.Module):
         targets: Optional[torch.Tensor] = None,  # (B, N) target tokens
         mask: Optional[torch.Tensor] = None,     # (B, N, N) causal mask
         is_final_step: bool = False,             # Only create_graph on final step!
+        cached_transport: Optional[dict] = None, # Precomputed transport operators
+        step_idx: int = 0,                       # Current VFE step index (for momentum)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, float]]:
         """
         Single VFE gradient descent step on beliefs.
@@ -708,13 +755,25 @@ class PureFEPLayer(nn.Module):
         # ==================================================================
         # 1. Compute dynamic attention from KL divergences
         # ==================================================================
-        beta, kl_matrix = compute_attention_weights(
-            mu_q, sigma_q, phi, self.generators,
-            kappa=self.config.kappa,
-            mask=mask,
-            return_kl=True,
-            diagonal_covariance=True,
-        )
+        # Use local attention for O(N×W) instead of O(N²) if enabled
+        if self.config.use_local_attention:
+            beta, kl_matrix = compute_attention_weights_local(
+                mu_q, sigma_q, phi, self.generators,
+                kappa=self.config.kappa,
+                window=self.config.attention_window,
+                causal=(mask is not None),
+                diagonal_covariance=True,
+            )
+        else:
+            # Full O(N²) attention with optional transport caching
+            beta, kl_matrix = compute_attention_weights(
+                mu_q, sigma_q, phi, self.generators,
+                kappa=self.config.kappa,
+                mask=mask,
+                return_kl=True,
+                diagonal_covariance=True,
+                cached_transport=cached_transport,  # Use cached transport!
+            )
 
         # ==================================================================
         # 2. Compute FULL VFE loss INCLUDING observations
@@ -790,6 +849,7 @@ class PureFEPLayer(nn.Module):
                 lambda_belief=self.config.lambda_belief,
                 kappa=self.config.kappa,
                 eps=self.config.eps,
+                cached_transport=cached_transport,  # Use cached transport!
             )
 
             # Add observation gradient (CE) analytically
@@ -865,10 +925,29 @@ class PureFEPLayer(nn.Module):
             nat_grad_sigma = nat_grad_sigma * self.config.grad_clip / sigma_grad_norm
 
         # ==================================================================
-        # 6. Update beliefs (gradient DESCENT, so subtract)
+        # 6. Update beliefs (gradient DESCENT with optional momentum)
         # ==================================================================
-        mu_q_new = mu_q - self.config.mu_lr * nat_grad_mu
-        sigma_q_new = sigma_q - self.config.sigma_lr * nat_grad_sigma
+        if self.config.use_vfe_momentum:
+            # Initialize momentum buffers if needed
+            if self._momentum_mu is None or self._momentum_mu.shape != nat_grad_mu.shape:
+                self._momentum_mu = torch.zeros_like(nat_grad_mu)
+                self._momentum_sigma = torch.zeros_like(nat_grad_sigma)
+
+            # Reset momentum at start of each forward pass (step_idx == 0)
+            if step_idx == 0:
+                self._momentum_mu = torch.zeros_like(nat_grad_mu)
+                self._momentum_sigma = torch.zeros_like(nat_grad_sigma)
+
+            # Momentum update: v = β*v + g, then θ = θ - lr*v
+            self._momentum_mu = self.config.vfe_momentum * self._momentum_mu + nat_grad_mu
+            self._momentum_sigma = self.config.vfe_momentum * self._momentum_sigma + nat_grad_sigma
+
+            mu_q_new = mu_q - self.config.mu_lr * self._momentum_mu
+            sigma_q_new = sigma_q - self.config.sigma_lr * self._momentum_sigma
+        else:
+            # Standard gradient descent
+            mu_q_new = mu_q - self.config.mu_lr * nat_grad_mu
+            sigma_q_new = sigma_q - self.config.sigma_lr * nat_grad_sigma
 
         # Ensure sigma stays positive
         sigma_q_new = sigma_q_new.clamp(min=self.config.eps)
@@ -1203,6 +1282,20 @@ class PureFEPLayer(nn.Module):
                 self.generators,
             )
 
+        # ==================================================================
+        # PERFORMANCE: Cache transport operators if gauge frames don't evolve
+        # ==================================================================
+        # This is the BIGGEST optimization: avoid recomputing matrix_exp
+        # every VFE step when φ is constant.
+        if self.config.cache_transport and not self.config.gauge_evolution_enabled:
+            cached_transport = compute_transport_operators(
+                phi, self.generators,
+                use_fast_exp=self.config.use_fast_matrix_exp,
+                exp_order=self.config.matrix_exp_order,
+            )
+        else:
+            cached_transport = None
+
         # Run VFE gradient descent steps
         # CRITICAL: Only use create_graph=True on FINAL step to avoid
         # "backward through graph twice" errors from nested autograd.grad calls
@@ -1213,8 +1306,14 @@ class PureFEPLayer(nn.Module):
                 mu_q, sigma_q, mu_p, sigma_p, phi,
                 targets=targets, mask=mask,
                 is_final_step=is_final,
+                cached_transport=cached_transport,  # Pass cached transport!
+                step_idx=step,                      # For momentum reset
             )
             all_metrics.append(metrics)
+
+            # If gauge evolution is enabled, recompute transport after φ update
+            if self.config.gauge_evolution_enabled and cached_transport is not None:
+                cached_transport = compute_transport_operators(phi, self.generators)
 
         # Aggregate metrics
         final_metrics = {k: sum(m[k] for m in all_metrics) / len(all_metrics)

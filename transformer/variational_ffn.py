@@ -49,7 +49,7 @@ Date: November 2025
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 import numpy as np
 
 # Import validated gradient engine
@@ -87,6 +87,7 @@ def compute_vfe_gradients_gpu(
     lambda_belief: float = 1.0,  # Belief alignment weight
     kappa: float = 1.0,        # Temperature (for normalization)
     eps: float = 1e-6,
+    cached_transport: Optional[dict] = None,  # Precomputed transport operators
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute VFE gradients entirely on GPU using PyTorch.
@@ -166,14 +167,18 @@ def compute_vfe_gradients_gpu(
     #   ∂β_ij/∂μ_i = β_ij · [∂KL_ij/∂μ_i - Σ_k β_ik · ∂KL_ik/∂μ_i] / κ
 
     if is_diagonal:
-        # Compute transport operators (vectorized)
-        phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)  # (B, N, K, K)
-        exp_phi = torch.matrix_exp(phi_matrix)       # (B, N, K, K)
-        exp_neg_phi = torch.matrix_exp(-phi_matrix)  # (B, N, K, K)
+        # Use cached transport operators if available (BIG speedup!)
+        if cached_transport is not None and 'Omega' in cached_transport:
+            Omega = cached_transport['Omega']
+        else:
+            # Compute transport operators (vectorized)
+            phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)  # (B, N, K, K)
+            exp_phi = torch.matrix_exp(phi_matrix)       # (B, N, K, K)
+            exp_neg_phi = torch.matrix_exp(-phi_matrix)  # (B, N, K, K)
 
-        # Transport: Ω_ij = exp(φ_i) @ exp(-φ_j)
-        # For all pairs: (B, N, N, K, K)
-        Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
+            # Transport: Ω_ij = exp(φ_i) @ exp(-φ_j)
+            # For all pairs: (B, N, N, K, K)
+            Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
 
         # Transport all μ_j to frame i: μ_j_transported[i,j] = Ω_ij @ μ_j
         mu_j_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_q)  # (B, N, N, K)
@@ -257,10 +262,14 @@ def compute_vfe_gradients_gpu(
         grad_sigma_align = torch.zeros_like(sigma_q)
     else:
         # Full covariance belief alignment
-        phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)
-        exp_phi = torch.matrix_exp(phi_matrix)
-        exp_neg_phi = torch.matrix_exp(-phi_matrix)
-        Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
+        # Use cached transport operators if available (BIG speedup!)
+        if cached_transport is not None and 'Omega' in cached_transport:
+            Omega = cached_transport['Omega']
+        else:
+            phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)
+            exp_phi = torch.matrix_exp(phi_matrix)
+            exp_neg_phi = torch.matrix_exp(-phi_matrix)
+            Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
 
         # Transport means
         mu_j_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_q)
