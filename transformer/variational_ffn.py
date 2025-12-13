@@ -393,6 +393,146 @@ def compute_natural_gradient_gpu(
 
 
 # =============================================================================
+# SPD Retraction (PyTorch GPU version)
+# =============================================================================
+
+def retract_spd_torch(
+    Sigma: torch.Tensor,
+    delta_Sigma: torch.Tensor,
+    step_size: float = 1.0,
+    trust_region: float = 2.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Gauge-equivariant SPD retraction for covariance matrices (PyTorch GPU).
+
+    Uses the exponential map on the SPD manifold to ensure positive-definiteness
+    is preserved regardless of step size. This is critical for stability with
+    multiple FFN iterations.
+
+    Mathematical formulation:
+        Σ_new = Σ^{1/2} exp(τ · Σ^{-1/2} ΔΣ Σ^{-1/2}) Σ^{1/2}
+
+    This is gauge-equivariant: uses only eigendecomposition (coordinate-free).
+
+    Args:
+        Sigma: SPD matrices, shape (B, N, K, K) or (B*N, K, K)
+        delta_Sigma: Symmetric tangent vectors, same shape as Sigma
+        step_size: Learning rate τ (already applied to delta_Sigma typically)
+        trust_region: Max Frobenius norm of whitened tangent (prevents overshooting)
+        eps: Eigenvalue floor for numerical stability
+
+    Returns:
+        Sigma_new: SPD matrices, same shape as Sigma
+    """
+    # Handle different input shapes
+    original_shape = Sigma.shape
+    if Sigma.dim() == 4:
+        B, N, K, _ = Sigma.shape
+        Sigma = Sigma.reshape(B * N, K, K)
+        delta_Sigma = delta_Sigma.reshape(B * N, K, K)
+
+    batch_size, K, _ = Sigma.shape
+    device = Sigma.device
+    dtype = Sigma.dtype
+
+    # Symmetrize inputs (numerical safety)
+    Sigma = 0.5 * (Sigma + Sigma.transpose(-1, -2))
+    delta_Sigma = 0.5 * (delta_Sigma + delta_Sigma.transpose(-1, -2))
+
+    # Eigendecomposition of Σ: Σ = V diag(w) V^T
+    w, V = torch.linalg.eigh(Sigma)  # (batch, K), (batch, K, K)
+    w = w.clamp(min=eps)  # Ensure positive eigenvalues
+
+    sqrt_w = torch.sqrt(w)  # (batch, K)
+    inv_sqrt_w = 1.0 / sqrt_w  # (batch, K)
+
+    # Transform tangent to eigenbasis: A = V^T ΔΣ V
+    A = torch.einsum('bki,bij,bjl->bkl', V, delta_Sigma, V)  # (batch, K, K)
+
+    # Whitened tangent: B = Λ^{-1/2} A Λ^{-1/2}
+    # B[i,j] = A[i,j] / (sqrt_w[i] * sqrt_w[j])
+    B = A * inv_sqrt_w.unsqueeze(-1) * inv_sqrt_w.unsqueeze(-2)  # (batch, K, K)
+
+    # Trust region: clip Frobenius norm of whitened tangent
+    if trust_region is not None and trust_region > 0:
+        B_norm = torch.linalg.norm(B, ord='fro', dim=(-2, -1), keepdim=True)  # (batch, 1, 1)
+        scale = torch.clamp(trust_region / (B_norm + eps), max=1.0)
+        B = B * scale
+
+    # Exponentiate: exp(τB) via eigendecomposition (B is symmetric)
+    # exp(τB) = U diag(exp(τλ)) U^T
+    lam, U = torch.linalg.eigh(B)  # (batch, K), (batch, K, K)
+
+    # Clip exponent to prevent overflow: exp(50) ≈ 5e21
+    max_exp_arg = 50.0
+    exp_args = (step_size * lam).clamp(-max_exp_arg, max_exp_arg)
+    exp_lam = torch.exp(exp_args)  # (batch, K)
+
+    # exp(τB) = U diag(exp_lam) U^T
+    exp_B = torch.einsum('bik,bk,bjk->bij', U, exp_lam, U)  # (batch, K, K)
+
+    # Map back to original basis: Σ_new = V Λ^{1/2} exp(τB) Λ^{1/2} V^T
+    # First: M = Λ^{1/2} exp(τB) Λ^{1/2}
+    M = exp_B * sqrt_w.unsqueeze(-1) * sqrt_w.unsqueeze(-2)  # (batch, K, K)
+
+    # Then: Σ_new = V M V^T
+    Sigma_new = torch.einsum('bik,bkl,bjl->bij', V, M, V)  # (batch, K, K)
+
+    # Final symmetrization (numerical cleanup)
+    Sigma_new = 0.5 * (Sigma_new + Sigma_new.transpose(-1, -2))
+
+    # Restore original shape
+    if len(original_shape) == 4:
+        Sigma_new = Sigma_new.reshape(original_shape)
+
+    return Sigma_new
+
+
+def retract_spd_diagonal_torch(
+    sigma_diag: torch.Tensor,
+    delta_sigma: torch.Tensor,
+    step_size: float = 1.0,
+    trust_region: float = 5.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    SPD retraction for diagonal covariances (much simpler).
+
+    For diagonal matrices, the exponential map reduces to:
+        σ_new = σ * exp(τ * δσ / σ)
+
+    This ensures positivity: exp(x) > 0 for all x.
+
+    Args:
+        sigma_diag: Diagonal variances, shape (B, N, K)
+        delta_sigma: Tangent in diagonal form, shape (B, N, K)
+        step_size: Learning rate τ
+        trust_region: Max absolute value of exponent argument
+        eps: Floor for sigma values
+
+    Returns:
+        sigma_new: Positive diagonal variances, shape (B, N, K)
+    """
+    sigma_safe = sigma_diag.clamp(min=eps)
+
+    # Whitened tangent: δσ / σ (element-wise for diagonal)
+    whitened = delta_sigma / sigma_safe
+
+    # Trust region on whitened tangent
+    if trust_region is not None and trust_region > 0:
+        whitened = whitened.clamp(-trust_region, trust_region)
+
+    # Exponential update: σ_new = σ * exp(τ * whitened)
+    # Clip exponent to prevent overflow
+    exp_arg = (step_size * whitened).clamp(-50.0, 50.0)
+    sigma_new = sigma_safe * torch.exp(exp_arg)
+
+    # Floor for safety
+    return sigma_new.clamp(min=eps)
+
+
+# =============================================================================
 # Utilities
 # =============================================================================
 
@@ -895,19 +1035,28 @@ class VariationalFFNGradientEngine(nn.Module):
                 # Update: descent direction (negative gradient)
                 mu_current = mu_current - self.lr * nat_grad_mu
 
-                # Update sigma if enabled and not diagonal mode
-                # (diagonal sigma update is simpler)
+                # Update sigma using SPD-preserving retraction
+                # This is CRITICAL for stability with multiple iterations!
                 if self.update_sigma and is_diagonal_cov:
-                    # For diagonal, simple additive update with positivity constraint
-                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=1e-6)
+                    # Diagonal case: exponential retraction σ_new = σ * exp(τ * δσ / σ)
+                    # The natural gradient is the descent direction (negative)
+                    sigma_current = retract_spd_diagonal_torch(
+                        sigma_diag=sigma_current,
+                        delta_sigma=-nat_grad_sigma,  # Descent direction
+                        step_size=self.lr,
+                        trust_region=5.0,  # Limit step size in whitened space
+                        eps=1e-6,
+                    )
                 elif self.update_sigma and not is_diagonal_cov:
-                    # Full covariance update - use simple additive for now
-                    # (proper SPD retraction would be better but slower)
-                    sigma_current = sigma_current - self.lr * nat_grad_sigma
-                    # Ensure positive definiteness via eigenvalue clamping
-                    sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    # Add small regularization
-                    sigma_current = sigma_current + 1e-6 * torch.eye(K, device=device)
+                    # Full covariance: proper SPD manifold retraction
+                    # Σ_new = Σ^{1/2} exp(τ · Σ^{-1/2} ΔΣ Σ^{-1/2}) Σ^{1/2}
+                    sigma_current = retract_spd_torch(
+                        Sigma=sigma_current,
+                        delta_Sigma=-nat_grad_sigma,  # Descent direction
+                        step_size=self.lr,
+                        trust_region=2.0,  # Conservative for full covariance
+                        eps=1e-6,
+                    )
 
             # Return updated parameters (detached from computation graph)
             if self.update_sigma:
@@ -1253,12 +1402,23 @@ class VariationalFFNDynamic(nn.Module):
             mu_current = mu_current - self.lr * nat_grad_mu
 
             if self.update_sigma:
+                # Use SPD-preserving retraction for stability with multiple iterations
                 if is_diagonal:
-                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=eps)
+                    sigma_current = retract_spd_diagonal_torch(
+                        sigma_diag=sigma_current,
+                        delta_sigma=-nat_grad_sigma,
+                        step_size=self.lr,
+                        trust_region=5.0,
+                        eps=eps,
+                    )
                 else:
-                    sigma_current = sigma_current - self.lr * nat_grad_sigma
-                    sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    sigma_current = sigma_current + eps * torch.eye(K, device=device, dtype=dtype)
+                    sigma_current = retract_spd_torch(
+                        Sigma=sigma_current,
+                        delta_Sigma=-nat_grad_sigma,
+                        step_size=self.lr,
+                        trust_region=2.0,
+                        eps=eps,
+                    )
 
             # =================================================================
             # STEP 5: Optional M-step (prior update)
@@ -1606,12 +1766,23 @@ class VariationalFFNDynamicStable(nn.Module):
             mu_current = mu_current - self.lr * nat_grad_mu
 
             if self.update_sigma:
+                # Use SPD-preserving retraction for stability with multiple iterations
                 if is_diagonal:
-                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=eps)
+                    sigma_current = retract_spd_diagonal_torch(
+                        sigma_diag=sigma_current,
+                        delta_sigma=-nat_grad_sigma,
+                        step_size=self.lr,
+                        trust_region=5.0,
+                        eps=eps,
+                    )
                 else:
-                    sigma_current = sigma_current - self.lr * nat_grad_sigma
-                    sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    sigma_current = sigma_current + eps * torch.eye(K, device=device, dtype=dtype)
+                    sigma_current = retract_spd_torch(
+                        Sigma=sigma_current,
+                        delta_Sigma=-nat_grad_sigma,
+                        step_size=self.lr,
+                        trust_region=2.0,
+                        eps=eps,
+                    )
 
             # =================================================================
             # STEP 10: Optional M-step
