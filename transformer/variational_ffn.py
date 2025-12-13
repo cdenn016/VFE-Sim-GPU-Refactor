@@ -1042,17 +1042,16 @@ class VariationalFFNGradientEngine(nn.Module):
                         sigma_diag=sigma_current,
                         delta_sigma=-nat_grad_sigma,  # Descent direction
                         step_size=self.lr,
-                        trust_region=5.0,  # Limit step size in whitened space
+                        trust_region=0.2,  # Max 20% change per iteration
                         eps=1e-6,
                     )
                 elif self.update_sigma and not is_diagonal_cov:
-                    # Full covariance: proper SPD manifold retraction
-                    # Σ_new = Σ^{1/2} exp(τ · Σ^{-1/2} ΔΣ Σ^{-1/2}) Σ^{1/2}
+                    # Full covariance: SPD-preserving retraction with trust region
                     sigma_current = retract_spd_torch(
                         Sigma=sigma_current,
                         delta_Sigma=-nat_grad_sigma,  # Descent direction
                         step_size=self.lr,
-                        trust_region=2.0,  # Conservative for full covariance
+                        trust_region=0.1,  # Max 10% change per iteration
                         eps=1e-6,
                     )
 
@@ -1406,7 +1405,7 @@ class VariationalFFNDynamic(nn.Module):
                         sigma_diag=sigma_current,
                         delta_sigma=-nat_grad_sigma,
                         step_size=self.lr,
-                        trust_region=5.0,
+                        trust_region=0.2,  # Max 20% change per iteration
                         eps=eps,
                     )
                 else:
@@ -1414,7 +1413,7 @@ class VariationalFFNDynamic(nn.Module):
                         Sigma=sigma_current,
                         delta_Sigma=-nat_grad_sigma,
                         step_size=self.lr,
-                        trust_region=2.0,
+                        trust_region=0.1,  # Max 10% change per iteration
                         eps=eps,
                     )
 
@@ -1770,7 +1769,7 @@ class VariationalFFNDynamicStable(nn.Module):
                         sigma_diag=sigma_current,
                         delta_sigma=-nat_grad_sigma,
                         step_size=self.lr,
-                        trust_region=5.0,
+                        trust_region=0.2,  # Max 20% change per iteration
                         eps=eps,
                     )
                 else:
@@ -1778,7 +1777,7 @@ class VariationalFFNDynamicStable(nn.Module):
                         Sigma=sigma_current,
                         delta_Sigma=-nat_grad_sigma,
                         step_size=self.lr,
-                        trust_region=2.0,
+                        trust_region=0.1,  # Max 10% change per iteration
                         eps=eps,
                     )
 
