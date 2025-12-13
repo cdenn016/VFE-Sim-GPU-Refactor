@@ -267,6 +267,7 @@ class PureFEPLayer(nn.Module):
         phi: torch.Tensor,
         targets: Optional[torch.Tensor] = None,  # (B, N) target tokens
         mask: Optional[torch.Tensor] = None,     # (B, N, N) causal mask
+        is_final_step: bool = False,             # Only create_graph on final step!
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, float]]:
         """
         Single VFE gradient descent step on beliefs.
@@ -307,12 +308,14 @@ class PureFEPLayer(nn.Module):
         # 2. Compute VFE loss and gradients
         # ==================================================================
         if self.config.differentiable_vfe:
-            # DIFFERENTIABLE MODE: Compute VFE via autograd with create_graph=True
-            # This makes VFE dynamics visible to backprop!
+            # DIFFERENTIABLE MODE: Compute VFE via autograd
+            #
+            # CRITICAL FIX: Only use create_graph=True on FINAL step!
+            # Intermediate steps use create_graph=False to avoid nested graph
+            # accumulation that causes "backward through graph twice" errors.
             #
             # IMPORTANT: Only use KL terms here, NOT CE loss!
             # The CE gradient comes from backward() in train_step.
-            # This avoids double-use of the computation graph.
 
             # Self-coupling: α·KL(q||p)
             sigma_q_safe = sigma_q.clamp(min=self.config.eps)
@@ -332,13 +335,25 @@ class PureFEPLayer(nn.Module):
             vfe_loss = (self.config.alpha * kl_self +
                        self.config.lambda_belief * alignment)
 
-            # Compute gradient via autograd WITH create_graph=True
-            # This is the key: the gradient itself is in the computation graph!
-            grad_mu = torch.autograd.grad(
-                vfe_loss, mu_q,
-                create_graph=True,  # CRITICAL: keeps gradient in graph
-                retain_graph=True,
-            )[0]
+            # Compute gradient via autograd
+            # ONLY use create_graph=True on final step to maintain gradient flow
+            # while avoiding nested graph issues
+            if is_final_step and mu_q.requires_grad:
+                grad_mu = torch.autograd.grad(
+                    vfe_loss, mu_q,
+                    create_graph=True,   # Connect to output for backprop
+                    retain_graph=True,
+                )[0]
+            elif mu_q.requires_grad:
+                # Intermediate steps: compute gradient but don't keep in graph
+                grad_mu = torch.autograd.grad(
+                    vfe_loss, mu_q,
+                    create_graph=False,  # Don't nest graphs
+                    retain_graph=True,
+                )[0]
+            else:
+                # Fallback if mu_q doesn't require grad
+                grad_mu = torch.zeros_like(mu_q)
 
             # For sigma, use simpler approach (no second-order for now)
             grad_sigma = torch.zeros_like(sigma_q)
@@ -613,11 +628,15 @@ class PureFEPLayer(nn.Module):
             )
 
         # Run VFE gradient descent steps
+        # CRITICAL: Only use create_graph=True on FINAL step to avoid
+        # "backward through graph twice" errors from nested autograd.grad calls
         all_metrics = []
         for step in range(n_vfe_steps):
+            is_final = (step == n_vfe_steps - 1)
             mu_q, sigma_q, phi, metrics = self.vfe_step(
                 mu_q, sigma_q, mu_p, sigma_p, phi,
                 targets=targets, mask=mask,
+                is_final_step=is_final,
             )
             all_metrics.append(metrics)
 
