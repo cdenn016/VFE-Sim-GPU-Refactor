@@ -113,8 +113,6 @@ class GaugeTransformerBlock(nn.Module):
         # Sparse attention
         attention_pattern: str = 'full',
         attention_window: int = 64,
-        # Content-based attention (disable gauge transport)
-        use_gauge_transport: bool = True,
     ):
         """
         Initialize gauge transformer block.
@@ -171,7 +169,6 @@ class GaugeTransformerBlock(nn.Module):
             diagonal_covariance=diagonal_covariance,
             attention_pattern=attention_pattern,
             attention_window=attention_window,
-            use_gauge_transport=use_gauge_transport,
         )
 
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -522,8 +519,6 @@ class GaugeTransformerStack(nn.Module):
         # Sparse attention
         attention_pattern: str = 'full',
         attention_window: int = 64,
-        # Content-based attention (disable gauge transport)
-        use_gauge_transport: bool = True,
     ):
         """
         Initialize stack of transformer blocks.
@@ -613,8 +608,6 @@ class GaugeTransformerStack(nn.Module):
                 # Sparse attention
                 attention_pattern=attention_pattern,
                 attention_window=attention_window,
-                # Content-based attention
-                use_gauge_transport=use_gauge_transport,
             )
             for _ in range(n_layers)
         ])
