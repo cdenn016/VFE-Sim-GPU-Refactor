@@ -829,6 +829,7 @@ class PureFEPLayer(nn.Module):
             # This properly handles block-diagonal structure with per-irrep generators
             mu_agg, sigma_agg, beta_heads, kl_heads = self.irrep_attention(
                 mu_q, sigma_q, phi,
+                generators=self.generators,  # For device/dtype reference
                 mask=mask,
                 return_attention=True,
             )

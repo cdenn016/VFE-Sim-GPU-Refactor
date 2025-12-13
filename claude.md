@@ -923,64 +923,92 @@ kl_values = 0.5 * (tr(Σ_p⁻¹ Σ_q) + δμᵀ Σ_p⁻¹ δμ - K + log|Σ_p| -
 
 A new module `transformer/pure_fep_transformer.py` implements a transformer that learns **entirely through VFE minimization**, without backpropagation or external optimizers (Adam, SGD, etc.).
 
-### Key Principles
+### Core Dynamics
 
-1. **Belief Update (fast timescale - perception)**:
-   ```
-   μ_q ← μ_q - η_μ · ∂F/∂μ_q
-   ```
-   Where F = α·KL(q||p) + λ·Σ_j β_ij·KL(q_i||Ω_ij·q_j) + CE(output, target)
+Both beliefs and priors evolve via gradient descent on the Variational Free Energy:
 
-2. **Prior Update (slow timescale - learning)**:
-   ```
-   p_child ← Ω · q_parent    (hierarchical top-down flow)
-   ```
-   This IS the learning mechanism! Meta-agents at scale ζ+1 form beliefs, which flow down as priors to scale ζ. Credit assignment happens through the hierarchy - no backprop needed.
+```
+dq/dt = -η_q · Σ_q · ∂F/∂μ_q     (fast timescale - perception)
+dp/dt = -η_p · ∂F/∂μ_p           (slow timescale - learning)
+```
 
-3. **Two-Timescale Dynamics**:
-   - Fast: VFE gradient descent on beliefs (perception)
-   - Slow: Hierarchical prior updates (learning)
+Where the full VFE is:
 
-   The timescale separation emerges naturally from information accumulation: τ_ζ ∝ 10^ζ
+```
+F = α·KL(q||p)                              [Self-coupling]
+  + λ_β·Σ_ij β_ij·KL(q_i||Ω_ij·q_j)         [Belief alignment]
+  + λ_γ·Σ_ij γ_ij·KL(p_i||Ω_ij·p_j)         [Prior alignment]
+  + Σ_d decay^d·KL(p||h^d)                   [Ouroboros Tower]
+  + E[-log p(y|z)]                           [Observation likelihood]
+```
+
+### Prior Gradient Components
+
+The prior gradient `∂F/∂μ_p` includes three terms:
+
+1. **Self-coupling**: `α·(μ_p - μ_q)/σ_p²` — pulls priors toward beliefs
+2. **Prior alignment**: `λ_γ·Σ_j(μ_p - Ω_ij·μ_p[j])/σ_j` — inter-position consistency
+3. **Hyperprior (Ouroboros)**: `Σ_d decay^d·(μ_p - μ_h^d)/σ_h^d` — alignment with ancestors
+
+### Hierarchical Prior Flow
+
+Priors also receive **top-down flow** from parent layer beliefs:
+
+```
+p_child^(ζ) ← EMA(p_child^(ζ), Ω · q_parent^(ζ+1))
+```
+
+This is NOT gradient descent — it's direct assignment of parent beliefs (transported via gauge) as child priors.
 
 ### Architecture
 
 ```
 PureFEPTransformer
-├── Token Embeddings (learned - grounded to observations)
-├── Position Encoding (sinusoidal)
+├── PriorBank (unified embedding + output via token priors)
+├── GaugePositionEncoder (position in φ ∈ so(3))
 ├── PureFEPLayer[0] (scale ζ=0)
 │   ├── Beliefs q_i = N(μ_q, Σ_q)
-│   ├── Priors p_i = N(μ_p, Σ_p)  ← receives from parent layer
+│   ├── Priors p_i = N(μ_p, Σ_p)  ← from parent + gradient descent
+│   ├── Hyperpriors h_i^d         ← Ouroboros Tower (grandparent, great-grandparent, ...)
 │   └── Gauge frames φ_i
 ├── PureFEPLayer[1] (scale ζ=1)
-│   ├── Beliefs q_i
-│   ├── Priors p_i  ← receives from parent layer
-│   └── Gauge frames φ_i
-└── Output Projection (learned - grounded to observations)
+│   └── ...
+└── Dynamic layer spawning/merging based on VFE pressure
 ```
 
-### Information Flow
+### Advanced Features
 
-**Bottom-Up (perception)**:
-- Embeddings → Layer 0 beliefs → Layer 1 beliefs → ... → Output
-- Each layer runs VFE gradient descent to minimize local free energy
+| Feature | Config Flag | Description |
+|---------|-------------|-------------|
+| **Prior Coupling** | `prior_coupling_enabled` | λ_γ term for prior-prior KL alignment |
+| **Gradient Prior Updates** | `gradient_prior_updates` | dp/dt = -∂F/∂p instead of EMA |
+| **Ouroboros Tower** | `enable_ouroboros_tower` | Non-Markovian hyperpriors from ALL ancestors |
+| **Dynamic Layers** | `dynamic_layers_enabled` | Spawn/merge layers based on VFE gradient |
+| **Exact Covariance Transport** | `exact_covariance_transport` | Σ_t = Ω·Σ·Ω^T (vs approximate) |
+| **Multi-Irrep** | `use_multi_irrep` | Block-diagonal SO(3) generators |
 
-**Top-Down (learning)**:
-- Layer L beliefs → Layer L-1 priors → ... → Layer 0 priors
-- Higher layer beliefs become constraints (priors) for lower layers
-- This shapes what the network "knows" over time
+### Ouroboros Tower (Non-Markovian Memory)
 
-### Key Insight: No Backprop Needed
+Instead of just parent → child prior flow (Markovian), collect hyperpriors from ALL ancestors:
 
-In standard transformers:
-- Backprop computes ∂Loss/∂W across the entire computational graph
-- Credit assignment is non-local (gradients flow backwards)
+```
+p_i^(ζ)     ← q^(ζ+1)      parent (immediate prior)
+h_i^(ζ,0)   ← q^(ζ+2)      grandparent (1st hyperprior)
+h_i^(ζ,1)   ← q^(ζ+3)      great-grandparent (2nd hyperprior)
+```
 
-In pure FEP:
-- "Weights" are implicit in the prior structure
-- Learning = evolution of priors under VFE pressure
-- Credit assignment = hierarchical message passing (local!)
+Each hyperprior contributes with decaying weight: `F += Σ_d decay^d · KL(p || h^d)`
+
+This creates **long-range memory** where top-layer abstract beliefs directly influence bottom layers.
+
+### Dynamic Layer Emergence
+
+Layers can spawn or merge based on VFE pressure:
+
+- **SPAWN**: When VFE gradient norm > `layer_spawn_threshold`
+  - New layer inserted with priors interpolated from neighbors
+- **MERGE**: When adjacent layers have >0.99 belief similarity
+  - Redundant layers combined to reduce computation
 
 ### Usage
 
@@ -988,24 +1016,67 @@ In pure FEP:
 from transformer.pure_fep_transformer import PureFEPConfig, PureFEPTransformer
 
 config = PureFEPConfig(
-    embed_dim=128,
-    num_layers=2,
+    embed_dim=127,              # Must be ODD for SO(3) irreps
+    num_layers=3,
     vocab_size=10000,
-    mu_lr=0.1,       # Natural gradient allows larger steps
-    prior_lr=0.05,   # Slower timescale for learning
+    # Dynamics
+    mu_lr=0.1,                  # Belief learning rate
+    prior_lr=0.01,              # Prior learning rate (slower!)
+    # Advanced features
+    gradient_prior_updates=True,     # Full dp/dt = -∂F/∂p
+    prior_coupling_enabled=True,     # Prior alignment term
+    enable_ouroboros_tower=True,     # Non-Markovian hyperpriors
+    tower_max_depth=3,
+    tower_decay=0.3,
+    dynamic_layers_enabled=True,     # Adaptive architecture
+    max_layers=8,
 )
 
 model = PureFEPTransformer(config)
-metrics = model.train_step(input_ids, targets, n_vfe_steps=1)
+metrics = model.train_step(input_ids, targets, n_vfe_steps=20)
 ```
 
-### Minimal Backprop
+### Embedding Modes
 
-The ONLY backprop in pure FEP is for:
-1. `embedding.weight` - grounds system to discrete inputs
-2. `output_proj.weight` - grounds system to discrete outputs
+| Mode | Description |
+|------|-------------|
+| `prior_bank` | **Principled**: Token priors serve as both embedding AND output |
+| `learned` | Standard nn.Embedding (ad hoc but fast) |
+| `hybrid` | Learned embedding + PriorBank output |
 
-This is necessary because discrete tokens can't be handled by VFE gradient descent (which operates on continuous distributions). The embedding/output layers translate between discrete observations and continuous beliefs.
+### Output Modes
+
+| Mode | Description |
+|------|-------------|
+| `kl_to_prior` | **Principled**: p(y\|q) ∝ exp(-KL(q\|\|π_y)/τ) |
+| `linear` | Standard W·μ projection (ad hoc) |
+
+### Position Modes
+
+| Mode | Description |
+|------|-------------|
+| `gauge_frame` | **Principled**: Position encoded in φ ∈ so(3) — affects transport! |
+| `sinusoidal_mu` | Standard sinusoidal added to μ |
+
+### The Full Learning Loop
+
+```
+Forward Pass (perception):
+  1. Initialize beliefs from token priors: q ← π_token
+  2. For n_vfe_steps:
+     - Compute attention β_ij = softmax(-KL_ij/κ)
+     - Compute VFE gradients ∂F/∂μ_q, ∂F/∂σ_q
+     - Natural gradient descent: μ ← μ - η·Σ·∇F
+  3. Output via KL to token priors: logits = -KL(q||π_v)/τ
+
+Backward Pass (learning):
+  1. Collect hyperpriors from ancestors (Ouroboros Tower)
+  2. Top-down prior flow: p_child ← Ω·q_parent
+  3. Gradient-based prior update: p ← p - η_p·∂F/∂p
+  4. Check dynamic emergence conditions (spawn/merge layers)
+```
+
+This implements **predictive coding** in the FEP sense with proper two-timescale dynamics!
 
 ---
 
