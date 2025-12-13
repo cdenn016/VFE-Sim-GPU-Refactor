@@ -101,6 +101,13 @@ CONFIG = {
     'layer_spawn_threshold': 0.5,
     'max_layers': 8,
 
+    # Ouroboros Tower: Multi-level hyperpriors from ALL ancestors
+    # Creates non-Markovian memory by collecting priors from grandparent, great-grandparent, etc.
+    # Each hyperprior contributes with decaying weight: F += Σ_d decay^d · KL(p || h^d)
+    'enable_ouroboros_tower': False,
+    'tower_max_depth': 3,             # How many ancestor levels to collect
+    'tower_decay': 0.3,               # Weight decay per level (0.3^d)
+
     # Training
     'batch_size': 24,
     'epochs': 5,                  # More epochs for pure FEP learning
@@ -342,6 +349,10 @@ def main():
         dynamic_layers_enabled=config.get('dynamic_layers_enabled', False),
         layer_spawn_threshold=config.get('layer_spawn_threshold', 0.5),
         max_layers=config.get('max_layers', 8),
+        # Ouroboros Tower
+        enable_ouroboros_tower=config.get('enable_ouroboros_tower', False),
+        tower_max_depth=config.get('tower_max_depth', 3),
+        tower_decay=config.get('tower_decay', 0.3),
     )
 
     print(f"\nModel config:")
@@ -369,6 +380,8 @@ def main():
         print(f"  [ENABLED] Gradient prior updates: lr={model_config.prior_grad_lr}")
     if model_config.gauge_evolution_enabled:
         print(f"  [ENABLED] Gauge evolution: lr={model_config.gauge_lr}")
+    if model_config.enable_ouroboros_tower:
+        print(f"  [ENABLED] Ouroboros Tower: depth={model_config.tower_max_depth}, decay={model_config.tower_decay}")
 
     # Create model
     print(f"\nCreating model...")
