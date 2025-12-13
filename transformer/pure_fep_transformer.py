@@ -419,6 +419,9 @@ class PureFEPLayer(nn.Module):
         # ==================================================================
         # 3. Compute gradients (analytical mode for pure FEP)
         # ==================================================================
+        # Track whether gradients are enabled (needed for gauge evolution and metrics)
+        grad_enabled = torch.is_grad_enabled() and (not self.config.pure_fep_mode)
+
         if self.config.pure_fep_mode:
             # PURE FEP MODE: Use analytical gradients, no autograd graph
             grad_mu, grad_sigma = compute_vfe_gradients_gpu(
