@@ -103,6 +103,9 @@ class PureFEPConfig:
     eps: float = 1e-6
     grad_clip: float = 1.0
 
+    # VFE differentiability mode
+    differentiable_vfe: bool = True  # Compute VFE via autograd (for gradient flow)
+
     def __post_init__(self):
         """Validate configuration."""
         if self.embed_dim % 2 == 0:
@@ -238,8 +241,10 @@ class PureFEPLayer(nn.Module):
         B, N, K = x.shape
 
         # Beliefs initialized from input - KEEP GRADIENT CONNECTION!
-        # Use contiguous() instead of clone() to maintain gradient graph
-        mu_q = x + 0  # This preserves gradients while creating a new tensor
+        # Ensure mu_q requires grad for differentiable VFE
+        mu_q = x.clone()
+        if self.config.differentiable_vfe and not mu_q.requires_grad:
+            mu_q.requires_grad_(True)
         sigma_q = torch.ones(B, N, K, device=device) * 0.1  # Small initial variance
 
         # Priors from PERSISTENT learned state - broadcast across batch and sequence
@@ -299,51 +304,84 @@ class PureFEPLayer(nn.Module):
         )
 
         # ==================================================================
-        # 2. Compute VFE gradients (Euclidean)
+        # 2. Compute VFE loss and gradients
         # ==================================================================
-        grad_mu, grad_sigma = compute_vfe_gradients_gpu(
-            mu_q, sigma_q, mu_p, sigma_p,
-            beta, phi, self.generators,
-            alpha=self.config.alpha,
-            lambda_belief=self.config.lambda_belief,
-            kappa=self.config.kappa,
-            eps=self.config.eps,
-        )
+        if self.config.differentiable_vfe:
+            # DIFFERENTIABLE MODE: Compute VFE via autograd with create_graph=True
+            # This makes VFE dynamics visible to backprop!
 
-        # ==================================================================
-        # 3. Add observation gradient (cross-entropy)
-        # ==================================================================
-        if targets is not None:
-            # Compute logits from beliefs - KEEP GRADIENT CONNECTION!
-            logits = self.output_proj(mu_q)  # (B, N, vocab_size)
+            # Self-coupling: α·KL(q||p)
+            sigma_q_safe = sigma_q.clamp(min=self.config.eps)
+            sigma_p_safe = sigma_p.clamp(min=self.config.eps)
+            kl_self = 0.5 * (
+                sigma_q_safe / sigma_p_safe
+                + (mu_q - mu_p)**2 / sigma_p_safe
+                - 1.0
+                + torch.log(sigma_p_safe / sigma_q_safe)
+            ).sum(dim=-1).mean()
 
-            # Cross-entropy loss
-            ce_loss = F.cross_entropy(
-                logits.view(-1, self.config.vocab_size),
-                targets.view(-1),
-                reduction='mean'
+            # Alignment: λ·Σ β_ij·KL_ij (use precomputed)
+            alignment = (beta * kl_matrix).sum(dim=-1).mean()
+
+            # Observation term (cross-entropy)
+            if targets is not None:
+                logits = self.output_proj(mu_q)
+                ce_loss = F.cross_entropy(
+                    logits.view(-1, self.config.vocab_size),
+                    targets.view(-1),
+                    reduction='mean'
+                )
+            else:
+                ce_loss = torch.tensor(0.0, device=device)
+
+            # Total VFE
+            vfe_loss = (self.config.alpha * kl_self +
+                       self.config.lambda_belief * alignment +
+                       ce_loss)
+
+            # Compute gradient via autograd WITH create_graph=True
+            # This is the key: the gradient itself is in the computation graph!
+            grad_mu = torch.autograd.grad(
+                vfe_loss, mu_q,
+                create_graph=True,  # CRITICAL: keeps gradient in graph
+                retain_graph=True,
+            )[0]
+
+            # For sigma, use simpler approach (no second-order for now)
+            grad_sigma = torch.zeros_like(sigma_q)
+
+        else:
+            # ANALYTICAL MODE: Compute gradients manually (faster but not differentiable)
+            grad_mu, grad_sigma = compute_vfe_gradients_gpu(
+                mu_q, sigma_q, mu_p, sigma_p,
+                beta, phi, self.generators,
+                alpha=self.config.alpha,
+                lambda_belief=self.config.lambda_belief,
+                kappa=self.config.kappa,
+                eps=self.config.eps,
             )
 
-            # Gradient of CE w.r.t. mu_q (chain rule through output_proj)
-            # ∂CE/∂μ = W_out^T @ ∂CE/∂logits
-            # FIXED: Use mu_q directly (not detached) to maintain gradient flow!
-            # We create a temporary computation graph for the gradient computation
-            # but the actual update uses the connected mu_q
-            with torch.enable_grad():
-                mu_q_grad = mu_q.detach().requires_grad_(True)
-                logits_grad = self.output_proj(mu_q_grad)
-                ce_for_grad = F.cross_entropy(
-                    logits_grad.view(-1, self.config.vocab_size),
+            # Add observation gradient (cross-entropy)
+            if targets is not None:
+                logits = self.output_proj(mu_q)
+                ce_loss = F.cross_entropy(
+                    logits.view(-1, self.config.vocab_size),
                     targets.view(-1),
-                    reduction='sum'
+                    reduction='mean'
                 )
-                grad_mu_ce = torch.autograd.grad(ce_for_grad, mu_q_grad)[0]
-
-            # Add to VFE gradient (observation term in free energy)
-            # Scale by batch size to match 'mean' reduction
-            grad_mu = grad_mu + grad_mu_ce / (B * N)
-        else:
-            ce_loss = torch.tensor(0.0, device=device)
+                # Compute CE gradient
+                with torch.enable_grad():
+                    mu_q_grad = mu_q.detach().requires_grad_(True)
+                    logits_grad = self.output_proj(mu_q_grad)
+                    ce_for_grad = F.cross_entropy(
+                        logits_grad.view(-1, self.config.vocab_size),
+                        targets.view(-1),
+                        reduction='sum'
+                    )
+                    grad_mu_ce = torch.autograd.grad(ce_for_grad, mu_q_grad)[0]
+                grad_mu = grad_mu + grad_mu_ce / (B * N)
+            else:
+                ce_loss = torch.tensor(0.0, device=device)
 
         # ==================================================================
         # 4. Project to natural gradients (Fisher-Rao metric)
@@ -381,22 +419,24 @@ class PureFEPLayer(nn.Module):
         # ==================================================================
         # 8. Compute metrics
         # ==================================================================
-        # Self-coupling energy: α·KL(q||p)
-        kl_self = 0.5 * (
-            sigma_q / sigma_p.clamp(min=self.config.eps)
-            + (mu_q - mu_p)**2 / sigma_p.clamp(min=self.config.eps)
-            - 1.0
-            + torch.log(sigma_p.clamp(min=self.config.eps) / sigma_q.clamp(min=self.config.eps))
-        ).sum(dim=-1).mean()
+        if not self.config.differentiable_vfe:
+            # Recompute for metrics (only needed in analytical mode)
+            kl_self = 0.5 * (
+                sigma_q / sigma_p.clamp(min=self.config.eps)
+                + (mu_q - mu_p)**2 / sigma_p.clamp(min=self.config.eps)
+                - 1.0
+                + torch.log(sigma_p.clamp(min=self.config.eps) / sigma_q.clamp(min=self.config.eps))
+            ).sum(dim=-1).mean()
+            alignment = (beta * kl_matrix).sum(dim=-1).mean()
 
-        # Alignment energy: λ·Σ β_ij·KL_ij
-        alignment = (beta * kl_matrix).sum(dim=-1).mean()
-
+        # Detach for metrics to avoid graph issues
         metrics = {
-            'vfe_total': (self.config.alpha * kl_self + self.config.lambda_belief * alignment + ce_loss).item(),
-            'kl_self': kl_self.item(),
-            'alignment': alignment.item(),
-            'ce_loss': ce_loss.item(),
+            'vfe_total': (self.config.alpha * kl_self.detach() +
+                         self.config.lambda_belief * alignment.detach() +
+                         ce_loss.detach()).item(),
+            'kl_self': kl_self.detach().item(),
+            'alignment': alignment.detach().item(),
+            'ce_loss': ce_loss.detach().item() if isinstance(ce_loss, torch.Tensor) else ce_loss,
             'grad_norm_mu': grad_norm.item(),
             'grad_norm_sigma': sigma_grad_norm.item(),
         }
@@ -823,7 +863,7 @@ class PureFEPTransformer(nn.Module):
         # Backprop through VFE-processed outputs
         ce_loss.backward()
 
-        # Clip and apply gradients manually (no optimizer!)
+        # Apply gradients (manual SGD - pure FEP, no Adam)
         with torch.no_grad():
             # Update embedding and output projection
             for param in [self.embedding.weight, self.output_proj.weight]:
@@ -833,7 +873,7 @@ class PureFEPTransformer(nn.Module):
                     if grad_norm > self.config.grad_clip:
                         param.grad.mul_(self.config.grad_clip / grad_norm)
 
-                    # Manual SGD update with momentum-like effect
+                    # Manual SGD update
                     param.sub_(self.config.mu_lr * param.grad)
                     param.grad.zero_()
 
