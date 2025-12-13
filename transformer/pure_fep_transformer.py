@@ -64,6 +64,7 @@ from transformer.attention import (
     compute_attention_weights_local,
     aggregate_messages,
     compute_transport_operators,
+    IrrepMultiHeadAttention,
 )
 from transformer.variational_ffn import (
     compute_vfe_gradients_gpu,
@@ -440,6 +441,17 @@ class PureFEPConfig:
     # Covariance mode
     diagonal_covariance: bool = True  # Use diagonal Σ (faster, less memory)
 
+    # Exact covariance transport: compute Σ_transported = Ω @ Σ @ Ω^T exactly
+    # When False: approximate as Σ_transported ≈ Σ (faster, less memory)
+    # When True: exact gauge-equivariant transport (for theoretical validation)
+    # WARNING: exact mode uses O(N²×K²) memory for full covariance!
+    exact_covariance_transport: bool = False
+
+    # Use multi-irrep block structure from IrrepMultiHeadAttention
+    # When True: uses block-diagonal generators with proper per-irrep structure
+    # When False: uses single spin-ℓ irrep where ℓ = (K-1)/2
+    use_multi_irrep: bool = False
+
     # Numerical stability
     eps: float = 1e-6
     grad_clip: float = 1.0
@@ -600,8 +612,30 @@ class PureFEPLayer(nn.Module):
         self.prior_bank = prior_bank
 
         # SO(3) generators for gauge transport
-        gen_np = generate_so3_generators(embed_dim)
-        self.register_buffer('generators', torch.from_numpy(gen_np).float())
+        # Two modes: single irrep (simpler) or multi-irrep (proper block structure)
+        if config.use_multi_irrep:
+            # MULTI-IRREP MODE: Use IrrepMultiHeadAttention with block-diagonal structure
+            self.irrep_attention = IrrepMultiHeadAttention(
+                embed_dim=embed_dim,
+                irrep_spec=config.irrep_spec,
+                kappa_beta=config.kappa,
+                epsilon=config.eps,
+                aggregate_mode='mean_only',
+                diagonal_covariance=config.diagonal_covariance,
+                attention_pattern='local' if config.use_local_attention else 'full',
+                attention_window=config.attention_window,
+            )
+            # Get generators from the attention module (block-diagonal structure)
+            # IrrepMultiHeadAttention stores per-head generators, we need full block-diag
+            # For now, register single-irrep as fallback for VFE gradients
+            # (IrrepMultiHeadAttention handles its own per-head generators internally)
+            gen_np = generate_so3_generators(embed_dim)
+            self.register_buffer('generators', torch.from_numpy(gen_np).float())
+        else:
+            # SINGLE IRREP MODE: Use single spin-ℓ representation
+            self.irrep_attention = None
+            gen_np = generate_so3_generators(embed_dim)
+            self.register_buffer('generators', torch.from_numpy(gen_np).float())
 
         # Output projection - maps beliefs to logits for observation likelihood
         # Only used when output_mode='linear' or as fallback
@@ -761,8 +795,19 @@ class PureFEPLayer(nn.Module):
         # ==================================================================
         # 1. Compute dynamic attention from KL divergences
         # ==================================================================
-        # Use local attention for O(N×W) instead of O(N²) if enabled
-        if self.config.use_local_attention:
+        if self.config.use_multi_irrep and self.irrep_attention is not None:
+            # MULTI-IRREP MODE: Use IrrepMultiHeadAttention
+            # This properly handles block-diagonal structure with per-irrep generators
+            mu_agg, sigma_agg, beta_heads, kl_heads = self.irrep_attention(
+                mu_q, sigma_q, phi,
+                mask=mask,
+                return_attention=True,
+            )
+            # Average attention across heads for metrics/VFE computation
+            beta = beta_heads.mean(dim=1)  # (B, N, N)
+            kl_matrix = kl_heads.mean(dim=1)  # (B, N, N)
+        elif self.config.use_local_attention:
+            # Use local attention for O(N×W) instead of O(N²)
             beta, kl_matrix = compute_attention_weights_local(
                 mu_q, sigma_q, phi, self.generators,
                 kappa=self.config.kappa,
@@ -771,7 +816,7 @@ class PureFEPLayer(nn.Module):
                 diagonal_covariance=True,
             )
         else:
-            # Full O(N²) attention with optional transport caching
+            # SINGLE IRREP: Full O(N²) attention with optional transport caching
             beta, kl_matrix = compute_attention_weights(
                 mu_q, sigma_q, phi, self.generators,
                 kappa=self.config.kappa,
@@ -1059,9 +1104,29 @@ class PureFEPLayer(nn.Module):
         # μ_p_new = Ω @ μ_parent
         parent_mu_transported = torch.einsum('bnij,bnj->bni', Omega, parent_mu_q)
 
-        # For diagonal covariance: variance doesn't change under rotation
-        # (This is an approximation - full transport would rotate the covariance)
-        parent_sigma_transported = parent_sigma_q.clone()
+        # Transport covariance: Σ_transported = Ω @ Σ @ Ω^T
+        if self.config.exact_covariance_transport:
+            # EXACT: Full gauge-equivariant transport
+            if self.config.diagonal_covariance:
+                # Diagonal input → Full output → Extract diagonal
+                # Σ_transported = Ω @ diag(σ) @ Ω^T
+                sigma_diag = torch.diag_embed(parent_sigma_q)  # (B, N, K, K)
+                sigma_transported_full = torch.einsum(
+                    'bnij,bnjk,bnlk->bnil', Omega, sigma_diag, Omega
+                )  # (B, N, K, K)
+                # Extract diagonal for storage (full transport still computed)
+                parent_sigma_transported = torch.diagonal(
+                    sigma_transported_full, dim1=-2, dim2=-1
+                )  # (B, N, K)
+            else:
+                # Full covariance: Σ_transported = Ω @ Σ @ Ω^T
+                parent_sigma_transported = torch.einsum(
+                    'bnij,bnjk,bnlk->bnil', Omega, parent_sigma_q, Omega
+                )
+        else:
+            # APPROXIMATE: Assume covariance is isotropic (doesn't change under rotation)
+            # This is faster but not gauge-equivariant
+            parent_sigma_transported = parent_sigma_q.clone()
 
         # Soft update: blend old prior with new (for stability)
         blend_factor = self.config.prior_lr
@@ -1107,25 +1172,44 @@ class PureFEPLayer(nn.Module):
         transport_cache = compute_transport_operators(phi, self.generators)
         Omega = transport_cache['Omega']  # (B, N, N, K, K)
 
-        # For diagonal covariance, we approximate transport as identity for variance
-        # and only transport the mean
-        # Transported prior: Ω_ij · p_j
+        # Transported prior mean: Ω_ij · μ_j
         mu_p_transported = torch.einsum('bnmij,bmj->bnmi', Omega, mu_p)  # (B, N, N, K)
 
-        # KL divergence: KL(p_i || Ω_ij·p_j)
-        # For diagonal Gaussians: KL = 0.5 * (σ_i/σ_j + (μ_i-μ_j)²/σ_j - 1 + log(σ_j/σ_i))
         sigma_p_safe = sigma_p.clamp(min=self.config.eps)
 
-        # Expand for pairwise computation
+        # Transport covariance if exact mode enabled
+        if self.config.exact_covariance_transport:
+            # EXACT: Σ_transported = Ω @ diag(σ_j) @ Ω^T
+            if self.config.diagonal_covariance:
+                # Expand sigma to (B, N, K, K) diagonal matrices
+                sigma_j_diag = torch.diag_embed(sigma_p_safe)  # (B, N, K, K)
+                # Transport: Ω_ij @ Σ_j @ Ω_ij^T -> (B, N, N, K, K)
+                sigma_j_transported_full = torch.einsum(
+                    'bnmij,bmjk,bnmlk->bnmil', Omega, sigma_j_diag, Omega
+                )  # (B, N, N, K, K)
+                # For KL computation with diagonal storage, extract diagonal
+                sigma_j_transported = torch.diagonal(
+                    sigma_j_transported_full, dim1=-2, dim2=-1
+                )  # (B, N, N, K)
+            else:
+                # Full covariance transport
+                sigma_j_transported = torch.einsum(
+                    'bnmij,bmjk,bnmlk->bnmil', Omega, sigma_p_safe, Omega
+                )
+        else:
+            # APPROXIMATE: Covariance unchanged under transport (isotropic assumption)
+            sigma_j_transported = sigma_p_safe.unsqueeze(1).expand(-1, N, -1, -1)  # (B, N, N, K)
+
+        # KL divergence: KL(p_i || Ω_ij·p_j)
+        # For diagonal Gaussians: KL = 0.5 * (σ_i/σ_j_t + (μ_i-μ_j_t)²/σ_j_t - 1 + log(σ_j_t/σ_i))
         mu_i = mu_p.unsqueeze(2)  # (B, N, 1, K)
         sigma_i = sigma_p_safe.unsqueeze(2)  # (B, N, 1, K)
-        sigma_j = sigma_p_safe.unsqueeze(1)  # (B, 1, N, K)
 
         kl_prior = 0.5 * (
-            sigma_i / sigma_j
-            + (mu_i - mu_p_transported)**2 / sigma_j
+            sigma_i / sigma_j_transported.clamp(min=self.config.eps)
+            + (mu_i - mu_p_transported)**2 / sigma_j_transported.clamp(min=self.config.eps)
             - 1.0
-            + torch.log(sigma_j / sigma_i)
+            + torch.log(sigma_j_transported.clamp(min=self.config.eps) / sigma_i)
         ).sum(dim=-1)  # (B, N, N)
 
         # Apply causal mask if provided
