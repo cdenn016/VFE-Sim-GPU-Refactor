@@ -67,6 +67,8 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 from dataclasses import dataclass
 
+from math_utils.batched_ops import symmetrize, ensure_spd
+
 
 # =============================================================================
 # Phase Space State Container
@@ -487,10 +489,7 @@ class InertiaOfBeliefMass(nn.Module):
 # =============================================================================
 # Geometric Operations (PyTorch)
 # =============================================================================
-
-def symmetrize(M: torch.Tensor) -> torch.Tensor:
-    """Symmetrize a matrix: sym(M) = (M + Mᵀ)/2"""
-    return 0.5 * (M + M.transpose(-1, -2))
+# symmetrize and ensure_spd imported from math_utils.batched_ops
 
 
 def retract_to_principal_ball_torch(
@@ -552,34 +551,6 @@ def retract_to_principal_ball_torch(
         raise ValueError(f"Unknown mode: {mode}")
 
     return phi_new
-
-
-def ensure_spd(Sigma: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """
-    Project matrix to SPD cone via eigenvalue clipping.
-
-    Σ_spd = V max(Λ, ε) Vᵀ
-    """
-    orig_dtype = Sigma.dtype
-    K = Sigma.shape[-1]
-    device = Sigma.device
-
-    # Add diagonal regularization before eigendecomposition
-    Sigma_reg = Sigma + eps * torch.eye(K, device=device, dtype=Sigma.dtype).unsqueeze(0).unsqueeze(0)
-    Sigma_reg = 0.5 * (Sigma_reg + Sigma_reg.transpose(-1, -2))  # Ensure symmetric
-
-    # Eigendecomposition (force FP32 for numerical stability under AMP)
-    try:
-        eigenvalues, eigenvectors = torch.linalg.eigh(Sigma_reg.float())
-        # Clip eigenvalues to be positive
-        eigenvalues_clipped = torch.clamp(eigenvalues, min=eps)
-        # Reconstruct and cast back to original dtype
-        Sigma_spd = (eigenvectors @ torch.diag_embed(eigenvalues_clipped) @ eigenvectors.transpose(-1, -2)).to(orig_dtype)
-    except RuntimeError:
-        # Fallback to regularized identity
-        Sigma_spd = eps * torch.eye(K, device=device, dtype=orig_dtype).unsqueeze(0).unsqueeze(0).expand_as(Sigma).clone()
-
-    return symmetrize(Sigma_spd)
 
 
 # =============================================================================
