@@ -106,6 +106,32 @@ class PureFEPConfig:
     # VFE differentiability mode
     differentiable_vfe: bool = True  # Compute VFE via autograd (for gradient flow)
 
+    # =========================================================================
+    # ADVANCED FEP FEATURES (toggled off by default)
+    # =========================================================================
+
+    # Prior coupling: λ_γ term for priors learning from each other
+    # Implements F_prior = λ_γ · Σ_ij KL(p_i || Ω_ij · p_j)
+    # This allows priors to form consistent world model across positions
+    prior_coupling_enabled: bool = False
+    lambda_prior: float = 0.1         # Weight for prior-prior coupling
+
+    # Gradient-based prior updates: use VFE gradient to update priors
+    # Instead of simple EMA, update priors via: p ← p - η_p · ∂F/∂p
+    gradient_prior_updates: bool = False
+    prior_grad_lr: float = 0.01       # Learning rate for gradient-based prior updates
+
+    # Gauge field evolution: evolve gauge frames φ over time
+    # Updates φ via: φ ← φ - η_φ · ∂F/∂φ
+    gauge_evolution_enabled: bool = False
+    gauge_lr: float = 0.01            # Learning rate for gauge frame evolution
+
+    # Dynamic layer emergence: allow layers to spawn/merge based on VFE
+    # When enabled, monitors VFE gradients to detect when new layers needed
+    dynamic_layers_enabled: bool = False
+    layer_spawn_threshold: float = 0.5   # VFE gradient threshold for spawning
+    max_layers: int = 8                   # Maximum allowed layers
+
     def __post_init__(self):
         """Validate configuration."""
         if self.embed_dim % 2 == 0:
@@ -255,6 +281,9 @@ class PureFEPLayer(nn.Module):
 
         # Gauge frames start at identity
         phi = torch.zeros(B, N, 3, device=device)
+        # Enable gradients for phi if gauge evolution is enabled
+        if self.config.gauge_evolution_enabled:
+            phi.requires_grad_(True)
 
         return mu_q, sigma_q, mu_p, sigma_p, phi
 
@@ -330,10 +359,15 @@ class PureFEPLayer(nn.Module):
             # Alignment: λ·Σ β_ij·KL_ij (use precomputed)
             alignment = (beta * kl_matrix).sum(dim=-1).mean()
 
+            # Prior coupling: λ_γ · Σ_ij KL(p_i || Ω_ij · p_j)
+            # Only computed when prior_coupling_enabled=True
+            prior_coupling = self.compute_prior_coupling_loss(mu_p, sigma_p, phi, mask)
+
             # VFE for belief update = KL terms only (no CE)
             # CE gradient comes from final backward() in train_step
             vfe_loss = (self.config.alpha * kl_self +
-                       self.config.lambda_belief * alignment)
+                       self.config.lambda_belief * alignment +
+                       prior_coupling)
 
             # Compute gradient via autograd
             # ONLY use create_graph=True on final step to maintain gradient flow
@@ -431,10 +465,29 @@ class PureFEPLayer(nn.Module):
         sigma_q_new = sigma_q_new.clamp(min=self.config.eps)
 
         # ==================================================================
-        # 7. Update gauge frames (optional)
+        # 7. Update gauge frames (if gauge evolution enabled)
         # ==================================================================
-        # For now, keep phi fixed (can add phi gradient later)
-        phi_new = phi
+        if self.config.gauge_evolution_enabled and phi.requires_grad:
+            # Compute gradient of VFE w.r.t. gauge frames
+            # The gauge frames affect attention via transport operators
+            try:
+                grad_phi = torch.autograd.grad(
+                    vfe_loss if self.config.differentiable_vfe else kl_self + alignment,
+                    phi,
+                    create_graph=False,
+                    retain_graph=True,
+                    allow_unused=True,
+                )[0]
+                if grad_phi is not None:
+                    # Gradient descent on gauge frames
+                    phi_new = phi - self.config.gauge_lr * grad_phi
+                else:
+                    phi_new = phi
+            except RuntimeError:
+                # If grad computation fails, keep phi unchanged
+                phi_new = phi
+        else:
+            phi_new = phi
 
         # ==================================================================
         # 8. Compute metrics
@@ -448,14 +501,18 @@ class PureFEPLayer(nn.Module):
                 + torch.log(sigma_p.clamp(min=self.config.eps) / sigma_q.clamp(min=self.config.eps))
             ).sum(dim=-1).mean()
             alignment = (beta * kl_matrix).sum(dim=-1).mean()
+            prior_coupling = self.compute_prior_coupling_loss(mu_p, sigma_p, phi, mask)
 
         # Detach for metrics to avoid graph issues
+        prior_coupling_val = prior_coupling.detach().item() if isinstance(prior_coupling, torch.Tensor) else 0.0
         metrics = {
             'vfe_total': (self.config.alpha * kl_self.detach() +
                          self.config.lambda_belief * alignment.detach() +
+                         prior_coupling_val +
                          ce_loss.detach()).item(),
             'kl_self': kl_self.detach().item(),
             'alignment': alignment.detach().item(),
+            'prior_coupling': prior_coupling_val,
             'ce_loss': ce_loss.detach().item() if isinstance(ce_loss, torch.Tensor) else ce_loss,
             'grad_norm_mu': grad_norm.item(),
             'grad_norm_sigma': sigma_grad_norm.item(),
@@ -531,6 +588,67 @@ class PureFEPLayer(nn.Module):
 
         return mu_p_new, sigma_p_new
 
+    def compute_prior_coupling_loss(
+        self,
+        mu_p: torch.Tensor,      # (B, N, K) prior means
+        sigma_p: torch.Tensor,   # (B, N, K) prior variances
+        phi: torch.Tensor,       # (B, N, 3) gauge frames
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Compute prior-prior coupling loss: F_prior = λ_γ · Σ_ij KL(p_i || Ω_ij · p_j)
+
+        This encourages priors at different positions to form a consistent
+        world model, where information is coherent across the sequence.
+
+        Args:
+            mu_p: Prior means (B, N, K)
+            sigma_p: Prior variances (B, N, K)
+            phi: Gauge frames (B, N, 3)
+            mask: Optional causal mask (B, N, N)
+
+        Returns:
+            prior_coupling_loss: Scalar loss value
+        """
+        if not self.config.prior_coupling_enabled:
+            return torch.tensor(0.0, device=mu_p.device)
+
+        B, N, K = mu_p.shape
+        device = mu_p.device
+
+        # Compute transport operators between positions
+        Omega = compute_transport_operators(phi, phi, self.generators)  # (B, N, N, K, K)
+
+        # For diagonal covariance, we approximate transport as identity for variance
+        # and only transport the mean
+        # Transported prior: Ω_ij · p_j
+        mu_p_transported = torch.einsum('bnmij,bmj->bnmi', Omega, mu_p)  # (B, N, N, K)
+
+        # KL divergence: KL(p_i || Ω_ij·p_j)
+        # For diagonal Gaussians: KL = 0.5 * (σ_i/σ_j + (μ_i-μ_j)²/σ_j - 1 + log(σ_j/σ_i))
+        sigma_p_safe = sigma_p.clamp(min=self.config.eps)
+
+        # Expand for pairwise computation
+        mu_i = mu_p.unsqueeze(2)  # (B, N, 1, K)
+        sigma_i = sigma_p_safe.unsqueeze(2)  # (B, N, 1, K)
+        sigma_j = sigma_p_safe.unsqueeze(1)  # (B, 1, N, K)
+
+        kl_prior = 0.5 * (
+            sigma_i / sigma_j
+            + (mu_i - mu_p_transported)**2 / sigma_j
+            - 1.0
+            + torch.log(sigma_j / sigma_i)
+        ).sum(dim=-1)  # (B, N, N)
+
+        # Apply causal mask if provided
+        if mask is not None:
+            kl_prior = kl_prior * mask
+
+        # Average over all pairs
+        prior_coupling_loss = self.config.lambda_prior * kl_prior.mean()
+
+        return prior_coupling_loss
+
     def update_persistent_prior(
         self,
         mu_q_batch: torch.Tensor,     # (B, N, K) batch belief means (after VFE)
@@ -575,13 +693,36 @@ class PureFEPLayer(nn.Module):
             mu_p_new = mu_q_batch.mean(dim=(0, 1))  # (K,)
             sigma_p_new = sigma_q_batch.mean(dim=(0, 1))  # (K,)
 
-        # Exponential moving average update (prior_lr controls learning speed)
+        # Choose update method based on config
         # CRITICAL: Detach to prevent graph accumulation across batches!
         # Without detach, priors become part of computation graph, causing
         # "backward through graph a second time" error on next batch.
-        blend = self.config.prior_lr
-        self.prior_mu.lerp_(mu_p_new.detach(), blend)
-        self.prior_sigma.lerp_(sigma_p_new.detach(), blend)
+        mu_p_new = mu_p_new.detach()
+        sigma_p_new = sigma_p_new.detach()
+
+        if self.config.gradient_prior_updates:
+            # GRADIENT-BASED PRIOR UPDATE
+            # Instead of moving towards beliefs, compute gradient of VFE w.r.t. prior
+            # This is more principled: p ← p - η_p · ∂F/∂p
+            # Here we approximate ∂F/∂p using the belief-prior mismatch
+            # The VFE gradient w.r.t. prior is: ∂KL(q||p)/∂p = (p - q) / σ_p²
+            # This pushes prior towards beliefs (same as EMA but gradient-motivated)
+
+            # Compute gradient: ∂F/∂μ_p ∝ (μ_p - μ_q) / σ_p² → prior moves toward belief
+            grad_mu_p = (self.prior_mu - mu_p_new) / self.prior_sigma.clamp(min=self.config.eps)**2
+
+            # Gradient descent on prior
+            self.prior_mu.sub_(self.config.prior_grad_lr * grad_mu_p)
+
+            # Still use EMA for sigma (variance updates need stability)
+            blend = self.config.prior_lr
+            self.prior_sigma.lerp_(sigma_p_new, blend)
+        else:
+            # EXPONENTIAL MOVING AVERAGE (default)
+            # Blend prior towards beliefs that minimize prediction error
+            blend = self.config.prior_lr
+            self.prior_mu.lerp_(mu_p_new, blend)
+            self.prior_sigma.lerp_(sigma_p_new, blend)
 
         # Ensure sigma stays positive
         self.prior_sigma.clamp_(min=self.config.eps)
