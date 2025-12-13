@@ -435,23 +435,16 @@ def retract_spd_torch(
     Sigma = 0.5 * (Sigma + Sigma.transpose(-1, -2))
     delta_Sigma = 0.5 * (delta_Sigma + delta_Sigma.transpose(-1, -2))
 
-    # Eigendecomposition of Σ for whitening
-    try:
-        w, V = torch.linalg.eigh(Sigma)  # Σ = V diag(w) V^T
-    except RuntimeError:
-        # Fallback: add regularization and retry
-        Sigma_reg = Sigma + eps * torch.eye(K, device=device, dtype=dtype)
-        w, V = torch.linalg.eigh(Sigma_reg)
+    # Use DIAGONAL whitening (robust to ill-conditioning, avoids eigh)
+    # This approximates full whitening B = Σ^{-1/2} ΔΣ Σ^{-1/2}
+    # For diagonal-dominant covariances (common case), this is accurate
+    # Key insight: whitening normalizes out the σ² scaling in natural gradients
+    diag_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1)  # (batch, K)
+    diag_sigma = diag_sigma.clamp(min=eps)
+    inv_sqrt_diag = 1.0 / torch.sqrt(diag_sigma)  # (batch, K)
 
-    w = w.clamp(min=eps)  # Ensure positive eigenvalues
-    sqrt_w = torch.sqrt(w)  # (batch, K)
-    inv_sqrt_w = 1.0 / sqrt_w  # (batch, K)
-
-    # Transform tangent to eigenbasis: A = V^T ΔΣ V
-    A = torch.einsum('bik,bkl,bjl->bij', V, delta_Sigma, V)  # (batch, K, K)
-
-    # Whitened tangent: B = Λ^{-1/2} A Λ^{-1/2}
-    B = (inv_sqrt_w.unsqueeze(-1) * A) * inv_sqrt_w.unsqueeze(-2)  # (batch, K, K)
+    # Diagonal-whitened tangent: B ≈ D^{-1/2} ΔΣ D^{-1/2} where D = diag(Σ)
+    B = (inv_sqrt_diag.unsqueeze(-1) * delta_Sigma) * inv_sqrt_diag.unsqueeze(-2)  # (batch, K, K)
 
     # Trust region on WHITENED Frobenius norm (this is the key fix!)
     if trust_region is not None and trust_region > 0:
@@ -459,17 +452,12 @@ def retract_spd_torch(
         scale = torch.clamp(trust_region / (B_norm + eps), max=1.0)
         B = B * scale
 
-    # Exponentiate symmetric B: exp(τ B) = U diag(exp(τ λ)) U^T
-    evals, U = torch.linalg.eigh(B)
+    # Un-whiten to get scaled delta: ΔΣ_scaled = D^{1/2} B D^{1/2}
+    sqrt_diag = torch.sqrt(diag_sigma)  # (batch, K)
+    delta_scaled = (sqrt_diag.unsqueeze(-1) * B) * sqrt_diag.unsqueeze(-2)  # (batch, K, K)
 
-    # Clip exponent to prevent overflow: exp(50) ≈ 5e21
-    exp_args = (step_size * evals).clamp(-50.0, 50.0)
-    exp_evals = torch.exp(exp_args)
-    E = (U * exp_evals.unsqueeze(-2)) @ U.transpose(-1, -2)  # exp(τB)
-
-    # Map back: Σ_new = V Λ^{1/2} E Λ^{1/2} V^T = Σ^{1/2} exp(B) Σ^{1/2}
-    M = V * sqrt_w.unsqueeze(-2)  # V @ diag(sqrt_w) = (batch, K, K)
-    Sigma_new = M @ E @ M.transpose(-1, -2)
+    # Linear update with trust-region-scaled delta
+    Sigma_new = Sigma + step_size * delta_scaled
 
     # Symmetrize
     Sigma_new = 0.5 * (Sigma_new + Sigma_new.transpose(-1, -2))
