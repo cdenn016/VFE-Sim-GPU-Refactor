@@ -65,6 +65,9 @@ CONFIG = {
     # Stability
     'grad_clip': 1.0,
 
+    # VFE mode - CRITICAL for gradient flow!
+    'differentiable_vfe': True,   # Use autograd for VFE (enables backprop through dynamics)
+
     # Training
     'batch_size': 32,
     'epochs': 10,
@@ -288,6 +291,7 @@ def main():
         belief_steps=config['n_vfe_steps'],
         prior_update_interval=config['prior_update_interval'],
         grad_clip=config['grad_clip'],
+        differentiable_vfe=config.get('differentiable_vfe', True),  # Enable gradient flow
     )
 
     print(f"\nModel config:")
