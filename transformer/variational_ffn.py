@@ -1030,8 +1030,15 @@ class VariationalFFNGradientEngine(nn.Module):
                     grad_mu, grad_sigma, sigma_current
                 )
 
-                # Update: descent direction (negative gradient)
-                mu_current = mu_current - self.lr * nat_grad_mu
+                # Update: descent direction (negative gradient) with trust region
+                # Limit mu change to avoid drifting too far from prior (which causes gradient explosion)
+                delta_mu = -self.lr * nat_grad_mu
+                mu_norm = torch.linalg.norm(mu_current, dim=-1, keepdim=True).clamp(min=1e-6)
+                delta_norm = torch.linalg.norm(delta_mu, dim=-1, keepdim=True)
+                # Trust region: max 20% change per iteration
+                mu_trust_region = 0.2
+                scale = torch.clamp(mu_trust_region * mu_norm / (delta_norm + 1e-6), max=1.0)
+                mu_current = mu_current + scale * delta_mu
 
                 # Update sigma using SPD-preserving retraction
                 # This is CRITICAL for stability with multiple iterations!
@@ -1397,7 +1404,13 @@ class VariationalFFNDynamic(nn.Module):
             # =================================================================
             # STEP 4: Update beliefs (E-step)
             # =================================================================
-            mu_current = mu_current - self.lr * nat_grad_mu
+            # Trust region on mu to prevent drift from prior
+            delta_mu = -self.lr * nat_grad_mu
+            mu_norm = torch.linalg.norm(mu_current, dim=-1, keepdim=True).clamp(min=eps)
+            delta_norm = torch.linalg.norm(delta_mu, dim=-1, keepdim=True)
+            mu_trust_region = 0.2  # Max 20% change per iteration
+            scale = torch.clamp(mu_trust_region * mu_norm / (delta_norm + eps), max=1.0)
+            mu_current = mu_current + scale * delta_mu
 
             if self.update_sigma:
                 # Use SPD-preserving retraction for stability with multiple iterations
@@ -1763,7 +1776,13 @@ class VariationalFFNDynamicStable(nn.Module):
             # =================================================================
             # STEP 9: Update beliefs
             # =================================================================
-            mu_current = mu_current - self.lr * nat_grad_mu
+            # Trust region on mu to prevent drift from prior
+            delta_mu = -self.lr * nat_grad_mu
+            mu_norm = torch.linalg.norm(mu_current, dim=-1, keepdim=True).clamp(min=eps)
+            delta_norm = torch.linalg.norm(delta_mu, dim=-1, keepdim=True)
+            mu_trust_region = 0.2  # Max 20% change per iteration
+            scale = torch.clamp(mu_trust_region * mu_norm / (delta_norm + eps), max=1.0)
+            mu_current = mu_current + scale * delta_mu
 
             if self.update_sigma:
                 # Use SPD-preserving retraction for stability with multiple iterations
