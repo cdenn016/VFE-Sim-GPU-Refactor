@@ -449,7 +449,11 @@ def plot_attention_pattern(
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    im = ax.imshow(beta_plot, cmap=cmap, aspect='auto')
+    # Use focused colorbar range for log scale to see medium-weight connections
+    if log_scale:
+        im = ax.imshow(beta_plot, cmap=cmap, aspect='auto', vmin=-3, vmax=0)
+    else:
+        im = ax.imshow(beta_plot, cmap=cmap, aspect='auto')
     ax.set_xlabel('Key (j)')
     ax.set_ylabel('Query (i)')
     title = f'Attention β (Layer {layer_idx}, Head {head_idx})'
@@ -903,7 +907,8 @@ def plot_trajectory_dashboard(
         beta_plot = beta.copy()
         np.fill_diagonal(beta_plot, np.nan)
         beta_plot = np.log10(np.maximum(beta_plot, 1e-6))
-        im = ax.imshow(beta_plot, cmap='viridis', aspect='auto')
+        # vmin=-3, vmax=0 to see medium-weight connections (0.001 to 1.0)
+        im = ax.imshow(beta_plot, cmap='viridis', aspect='auto', vmin=-3, vmax=0)
         ax.set_xlabel('Key')
         ax.set_ylabel('Query')
         ax.set_title(f'Attention (L{last_layer.layer_idx}) [log, diag masked]')

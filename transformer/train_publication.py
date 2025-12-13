@@ -596,14 +596,15 @@ class PublicationTrainer(FastTrainer):
                     np.fill_diagonal(attn_plot, np.nan)
                     attn_plot = np.log10(np.maximum(attn_plot, 1e-6))
 
-                    # Create visualization
+                    # Create visualization with focused colorbar range
+                    # vmin=-3 (0.001), vmax=0 (1.0) to see medium-weight connections
                     fig, ax = plt.subplots(figsize=(8, 6))
-                    im = ax.imshow(attn_plot, cmap='viridis', aspect='auto')
+                    im = ax.imshow(attn_plot, cmap='viridis', aspect='auto', vmin=-3, vmax=0)
 
                     ax.set_xlabel('Key Position (j)')
                     ax.set_ylabel('Query Position (i)')
-                    ax.set_title(f'Attention Weights (Step {step}) [log, diag masked]')
-                    plt.colorbar(im, ax=ax, label='log₁₀(Attention)')
+                    ax.set_title(f'Attention Weights (Step {step}) [log₁₀, diag masked]')
+                    plt.colorbar(im, ax=ax, label='log₁₀(β)')
 
                     # Save to checkpoint directory
                     save_dir = self.config.checkpoint_dir / 'attention_patterns'
