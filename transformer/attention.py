@@ -537,17 +537,22 @@ def _compute_kl_matrix_torch(
         kl_matrix.copy_(kl_all)
 
     except RuntimeError:
-        # Cholesky failed - use expensive but robust SPD projection via eigendecomposition
-        Sigma_i_spd = ensure_spd(Sigma_i, eps=eps)
-        Sigma_transported_spd = ensure_spd(Sigma_transported, eps=eps)
+        # Cholesky failed - do full computation in FP32 with larger epsilon
+        Sigma_i_f32 = Sigma_i.float()
+        Sigma_i_f32 = 0.5 * (Sigma_i_f32 + Sigma_i_f32.transpose(-1, -2))
+        Sigma_i_f32 = Sigma_i_f32 + 1e-3 * torch.eye(K, device=device, dtype=torch.float32)
+
+        Sigma_transported_f32 = Sigma_transported.float()
+        Sigma_transported_f32 = 0.5 * (Sigma_transported_f32 + Sigma_transported_f32.transpose(-1, -2))
+        Sigma_transported_f32 = Sigma_transported_f32 + 1e-3 * torch.eye(K, device=device, dtype=torch.float32)
 
         try:
-            L_p = torch.linalg.cholesky(Sigma_transported_spd)
-            Y = torch.linalg.solve_triangular(L_p, Sigma_i_spd, upper=False)
+            L_p = torch.linalg.cholesky(Sigma_transported_f32)
+            Y = torch.linalg.solve_triangular(L_p, Sigma_i_f32, upper=False)
             Z = torch.linalg.solve_triangular(L_p.transpose(-1, -2), Y, upper=True)
             trace_term = torch.diagonal(Z, dim1=-2, dim2=-1).sum(dim=-1)
 
-            delta_mu = mu_transported - mu_i
+            delta_mu = (mu_transported - mu_i).float()
             v = torch.linalg.solve_triangular(
                 L_p, delta_mu.unsqueeze(-1), upper=False
             ).squeeze(-1)
@@ -556,7 +561,7 @@ def _compute_kl_matrix_torch(
             logdet_p = 2.0 * torch.sum(
                 torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1
             )
-            L_q = torch.linalg.cholesky(Sigma_i_spd)
+            L_q = torch.linalg.cholesky(Sigma_i_f32)
             logdet_q = 2.0 * torch.sum(
                 torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1
             )

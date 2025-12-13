@@ -238,9 +238,15 @@ def compute_vfe_gradients_gpu(
         try:
             L_j_t = torch.linalg.cholesky(sigma_j_fast)  # (B, N, N, K, K)
         except RuntimeError:
-            # Fallback to expensive SPD projection
-            sigma_j_spd = ensure_spd(sigma_j_transported, eps=eps)
-            L_j_t = torch.linalg.cholesky(sigma_j_spd)
+            # Fallback: FP32 Cholesky with larger epsilon
+            sigma_j_f32 = sigma_j_transported.float()
+            sigma_j_f32 = 0.5 * (sigma_j_f32 + sigma_j_f32.transpose(-1, -2))
+            sigma_j_f32 = sigma_j_f32 + 1e-3 * torch.eye(K, device=device, dtype=torch.float32)
+            try:
+                L_j_t = torch.linalg.cholesky(sigma_j_f32).to(dtype)
+            except RuntimeError:
+                # Ultimate fallback: identity
+                L_j_t = torch.eye(K, device=device, dtype=dtype).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(B, N, N, -1, -1).clone()
         logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1)  # (B, N, N)
         # For source covariance (diagonal): log|diag(σ)| = sum(log(σ))
         logdet_i = torch.sum(torch.log(sigma_q.clamp(min=eps)), dim=-1)  # (B, N)
@@ -324,16 +330,29 @@ def compute_vfe_gradients_gpu(
         try:
             L_j_t = torch.linalg.cholesky(sigma_j_fast)  # (B, N, N, K, K)
         except RuntimeError:
-            sigma_j_spd = ensure_spd(sigma_j_transported, eps=eps)
-            L_j_t = torch.linalg.cholesky(sigma_j_spd)
+            # Fallback: do SPD projection AND Cholesky in FP32 to avoid precision issues
+            sigma_j_f32 = sigma_j_transported.float()
+            sigma_j_f32 = 0.5 * (sigma_j_f32 + sigma_j_f32.transpose(-1, -2))
+            sigma_j_f32 = sigma_j_f32 + 1e-3 * torch.eye(K, device=device, dtype=torch.float32)
+            try:
+                L_j_t = torch.linalg.cholesky(sigma_j_f32).to(dtype)
+            except RuntimeError:
+                # Ultimate fallback: use identity-like logdet
+                L_j_t = torch.eye(K, device=device, dtype=dtype).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(B, N, N, -1, -1).clone()
         logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1)  # (B, N, N)
 
         sigma_i_fast = _fast_regularize(sigma_q, eps=eps)
         try:
             L_i = torch.linalg.cholesky(sigma_i_fast)  # (B, N, K, K)
         except RuntimeError:
-            sigma_i_spd = ensure_spd(sigma_q, eps=eps)
-            L_i = torch.linalg.cholesky(sigma_i_spd)
+            # Fallback: FP32 Cholesky
+            sigma_i_f32 = sigma_q.float()
+            sigma_i_f32 = 0.5 * (sigma_i_f32 + sigma_i_f32.transpose(-1, -2))
+            sigma_i_f32 = sigma_i_f32 + 1e-3 * torch.eye(K, device=device, dtype=torch.float32)
+            try:
+                L_i = torch.linalg.cholesky(sigma_i_f32).to(dtype)
+            except RuntimeError:
+                L_i = torch.eye(K, device=device, dtype=dtype).unsqueeze(0).unsqueeze(0).expand(B, N, -1, -1).clone()
         logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1)  # (B, N)
         logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
 
