@@ -625,7 +625,8 @@ class PureFEPLayer(nn.Module):
         device = mu_p.device
 
         # Compute transport operators between positions
-        Omega = compute_transport_operators(phi, phi, self.generators)  # (B, N, N, K, K)
+        transport_cache = compute_transport_operators(phi, self.generators)
+        Omega = transport_cache['Omega']  # (B, N, N, K, K)
 
         # For diagonal covariance, we approximate transport as identity for variance
         # and only transport the mean
