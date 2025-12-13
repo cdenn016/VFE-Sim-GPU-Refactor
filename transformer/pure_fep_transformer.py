@@ -82,19 +82,22 @@ class PureFEPConfig:
     irrep_spec: List[Tuple[str, int, int]] = None  # Will be auto-generated if None
 
     # VFE parameters
-    alpha: float = 0.01           # Self-coupling: KL(q||p)
+    alpha: float = 0.1            # Self-coupling: KL(q||p) - increased for stronger prior influence
     lambda_belief: float = 1.0    # Belief alignment weight
+    lambda_obs: float = 1.0       # Observation likelihood weight (CE in VFE)
     kappa: float = 0.1            # Attention temperature (lower = sharper attention)
 
     # Learning rates (natural gradient allows larger steps)
     mu_lr: float = 0.1            # Belief mean learning rate
     sigma_lr: float = 0.025       # Belief variance learning rate
-    prior_lr: float = 0.05        # Prior update rate (slower timescale)
+    prior_lr: float = 0.01        # Prior update rate (SLOWER for stability)
     phi_lr: float = 0.05          # Gauge frame learning rate
 
-    # Timescale separation
-    belief_steps: int = 5         # VFE steps per hierarchy update (more = better convergence)
-    prior_update_interval: int = 5   # Steps between prior updates (faster learning)
+    # Timescale separation - CRITICAL for FEP!
+    # Fast timescale: VFE steps (perception)
+    # Slow timescale: Prior updates (learning)
+    belief_steps: int = 20        # VFE steps per forward (MORE for convergence)
+    prior_update_interval: int = 1   # Update priors every batch (learning happens via VFE)
 
     # Covariance mode
     diagonal_covariance: bool = True  # Use diagonal Σ (faster, less memory)
@@ -103,7 +106,10 @@ class PureFEPConfig:
     eps: float = 1e-6
     grad_clip: float = 1.0
 
-    # VFE differentiability mode
+    # PURE FEP MODE: No backprop, all learning via prior evolution
+    pure_fep_mode: bool = True    # When True: NO backprop, ONLY VFE dynamics
+
+    # VFE differentiability mode (only used when pure_fep_mode=False)
     differentiable_vfe: bool = True  # Compute VFE via autograd (for gradient flow)
 
     # =========================================================================
@@ -199,14 +205,17 @@ class PureFEPLayer(nn.Module):
 
     Each layer maintains:
     - Beliefs q_i = N(μ_q, Σ_q) for each token/agent
-    - Priors p_i = N(μ_p, Σ_p) constraining beliefs
+    - Priors p_i = N(μ_p, Σ_p) constraining beliefs - NOW POSITION-DEPENDENT!
     - Gauge frames φ_i for parallel transport
 
     The layer performs VFE minimization:
     1. Compute attention β_ij from KL divergences (no W_Q, W_K!)
-    2. Compute VFE gradients ∂F/∂μ, ∂F/∂σ
+    2. Compute VFE gradients ∂F/∂μ, ∂F/∂σ INCLUDING observation term
     3. Update beliefs via natural gradient descent
     4. Optionally receive priors from parent layer
+
+    CRITICAL FIX: Priors are now POSITION-DEPENDENT (N, K) not global (K,)
+    This allows the model to learn position-specific patterns.
     """
 
     def __init__(
@@ -218,6 +227,7 @@ class PureFEPLayer(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.K = embed_dim
+        self.N = config.seq_length  # Store sequence length for priors
         self.scale = scale
         self.config = config
 
@@ -225,15 +235,24 @@ class PureFEPLayer(nn.Module):
         gen_np = generate_so3_generators(embed_dim)
         self.register_buffer('generators', torch.from_numpy(gen_np).float())
 
-        # Output projection (the ONE learned parameter - maps beliefs to logits)
-        # This is necessary for grounding to observations (cross-entropy)
+        # Output projection - maps beliefs to logits for observation likelihood
+        # In pure FEP mode, this is updated via VFE pressure on priors, not backprop
         self.output_proj = nn.Linear(embed_dim, config.vocab_size, bias=False)
 
-        # PERSISTENT PRIORS - these survive across batches and represent "learning"!
-        # Shape (K,) - broadcast across batch and sequence dimensions
-        # Initialized as uninformative (zero mean, unit variance)
-        self.register_buffer('prior_mu', torch.zeros(embed_dim))
-        self.register_buffer('prior_sigma', torch.ones(embed_dim))
+        # =====================================================================
+        # POSITION-DEPENDENT PRIORS - the key to learning structure!
+        # =====================================================================
+        # Shape (N, K) - each position has its own prior
+        # This allows the model to learn:
+        #   - Position-specific patterns (e.g., "The" often starts sentences)
+        #   - Sequential dependencies via prior evolution
+        #   - Context-dependent expectations
+        self.register_buffer('prior_mu', torch.zeros(config.seq_length, embed_dim))
+        self.register_buffer('prior_sigma', torch.ones(config.seq_length, embed_dim))
+
+        # Prior update statistics (for adaptive learning rate)
+        self.register_buffer('prior_update_count', torch.zeros(config.seq_length))
+        self.register_buffer('prior_prediction_error', torch.zeros(config.seq_length))
 
         # Timescale tracking
         self.info_accumulator = 0.0
@@ -252,32 +271,48 @@ class PureFEPLayer(nn.Module):
         Initialize beliefs, priors, and gauge frames from input.
 
         Beliefs are initialized from input embeddings.
-        Priors are loaded from PERSISTENT learned state (the key to learning!).
+        Priors are loaded from PERSISTENT POSITION-DEPENDENT state.
         Gauge frames start at identity (zero angle).
 
-        FIXED: Maintains gradient connection to input embeddings!
+        CRITICAL: Priors are now (N, K) - position-dependent!
 
         Returns:
             mu_q: (B, N, K) belief means
             sigma_q: (B, N, K) belief variances (diagonal)
-            mu_p: (B, N, K) prior means
-            sigma_p: (B, N, K) prior variances
+            mu_p: (B, N, K) prior means (position-dependent!)
+            sigma_p: (B, N, K) prior variances (position-dependent!)
             phi: (B, N, 3) gauge frames in so(3)
         """
         B, N, K = x.shape
 
-        # Beliefs initialized from input - KEEP GRADIENT CONNECTION!
-        # Ensure mu_q requires grad for differentiable VFE
-        mu_q = x.clone()
-        if self.config.differentiable_vfe and not mu_q.requires_grad:
-            mu_q.requires_grad_(True)
+        # Beliefs initialized from input
+        # In pure FEP mode, we DON'T need gradient connection - learning is via priors
+        if self.config.pure_fep_mode:
+            mu_q = x.detach().clone()  # Detach in pure FEP mode
+        else:
+            mu_q = x.clone()
+            if self.config.differentiable_vfe and not mu_q.requires_grad:
+                mu_q.requires_grad_(True)
+
         sigma_q = torch.ones(B, N, K, device=device) * 0.1  # Small initial variance
 
-        # Priors from PERSISTENT learned state - broadcast across batch and sequence
-        # This is the key to learning! These persist across batches.
-        # Use expand (not clone) for memory efficiency, clone only when modifying
-        mu_p = self.prior_mu.unsqueeze(0).unsqueeze(0).expand(B, N, K).clone()
-        sigma_p = self.prior_sigma.unsqueeze(0).unsqueeze(0).expand(B, N, K).clone()
+        # =====================================================================
+        # POSITION-DEPENDENT PRIORS - broadcast across batch only
+        # =====================================================================
+        # Handle sequence length mismatch (input may be shorter than max seq_length)
+        N_prior = min(N, self.prior_mu.shape[0])
+
+        # Get position-specific priors and expand across batch
+        mu_p = self.prior_mu[:N_prior, :].unsqueeze(0).expand(B, -1, -1).clone()
+        sigma_p = self.prior_sigma[:N_prior, :].unsqueeze(0).expand(B, -1, -1).clone()
+
+        # Pad if input sequence is longer than stored priors
+        if N > N_prior:
+            # Use zero mean, unit variance for new positions
+            mu_p_pad = torch.zeros(B, N - N_prior, K, device=device)
+            sigma_p_pad = torch.ones(B, N - N_prior, K, device=device)
+            mu_p = torch.cat([mu_p, mu_p_pad], dim=1)
+            sigma_p = torch.cat([sigma_p, sigma_p_pad], dim=1)
 
         # Gauge frames start at identity
         phi = torch.zeros(B, N, 3, device=device)
@@ -303,6 +338,9 @@ class PureFEPLayer(nn.Module):
 
         This is the PERCEPTION step - updating beliefs to minimize VFE
         given current priors and observations.
+
+        CRITICAL FIX: Observation term (CE) is now INSIDE the VFE!
+        F = α·KL(q||p) + λ·alignment + λ_obs·E_q[-log p(y|x)]
 
         Args:
             mu_q: (B, N, K) belief means
@@ -334,81 +372,55 @@ class PureFEPLayer(nn.Module):
         )
 
         # ==================================================================
-        # 2. Compute VFE loss and gradients
+        # 2. Compute FULL VFE loss INCLUDING observations
         # ==================================================================
-        # Check if gradients are enabled (disabled during evaluation with @torch.no_grad())
-        grad_enabled = torch.is_grad_enabled() and mu_q.requires_grad
+        # F = α·KL(q||p) + λ·alignment + λ_obs·CE
+        # This is the TRUE variational free energy!
 
-        if self.config.differentiable_vfe and grad_enabled:
-            # DIFFERENTIABLE MODE: Compute VFE via autograd
-            #
-            # CRITICAL FIX: Only use create_graph=True on FINAL step!
-            # Intermediate steps use create_graph=False to avoid nested graph
-            # accumulation that causes "backward through graph twice" errors.
-            #
-            # IMPORTANT: Only use KL terms here, NOT CE loss!
-            # The CE gradient comes from backward() in train_step.
+        # Self-coupling: α·KL(q||p)
+        sigma_q_safe = sigma_q.clamp(min=self.config.eps)
+        sigma_p_safe = sigma_p.clamp(min=self.config.eps)
+        kl_self = 0.5 * (
+            sigma_q_safe / sigma_p_safe
+            + (mu_q - mu_p)**2 / sigma_p_safe
+            - 1.0
+            + torch.log(sigma_p_safe / sigma_q_safe)
+        ).sum(dim=-1).mean()
 
-            # Self-coupling: α·KL(q||p)
-            sigma_q_safe = sigma_q.clamp(min=self.config.eps)
-            sigma_p_safe = sigma_p.clamp(min=self.config.eps)
-            kl_self = 0.5 * (
-                sigma_q_safe / sigma_p_safe
-                + (mu_q - mu_p)**2 / sigma_p_safe
-                - 1.0
-                + torch.log(sigma_p_safe / sigma_q_safe)
-            ).sum(dim=-1).mean()
+        # Alignment: λ·Σ β_ij·KL_ij (use precomputed)
+        alignment = (beta * kl_matrix).sum(dim=-1).mean()
 
-            # Alignment: λ·Σ β_ij·KL_ij (use precomputed)
-            alignment = (beta * kl_matrix).sum(dim=-1).mean()
+        # Prior coupling: λ_γ · Σ_ij KL(p_i || Ω_ij · p_j)
+        prior_coupling = self.compute_prior_coupling_loss(mu_p, sigma_p, phi, mask)
 
-            # Prior coupling: λ_γ · Σ_ij KL(p_i || Ω_ij · p_j)
-            # Only computed when prior_coupling_enabled=True
-            prior_coupling = self.compute_prior_coupling_loss(mu_p, sigma_p, phi, mask)
-
-            # VFE for belief update = KL terms only (no CE)
-            # CE gradient comes from final backward() in train_step
-            vfe_loss = (self.config.alpha * kl_self +
-                       self.config.lambda_belief * alignment +
-                       prior_coupling)
-
-            # Compute gradient via autograd
-            # ONLY use create_graph=True on final step to maintain gradient flow
-            # while avoiding nested graph issues
-            if is_final_step and mu_q.requires_grad:
-                grad_mu = torch.autograd.grad(
-                    vfe_loss, mu_q,
-                    create_graph=True,   # Connect to output for backprop
-                    retain_graph=True,
-                )[0]
-            elif mu_q.requires_grad:
-                # Intermediate steps: compute gradient but don't keep in graph
-                grad_mu = torch.autograd.grad(
-                    vfe_loss, mu_q,
-                    create_graph=False,  # Don't nest graphs
-                    retain_graph=True,
-                )[0]
-            else:
-                # Fallback if mu_q doesn't require grad
-                grad_mu = torch.zeros_like(mu_q)
-
-            # For sigma, use simpler approach (no second-order for now)
-            grad_sigma = torch.zeros_like(sigma_q)
-
-            # For metrics, compute CE loss but don't include in VFE gradient
-            if targets is not None:
-                with torch.no_grad():
-                    logits = self.output_proj(mu_q)
-                    ce_loss = F.cross_entropy(
-                        logits.view(-1, self.config.vocab_size),
-                        targets.view(-1),
-                        reduction='mean'
-                    )
-            else:
-                ce_loss = torch.tensor(0.0, device=device)
-
+        # ==================================================================
+        # OBSERVATION TERM: E_q[-log p(y|x)] ≈ CE(W·μ_q, targets)
+        # ==================================================================
+        # This is the CRITICAL addition - observations are INSIDE the VFE
+        if targets is not None:
+            logits = self.output_proj(mu_q)
+            ce_loss = F.cross_entropy(
+                logits.view(-1, self.config.vocab_size),
+                targets.view(-1),
+                reduction='mean'
+            )
         else:
-            # ANALYTICAL MODE: Compute gradients manually (faster but not differentiable)
+            ce_loss = torch.tensor(0.0, device=device)
+
+        # ==================================================================
+        # FULL VFE = KL terms + observation term
+        # ==================================================================
+        lambda_obs = getattr(self.config, 'lambda_obs', 1.0)
+        vfe_loss = (self.config.alpha * kl_self +
+                   self.config.lambda_belief * alignment +
+                   prior_coupling +
+                   lambda_obs * ce_loss)  # Observations IN the VFE!
+
+        # ==================================================================
+        # 3. Compute gradients (analytical mode for pure FEP)
+        # ==================================================================
+        if self.config.pure_fep_mode:
+            # PURE FEP MODE: Use analytical gradients, no autograd graph
             grad_mu, grad_sigma = compute_vfe_gradients_gpu(
                 mu_q, sigma_q, mu_p, sigma_p,
                 beta, phi, self.generators,
@@ -418,15 +430,8 @@ class PureFEPLayer(nn.Module):
                 eps=self.config.eps,
             )
 
-            # Add observation gradient (cross-entropy)
+            # Add observation gradient (CE) analytically
             if targets is not None:
-                logits = self.output_proj(mu_q)
-                ce_loss = F.cross_entropy(
-                    logits.view(-1, self.config.vocab_size),
-                    targets.view(-1),
-                    reduction='mean'
-                )
-                # Compute CE gradient
                 with torch.enable_grad():
                     mu_q_grad = mu_q.detach().requires_grad_(True)
                     logits_grad = self.output_proj(mu_q_grad)
@@ -436,9 +441,27 @@ class PureFEPLayer(nn.Module):
                         reduction='sum'
                     )
                     grad_mu_ce = torch.autograd.grad(ce_for_grad, mu_q_grad)[0]
-                grad_mu = grad_mu + grad_mu_ce / (B * N)
+                # Add CE gradient with lambda_obs weight
+                grad_mu = grad_mu + lambda_obs * grad_mu_ce / (B * N)
+        else:
+            # Differentiable mode (for hybrid training)
+            grad_enabled = torch.is_grad_enabled() and mu_q.requires_grad
+            if grad_enabled and mu_q.requires_grad:
+                if is_final_step:
+                    grad_mu = torch.autograd.grad(
+                        vfe_loss, mu_q,
+                        create_graph=True,
+                        retain_graph=True,
+                    )[0]
+                else:
+                    grad_mu = torch.autograd.grad(
+                        vfe_loss, mu_q,
+                        create_graph=False,
+                        retain_graph=True,
+                    )[0]
             else:
-                ce_loss = torch.tensor(0.0, device=device)
+                grad_mu = torch.zeros_like(mu_q)
+            grad_sigma = torch.zeros_like(sigma_q)
 
         # ==================================================================
         # 4. Project to natural gradients (Fisher-Rao metric)
@@ -662,79 +685,99 @@ class PureFEPLayer(nn.Module):
         self,
         mu_q_batch: torch.Tensor,     # (B, N, K) batch belief means (after VFE)
         sigma_q_batch: torch.Tensor,  # (B, N, K) batch belief variances
-        prediction_error: Optional[torch.Tensor] = None,  # (B,) CE loss per sample
+        prediction_error: Optional[torch.Tensor] = None,  # (B,) or (B, N) CE loss
+        per_position_error: Optional[torch.Tensor] = None,  # (B, N) per-position CE
     ):
         """
-        Update persistent priors using prediction-error-weighted learning.
+        Update POSITION-DEPENDENT persistent priors using prediction-error-weighted learning.
 
-        This is where LEARNING is stored! The prior moves towards beliefs
-        that successfully minimize prediction error (lower CE loss).
+        This is where LEARNING is stored! Each position's prior moves towards beliefs
+        that successfully minimize prediction error at THAT position.
 
-        Key insight: In FEP, learning = updating generative model (priors)
-        to minimize expected free energy. Beliefs that predict well should
-        have more influence on the prior.
+        CRITICAL FIX: Priors are now (N, K) - position-specific!
+        Each position learns its own prior based on:
+        1. Beliefs at that position across the batch
+        2. Prediction error weighting (beliefs with lower error have more influence)
 
         Args:
             mu_q_batch: Beliefs after VFE convergence (B, N, K)
             sigma_q_batch: Belief variances (B, N, K)
-            prediction_error: Per-sample CE loss (B,) - lower = better prediction
+            prediction_error: Per-sample CE loss (B,) - for batch-level weighting
+            per_position_error: Per-position CE loss (B, N) - for position-level weighting
         """
         B, N, K = mu_q_batch.shape
 
-        if prediction_error is not None and prediction_error.numel() > 0:
-            # PREDICTION-ERROR-WEIGHTED LEARNING
-            # Beliefs with lower prediction error should contribute more to the prior
-            # Weight = softmax(-prediction_error / temperature)
+        # Detach beliefs to prevent graph accumulation
+        mu_q_batch = mu_q_batch.detach()
+        sigma_q_batch = sigma_q_batch.detach()
+
+        # =====================================================================
+        # POSITION-SPECIFIC PRIOR UPDATE
+        # =====================================================================
+        # Update each position's prior based on beliefs at that position
+
+        # Handle sequence length mismatch
+        N_prior = min(N, self.prior_mu.shape[0])
+
+        if per_position_error is not None and per_position_error.numel() > 0:
+            # POSITION-LEVEL PREDICTION-ERROR WEIGHTING
+            # Each position is weighted by how well beliefs at that position predicted
+            # Lower error = higher weight
+
+            # per_position_error: (B, N) -> weights: (B, N)
+            temperature = 1.0
+            # Softmax over batch dimension for each position
+            weights = F.softmax(-per_position_error / temperature, dim=0)  # (B, N)
+
+            # Weighted average across batch for each position
+            # weights: (B, N) -> (B, N, 1) for broadcasting
+            weights_expanded = weights.unsqueeze(-1)  # (B, N, 1)
+            mu_p_new = (mu_q_batch[:, :N_prior, :] * weights_expanded[:, :N_prior, :]).sum(dim=0)  # (N, K)
+            sigma_p_new = (sigma_q_batch[:, :N_prior, :] * weights_expanded[:, :N_prior, :]).sum(dim=0)  # (N, K)
+
+        elif prediction_error is not None and prediction_error.numel() > 0:
+            # BATCH-LEVEL PREDICTION-ERROR WEIGHTING
+            # Use per-sample error (same weight for all positions in a sample)
             temperature = 1.0
             weights = F.softmax(-prediction_error / temperature, dim=0)  # (B,)
 
-            # Weighted average across batch, then average across sequence
-            # weights: (B,) -> (B, 1, 1) for broadcasting
-            weights_expanded = weights.view(B, 1, 1)
-            mu_weighted = (mu_q_batch * weights_expanded).sum(dim=0)  # (N, K)
-            sigma_weighted = (sigma_q_batch * weights_expanded).sum(dim=0)  # (N, K)
+            # Weighted average across batch for each position
+            weights_expanded = weights.view(B, 1, 1)  # (B, 1, 1)
+            mu_p_new = (mu_q_batch[:, :N_prior, :] * weights_expanded).sum(dim=0)  # (N, K)
+            sigma_p_new = (sigma_q_batch[:, :N_prior, :] * weights_expanded).sum(dim=0)  # (N, K)
 
-            # Average across sequence positions
-            mu_p_new = mu_weighted.mean(dim=0)  # (K,)
-            sigma_p_new = sigma_weighted.mean(dim=0)  # (K,)
         else:
-            # Fallback: simple average (but with belief means, not prior means!)
-            mu_p_new = mu_q_batch.mean(dim=(0, 1))  # (K,)
-            sigma_p_new = sigma_q_batch.mean(dim=(0, 1))  # (K,)
+            # Fallback: simple average across batch for each position
+            mu_p_new = mu_q_batch[:, :N_prior, :].mean(dim=0)  # (N, K)
+            sigma_p_new = sigma_q_batch[:, :N_prior, :].mean(dim=0)  # (N, K)
 
-        # Choose update method based on config
-        # CRITICAL: Detach to prevent graph accumulation across batches!
-        # Without detach, priors become part of computation graph, causing
-        # "backward through graph a second time" error on next batch.
-        mu_p_new = mu_p_new.detach()
-        sigma_p_new = sigma_p_new.detach()
+        # =====================================================================
+        # Apply update to persistent priors
+        # =====================================================================
+        blend = self.config.prior_lr
 
         if self.config.gradient_prior_updates:
             # GRADIENT-BASED PRIOR UPDATE
-            # Instead of moving towards beliefs, compute gradient of VFE w.r.t. prior
-            # This is more principled: p ← p - η_p · ∂F/∂p
-            # Here we approximate ∂F/∂p using the belief-prior mismatch
-            # The VFE gradient w.r.t. prior is: ∂KL(q||p)/∂p = (p - q) / σ_p²
-            # This pushes prior towards beliefs (same as EMA but gradient-motivated)
-
-            # Compute gradient: ∂F/∂μ_p ∝ (μ_p - μ_q) / σ_p² → prior moves toward belief
-            grad_mu_p = (self.prior_mu - mu_p_new) / self.prior_sigma.clamp(min=self.config.eps)**2
+            # ∂F/∂μ_p ∝ (μ_p - μ_q) / σ_p²
+            grad_mu_p = (self.prior_mu[:N_prior, :] - mu_p_new) / self.prior_sigma[:N_prior, :].clamp(min=self.config.eps)**2
 
             # Gradient descent on prior
-            self.prior_mu.sub_(self.config.prior_grad_lr * grad_mu_p)
+            self.prior_mu[:N_prior, :].sub_(self.config.prior_grad_lr * grad_mu_p)
 
-            # Still use EMA for sigma (variance updates need stability)
-            blend = self.config.prior_lr
-            self.prior_sigma.lerp_(sigma_p_new, blend)
+            # EMA for sigma
+            self.prior_sigma[:N_prior, :].lerp_(sigma_p_new, blend)
         else:
-            # EXPONENTIAL MOVING AVERAGE (default)
-            # Blend prior towards beliefs that minimize prediction error
-            blend = self.config.prior_lr
-            self.prior_mu.lerp_(mu_p_new, blend)
-            self.prior_sigma.lerp_(sigma_p_new, blend)
+            # EXPONENTIAL MOVING AVERAGE
+            self.prior_mu[:N_prior, :].lerp_(mu_p_new, blend)
+            self.prior_sigma[:N_prior, :].lerp_(sigma_p_new, blend)
+
+        # Track update statistics
+        self.prior_update_count[:N_prior] += 1
 
         # Ensure sigma stays positive
         self.prior_sigma.clamp_(min=self.config.eps)
+
+        self.total_prior_updates += 1
 
     def forward(
         self,
@@ -929,7 +972,12 @@ class PureFEPTransformer(nn.Module):
 
         return logits, info
 
-    def _hierarchical_prior_update(self, layer_infos: List[Dict], prediction_errors: Optional[torch.Tensor] = None):
+    def _hierarchical_prior_update(
+        self,
+        layer_infos: List[Dict],
+        prediction_errors: Optional[torch.Tensor] = None,
+        per_position_errors: Optional[torch.Tensor] = None,
+    ):
         """
         Top-down prior update: propagate beliefs down the hierarchy.
 
@@ -944,6 +992,7 @@ class PureFEPTransformer(nn.Module):
         Args:
             layer_infos: List of layer outputs from forward pass
             prediction_errors: (B,) per-sample CE loss for weighted prior updates
+            per_position_errors: (B, N) per-position CE for fine-grained learning
         """
         # Process top-down: layer L-1 → layer 0
         for i in range(len(self.layers) - 1, 0, -1):
@@ -971,7 +1020,11 @@ class PureFEPTransformer(nn.Module):
 
             # PERSIST the learning! Update the layer's stored priors.
             # Use prediction-error-weighted beliefs for the update
-            child_layer.update_persistent_prior(child_mu_q, child_sigma_q, prediction_errors)
+            child_layer.update_persistent_prior(
+                child_mu_q, child_sigma_q,
+                prediction_error=prediction_errors,
+                per_position_error=per_position_errors,
+            )
 
             # Store updated priors in info dict too (for current pass)
             child_info['priors'] = (new_mu_p, new_sigma_p)
@@ -982,7 +1035,11 @@ class PureFEPTransformer(nn.Module):
             top_info = layer_infos[-1]
             top_mu_q, top_sigma_q = top_info['beliefs']
             # Top layer learns from its own beliefs (no parent)
-            top_layer.update_persistent_prior(top_mu_q, top_sigma_q, prediction_errors)
+            top_layer.update_persistent_prior(
+                top_mu_q, top_sigma_q,
+                prediction_error=prediction_errors,
+                per_position_error=per_position_errors,
+            )
 
     def train_step(
         self,
@@ -993,17 +1050,20 @@ class PureFEPTransformer(nn.Module):
         """
         Single training step using pure VFE learning.
 
-        FIXED: Now properly connects VFE dynamics to embedding learning!
+        PURE FEP MODE (config.pure_fep_mode=True):
+        - NO backprop on embeddings or output projections
+        - ALL learning happens via prior evolution under VFE pressure
+        - Perception: VFE gradient descent on beliefs
+        - Learning: Position-dependent prior updates weighted by prediction error
 
-        Learning happens via:
-        1. VFE gradient descent on beliefs (perception)
-        2. CE loss on VFE-processed outputs → updates embeddings
-        3. Hierarchical prior updates with prediction-error weighting
+        HYBRID MODE (config.pure_fep_mode=False):
+        - Backprop updates embeddings and projections
+        - Prior updates provide additional learning signal
 
         Args:
             input_ids: (B, N) input tokens
             targets: (B, N) target tokens
-            n_vfe_steps: VFE steps per layer (default 5 for convergence)
+            n_vfe_steps: VFE steps per layer
 
         Returns:
             Dict of training metrics
@@ -1011,60 +1071,93 @@ class PureFEPTransformer(nn.Module):
         self.train()
         B, N = input_ids.shape
 
-        # Zero gradients
-        self.zero_grad()
+        if self.config.pure_fep_mode:
+            # ==================================================================
+            # PURE FEP MODE: No backprop, all learning via prior evolution
+            # ==================================================================
+            with torch.no_grad():
+                # Forward pass with VFE
+                logits, info = self(input_ids, targets=targets, n_vfe_steps=n_vfe_steps)
 
-        # Forward pass with VFE - gradients now flow through!
-        logits, info = self(input_ids, targets=targets, n_vfe_steps=n_vfe_steps)
+                # Compute overall CE loss for metrics
+                ce_loss = F.cross_entropy(
+                    logits.view(-1, self.config.vocab_size),
+                    targets.view(-1),
+                )
 
-        # FIXED: Use VFE-processed logits for the loss!
-        # This connects the VFE dynamics to embedding learning.
-        ce_loss = F.cross_entropy(
-            logits.view(-1, self.config.vocab_size),
-            targets.view(-1),
-        )
+                # Compute PER-POSITION prediction error for prior learning
+                # This is CRITICAL: each position learns from its own errors
+                logits_reshaped = logits.view(B, N, -1)
+                targets_reshaped = targets.view(B, N)
+                per_position_loss = F.cross_entropy(
+                    logits_reshaped.permute(0, 2, 1),  # (B, vocab, N)
+                    targets_reshaped,                   # (B, N)
+                    reduction='none'
+                )  # (B, N) - loss at each position
 
-        # Compute per-sample prediction error for prior learning
-        with torch.no_grad():
-            logits_reshaped = logits.view(B, N, -1)
-            targets_reshaped = targets.view(B, N)
-            per_sample_loss = F.cross_entropy(
-                logits_reshaped.permute(0, 2, 1),  # (B, vocab, N)
-                targets_reshaped,                   # (B, N)
-                reduction='none'
-            ).mean(dim=1)  # (B,) - average loss per sample
+                # Per-sample loss (for batch-level weighting)
+                per_sample_loss = per_position_loss.mean(dim=1)  # (B,)
 
-        # Store prediction errors for hierarchical prior update
-        info['prediction_errors'] = per_sample_loss
+                # Store both for prior updates
+                info['prediction_errors'] = per_sample_loss
+                info['per_position_errors'] = per_position_loss
 
-        # Backprop through VFE-processed outputs
-        ce_loss.backward()
+            # Update persistent priors - THIS IS WHERE LEARNING HAPPENS!
+            self._update_priors_with_prediction_error(info)
 
-        # Apply gradients (manual SGD - pure FEP, no Adam)
-        with torch.no_grad():
-            # Update embedding and output projection
-            for param in [self.embedding.weight, self.output_proj.weight]:
-                if param.grad is not None:
-                    # Gradient clipping
-                    grad_norm = param.grad.norm()
-                    if grad_norm > self.config.grad_clip:
-                        param.grad.mul_(self.config.grad_clip / grad_norm)
+        else:
+            # ==================================================================
+            # HYBRID MODE: Backprop + prior evolution
+            # ==================================================================
+            # Zero gradients
+            self.zero_grad()
 
-                    # Manual SGD update
-                    param.sub_(self.config.mu_lr * param.grad)
-                    param.grad.zero_()
+            # Forward pass with VFE - gradients flow through
+            logits, info = self(input_ids, targets=targets, n_vfe_steps=n_vfe_steps)
 
-            # Also update layer output projections
-            for layer in self.layers:
-                if layer.output_proj.weight.grad is not None:
-                    grad_norm = layer.output_proj.weight.grad.norm()
-                    if grad_norm > self.config.grad_clip:
-                        layer.output_proj.weight.grad.mul_(self.config.grad_clip / grad_norm)
-                    layer.output_proj.weight.sub_(self.config.mu_lr * layer.output_proj.weight.grad)
-                    layer.output_proj.weight.grad.zero_()
+            # CE loss
+            ce_loss = F.cross_entropy(
+                logits.view(-1, self.config.vocab_size),
+                targets.view(-1),
+            )
 
-        # Update persistent priors with prediction-error weighting
-        self._update_priors_with_prediction_error(info)
+            # Compute per-position errors
+            with torch.no_grad():
+                logits_reshaped = logits.view(B, N, -1)
+                targets_reshaped = targets.view(B, N)
+                per_position_loss = F.cross_entropy(
+                    logits_reshaped.permute(0, 2, 1),
+                    targets_reshaped,
+                    reduction='none'
+                )
+                per_sample_loss = per_position_loss.mean(dim=1)
+
+            info['prediction_errors'] = per_sample_loss
+            info['per_position_errors'] = per_position_loss
+
+            # Backprop
+            ce_loss.backward()
+
+            # Apply gradients (manual SGD)
+            with torch.no_grad():
+                for param in [self.embedding.weight, self.output_proj.weight]:
+                    if param.grad is not None:
+                        grad_norm = param.grad.norm()
+                        if grad_norm > self.config.grad_clip:
+                            param.grad.mul_(self.config.grad_clip / grad_norm)
+                        param.sub_(self.config.mu_lr * param.grad)
+                        param.grad.zero_()
+
+                for layer in self.layers:
+                    if layer.output_proj.weight.grad is not None:
+                        grad_norm = layer.output_proj.weight.grad.norm()
+                        if grad_norm > self.config.grad_clip:
+                            layer.output_proj.weight.grad.mul_(self.config.grad_clip / grad_norm)
+                        layer.output_proj.weight.sub_(self.config.mu_lr * layer.output_proj.weight.grad)
+                        layer.output_proj.weight.grad.zero_()
+
+            # Update priors
+            self._update_priors_with_prediction_error(info)
 
         # Perplexity
         ppl = torch.exp(ce_loss.detach()).item()
@@ -1079,26 +1172,30 @@ class PureFEPTransformer(nn.Module):
 
     def _update_priors_with_prediction_error(self, info: Dict):
         """
-        Update priors using prediction-error-weighted beliefs.
+        Update POSITION-DEPENDENT priors using prediction-error-weighted beliefs.
 
-        This replaces the simple batch-averaging approach with proper
-        FEP-style learning where successful predictions influence priors more.
+        This is the LEARNING step in pure FEP:
+        - Each position's prior evolves based on beliefs at that position
+        - Beliefs with lower prediction error have more influence
+        - Per-position errors allow fine-grained learning
 
         Called from train_step() where prediction errors are available.
-        Respects prior_update_interval for stability.
         """
         # Only update priors at specified intervals
         if self.step_count % self.config.prior_update_interval != 0:
             return
 
-        prediction_errors = info.get('prediction_errors')
+        prediction_errors = info.get('prediction_errors')  # (B,)
+        per_position_errors = info.get('per_position_errors')  # (B, N)
         layer_infos = info.get('layer_infos', [])
 
-        # Update each layer's persistent prior
+        # Update each layer's persistent prior with position-specific errors
         for i, layer_info in enumerate(layer_infos):
             mu_q, sigma_q = layer_info['beliefs']
             self.layers[i].update_persistent_prior(
-                mu_q, sigma_q, prediction_errors
+                mu_q, sigma_q,
+                prediction_error=prediction_errors,
+                per_position_error=per_position_errors,
             )
 
 
