@@ -406,17 +406,15 @@ def retract_spd_torch(
     """
     SPD-preserving retraction for covariance matrices (PyTorch GPU).
 
-    Uses linear update with trust region, then ensures SPD via iterative
-    regularization (adding scaled identity until Cholesky succeeds).
-
-    This avoids eigendecomposition entirely, which can fail on ill-conditioned
-    or near-degenerate matrices.
+    Uses exponential map with WHITENED trust region (like retraction.py).
+    The whitening normalizes out the σ² scaling in natural gradients,
+    preventing runaway growth.
 
     Args:
         Sigma: SPD matrices, shape (B, N, K, K) or (B*N, K, K)
         delta_Sigma: Symmetric tangent vectors, same shape as Sigma
         step_size: Learning rate τ (already applied to delta_Sigma typically)
-        trust_region: Max relative change (||ΔΣ||_F / ||Σ||_F)
+        trust_region: Max norm of WHITENED tangent ||Σ^{-1/2} ΔΣ Σ^{-1/2}||_F
         eps: Regularization floor for numerical stability
 
     Returns:
@@ -437,18 +435,41 @@ def retract_spd_torch(
     Sigma = 0.5 * (Sigma + Sigma.transpose(-1, -2))
     delta_Sigma = 0.5 * (delta_Sigma + delta_Sigma.transpose(-1, -2))
 
-    # Trust region: limit step relative to matrix scale
+    # Eigendecomposition of Σ for whitening
+    try:
+        w, V = torch.linalg.eigh(Sigma)  # Σ = V diag(w) V^T
+    except RuntimeError:
+        # Fallback: add regularization and retry
+        Sigma_reg = Sigma + eps * torch.eye(K, device=device, dtype=dtype)
+        w, V = torch.linalg.eigh(Sigma_reg)
+
+    w = w.clamp(min=eps)  # Ensure positive eigenvalues
+    sqrt_w = torch.sqrt(w)  # (batch, K)
+    inv_sqrt_w = 1.0 / sqrt_w  # (batch, K)
+
+    # Transform tangent to eigenbasis: A = V^T ΔΣ V
+    A = torch.einsum('bik,bkl,bjl->bij', V, delta_Sigma, V)  # (batch, K, K)
+
+    # Whitened tangent: B = Λ^{-1/2} A Λ^{-1/2}
+    B = (inv_sqrt_w.unsqueeze(-1) * A) * inv_sqrt_w.unsqueeze(-2)  # (batch, K, K)
+
+    # Trust region on WHITENED Frobenius norm (this is the key fix!)
     if trust_region is not None and trust_region > 0:
-        Sigma_norm = torch.linalg.norm(Sigma, ord='fro', dim=(-2, -1), keepdim=True)  # (batch, 1, 1)
-        delta_norm = torch.linalg.norm(delta_Sigma, ord='fro', dim=(-2, -1), keepdim=True)
+        B_norm = torch.linalg.norm(B, ord='fro', dim=(-2, -1), keepdim=True)  # (batch, 1, 1)
+        scale = torch.clamp(trust_region / (B_norm + eps), max=1.0)
+        B = B * scale
 
-        # Scale delta if it would change Sigma by more than trust_region fraction
-        max_delta = trust_region * Sigma_norm
-        scale = torch.clamp(max_delta / (delta_norm + eps), max=1.0)
-        delta_Sigma = delta_Sigma * scale
+    # Exponentiate symmetric B: exp(τ B) = U diag(exp(τ λ)) U^T
+    evals, U = torch.linalg.eigh(B)
 
-    # Linear update
-    Sigma_new = Sigma + step_size * delta_Sigma
+    # Clip exponent to prevent overflow: exp(50) ≈ 5e21
+    exp_args = (step_size * evals).clamp(-50.0, 50.0)
+    exp_evals = torch.exp(exp_args)
+    E = (U * exp_evals.unsqueeze(-2)) @ U.transpose(-1, -2)  # exp(τB)
+
+    # Map back: Σ_new = V Λ^{1/2} E Λ^{1/2} V^T = Σ^{1/2} exp(B) Σ^{1/2}
+    M = V * sqrt_w.unsqueeze(-2)  # V @ diag(sqrt_w) = (batch, K, K)
+    Sigma_new = M @ E @ M.transpose(-1, -2)
 
     # Symmetrize
     Sigma_new = 0.5 * (Sigma_new + Sigma_new.transpose(-1, -2))
