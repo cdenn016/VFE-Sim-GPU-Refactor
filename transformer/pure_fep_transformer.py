@@ -379,10 +379,14 @@ class PureFEPConfig:
     seq_length: int = 128         # N - sequence length (agents)
     vocab_size: int = 10000       # For language modeling
 
-    # Irrep structure for SO(3) decomposition
+    # Irrep structure for SO(3) decomposition (DOCUMENTATION ONLY)
     # Each tuple: (label, multiplicity, dim) where dim must be odd (1,3,5,7,...)
     # Total dims must equal embed_dim
     # Example for K=127: 32×1 + 15×3 + 10×5 = 32 + 45 + 50 = 127
+    #
+    # NOTE: Currently this is only validated and displayed, NOT used for generator
+    # construction. The actual generators use a single spin-ℓ irrep where ℓ=(K-1)/2.
+    # Multi-irrep block-diagonal structure is a TODO for future implementation.
     irrep_spec: List[Tuple[str, int, int]] = None  # Will be auto-generated if None
 
     # =========================================================================
@@ -630,26 +634,28 @@ class PureFEPLayer(nn.Module):
         self.total_vfe_steps = 0
         self.total_prior_updates = 0
 
-        # VFE momentum buffers (will be initialized on first use)
-        self._momentum_mu = None
-        self._momentum_sigma = None
+        # VFE momentum buffers - registered so they save/load with model
+        # Initialized to None, will be created on first use with correct shape
+        self.register_buffer('_momentum_mu', None, persistent=False)
+        self.register_buffer('_momentum_sigma', None, persistent=False)
 
-        # Optional torch.compile for kernel fusion (applied after __init__)
+        # Optional torch.compile for kernel fusion
         self._compiled = False
 
     def maybe_compile(self):
         """Optionally compile VFE step with torch.compile for faster execution."""
         if self.config.use_torch_compile and not self._compiled:
             try:
-                # Compile the core VFE step
-                self._vfe_step_compiled = torch.compile(
-                    self._vfe_step_core,
+                # Compile the VFE step for kernel fusion
+                # Note: torch.compile works best with static shapes
+                self.vfe_step = torch.compile(
+                    self.vfe_step,
                     mode=self.config.compile_mode,
                     fullgraph=False,  # Allow graph breaks for flexibility
                 )
                 self._compiled = True
             except Exception as e:
-                print(f"Warning: torch.compile failed: {e}")
+                print(f"Warning: torch.compile failed for layer {self.scale}: {e}")
                 self._compiled = True  # Don't retry
 
     def init_beliefs(
@@ -981,22 +987,10 @@ class PureFEPLayer(nn.Module):
             phi_new = phi
 
         # ==================================================================
-        # 8. Compute metrics
+        # 8. Compute metrics (reuse values computed in step 2)
         # ==================================================================
-        # Recompute metrics if we didn't run differentiable path
-        # (either analytical mode or eval mode with grad disabled)
-        if not (self.config.differentiable_vfe and grad_enabled):
-            # Recompute for metrics (needed in analytical mode or eval mode)
-            kl_self = 0.5 * (
-                sigma_q / sigma_p.clamp(min=self.config.eps)
-                + (mu_q - mu_p)**2 / sigma_p.clamp(min=self.config.eps)
-                - 1.0
-                + torch.log(sigma_p.clamp(min=self.config.eps) / sigma_q.clamp(min=self.config.eps))
-            ).sum(dim=-1).mean()
-            alignment = (beta * kl_matrix).sum(dim=-1).mean()
-            prior_coupling = self.compute_prior_coupling_loss(mu_p, sigma_p, phi, mask)
-
-        # Detach for metrics to avoid graph issues
+        # kl_self, alignment, prior_coupling were already computed above
+        # No need to recompute - just detach for metrics
         prior_coupling_val = prior_coupling.detach().item() if isinstance(prior_coupling, torch.Tensor) else 0.0
         metrics = {
             'vfe_total': (self.config.alpha * kl_self.detach() +
@@ -1270,6 +1264,9 @@ class PureFEPLayer(nn.Module):
             mu_q: Final belief means (B, N, K)
             info: Dict with metrics and intermediate states
         """
+        # Try to compile VFE step on first forward (if enabled)
+        self.maybe_compile()
+
         B, N, K = x.shape
         device = x.device
 
