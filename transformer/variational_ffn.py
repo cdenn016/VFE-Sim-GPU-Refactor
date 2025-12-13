@@ -1050,7 +1050,7 @@ class VariationalFFNGradientEngine(nn.Module):
                         sigma_diag=sigma_current,
                         delta_sigma=-nat_grad_sigma,
                         step_size=sigma_lr,
-                        trust_region=0.2,  # Max 20% change per iteration
+                        trust_region=2.0,  # Loose sanity bound (root cause fixed via detach)
                         eps=1e-6,
                     )
                 elif self.update_sigma and not is_diagonal_cov:
@@ -1059,7 +1059,7 @@ class VariationalFFNGradientEngine(nn.Module):
                         Sigma=sigma_current,
                         delta_Sigma=-nat_grad_sigma,
                         step_size=sigma_lr,
-                        trust_region=0.1,  # Max 10% change per iteration
+                        trust_region=2.0,  # Loose sanity bound (root cause fixed via detach)
                         eps=1e-6,
                     )
 
@@ -1421,7 +1421,7 @@ class VariationalFFNDynamic(nn.Module):
                         sigma_diag=sigma_current,
                         delta_sigma=-nat_grad_sigma,
                         step_size=sigma_lr,
-                        trust_region=0.2,  # Max 20% change per iteration
+                        trust_region=2.0,  # Loose sanity bound (root cause fixed via detach)
                         eps=eps,
                     )
                 else:
@@ -1429,7 +1429,7 @@ class VariationalFFNDynamic(nn.Module):
                         Sigma=sigma_current,
                         delta_Sigma=-nat_grad_sigma,
                         step_size=sigma_lr,
-                        trust_region=0.1,  # Max 10% change per iteration
+                        trust_region=2.0,  # Loose sanity bound (root cause fixed via detach)
                         eps=eps,
                     )
 
@@ -1793,7 +1793,7 @@ class VariationalFFNDynamicStable(nn.Module):
                         sigma_diag=sigma_current,
                         delta_sigma=-nat_grad_sigma,
                         step_size=sigma_lr,
-                        trust_region=0.2,  # Max 20% change per iteration
+                        trust_region=2.0,  # Loose sanity bound (root cause fixed via detach)
                         eps=eps,
                     )
                 else:
@@ -1801,7 +1801,7 @@ class VariationalFFNDynamicStable(nn.Module):
                         Sigma=sigma_current,
                         delta_Sigma=-nat_grad_sigma,
                         step_size=sigma_lr,
-                        trust_region=0.1,  # Max 10% change per iteration
+                        trust_region=2.0,  # Loose sanity bound (root cause fixed via detach)
                         eps=eps,
                     )
 
