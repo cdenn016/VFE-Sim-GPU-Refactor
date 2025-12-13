@@ -211,9 +211,13 @@ def main():
         with torch.no_grad():
             logits, info = model(input_ids, targets=targets, n_vfe_steps=20)
 
-        metrics = info['metrics']
+        # Metrics are prefixed with layer, e.g. 'layer_0/vfe_total'
+        ce_key = 'ce_loss' if 'ce_loss' in info['metrics'] else 'layer_0/ce_loss'
+        vfe_key = 'layer_0/vfe_total' if 'layer_0/vfe_total' in info['metrics'] else None
         momentum_str = "with momentum" if use_momentum else "no momentum"
-        print(f"  {momentum_str}: VFE loss = {metrics['vfe_loss']:.4f}, CE = {metrics['ce_loss']:.4f}")
+        ce_val = info['metrics'].get(ce_key, 0.0)
+        vfe_val = info['metrics'].get(vfe_key, 0.0) if vfe_key else 0.0
+        print(f"  {momentum_str}: VFE = {vfe_val:.4f}, CE = {ce_val:.4f}")
 
     print("\nDone!")
 
