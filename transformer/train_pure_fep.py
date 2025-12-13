@@ -68,6 +68,26 @@ CONFIG = {
     # VFE mode - CRITICAL for gradient flow!
     'differentiable_vfe': True,   # Use autograd for VFE (enables backprop through dynamics)
 
+    # =========================================================================
+    # ADVANCED FEP FEATURES (experimental, all OFF by default)
+    # =========================================================================
+    # Prior coupling: priors learn from each other via KL(p_i || Ω_ij·p_j)
+    'prior_coupling_enabled': False,
+    'lambda_prior': 0.1,          # Weight for prior-prior coupling
+
+    # Gradient-based prior updates: use VFE gradient instead of EMA
+    'gradient_prior_updates': False,
+    'prior_grad_lr': 0.01,        # LR for gradient-based prior updates
+
+    # Gauge field evolution: learn gauge frames via gradient descent
+    'gauge_evolution_enabled': False,
+    'gauge_lr': 0.01,             # LR for gauge frame evolution
+
+    # Dynamic layers: spawn/merge layers based on VFE (experimental)
+    'dynamic_layers_enabled': False,
+    'layer_spawn_threshold': 0.5,
+    'max_layers': 8,
+
     # Training
     'batch_size': 32,
     'epochs': 10,
@@ -291,7 +311,17 @@ def main():
         belief_steps=config['n_vfe_steps'],
         prior_update_interval=config['prior_update_interval'],
         grad_clip=config['grad_clip'],
-        differentiable_vfe=config.get('differentiable_vfe', True),  # Enable gradient flow
+        differentiable_vfe=config.get('differentiable_vfe', True),
+        # Advanced FEP features
+        prior_coupling_enabled=config.get('prior_coupling_enabled', False),
+        lambda_prior=config.get('lambda_prior', 0.1),
+        gradient_prior_updates=config.get('gradient_prior_updates', False),
+        prior_grad_lr=config.get('prior_grad_lr', 0.01),
+        gauge_evolution_enabled=config.get('gauge_evolution_enabled', False),
+        gauge_lr=config.get('gauge_lr', 0.01),
+        dynamic_layers_enabled=config.get('dynamic_layers_enabled', False),
+        layer_spawn_threshold=config.get('layer_spawn_threshold', 0.5),
+        max_layers=config.get('max_layers', 8),
     )
 
     print(f"\nModel config:")
@@ -302,6 +332,14 @@ def main():
     print(f"  prior_lr: {model_config.prior_lr}")
     print(f"  alpha: {model_config.alpha}")
     print(f"  n_vfe_steps: {config['n_vfe_steps']}")
+
+    # Print advanced features if enabled
+    if model_config.prior_coupling_enabled:
+        print(f"  [ENABLED] Prior coupling: λ_γ={model_config.lambda_prior}")
+    if model_config.gradient_prior_updates:
+        print(f"  [ENABLED] Gradient prior updates: lr={model_config.prior_grad_lr}")
+    if model_config.gauge_evolution_enabled:
+        print(f"  [ENABLED] Gauge evolution: lr={model_config.gauge_lr}")
 
     # Create model
     print(f"\nCreating model...")
