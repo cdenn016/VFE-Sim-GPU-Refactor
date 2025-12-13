@@ -34,8 +34,8 @@ CONFIG = {
     # Architecture (embed_dim MUST be ODD for SO(3) irreps!)
     'embed_dim': 127,             # K - embedding dimension
     'num_layers': 2,              # Hierarchical scales
-    'seq_length': 128,            # Max sequence length
-    'vocab_size': 10000,          # Will be overwritten if using dataset
+    'seq_length': 24,            # Max sequence length
+    'vocab_size': 5000,          # Will be overwritten if using dataset
 
     # Irrep structure for SO(3) decomposition
     # Each tuple: (label, multiplicity, dim) where dim is 1,3,5,7,...
@@ -48,15 +48,15 @@ CONFIG = {
     ],  # = 127 total
 
     # VFE parameters
-    'alpha': 0.01,                # Self-coupling weight KL(q||p)
+    'alpha': 1,                # Self-coupling weight KL(q||p)
     'lambda_belief': 1.0,         # Belief alignment weight
-    'kappa': 0.1,                 # Attention temperature (LOWER = sharper attention!)
+    'kappa': 1,                 # Attention temperature (LOWER = sharper attention!)
 
     # Learning rates (natural gradient allows larger steps!)
-    'mu_lr': 0.05,                # Belief mean update (slightly reduced for stability)
-    'sigma_lr': 0.025,            # Belief variance update
-    'prior_lr': 0.1,              # Prior update (FASTER learning)
-    'phi_lr': 0.05,               # Gauge frame update
+    'mu_lr': 0.1,                # Belief mean update (slightly reduced for stability)
+    'sigma_lr': 0.05,            # Belief variance update
+    'prior_lr': 0.05,              # Prior update (FASTER learning)
+    'phi_lr': 0.1,               # Gauge frame update
 
     # Timescales - CRITICAL FOR LEARNING!
     'n_vfe_steps': 5,             # VFE iterations per forward pass (MORE = better convergence)
@@ -89,8 +89,8 @@ CONFIG = {
     'max_layers': 8,
 
     # Training
-    'batch_size': 32,
-    'epochs': 10,
+    'batch_size': 24,
+    'epochs': 2,
     'log_interval': 50,           # More frequent logging
 
     # Data

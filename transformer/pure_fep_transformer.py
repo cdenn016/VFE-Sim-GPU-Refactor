@@ -336,7 +336,10 @@ class PureFEPLayer(nn.Module):
         # ==================================================================
         # 2. Compute VFE loss and gradients
         # ==================================================================
-        if self.config.differentiable_vfe:
+        # Check if gradients are enabled (disabled during evaluation with @torch.no_grad())
+        grad_enabled = torch.is_grad_enabled() and mu_q.requires_grad
+
+        if self.config.differentiable_vfe and grad_enabled:
             # DIFFERENTIABLE MODE: Compute VFE via autograd
             #
             # CRITICAL FIX: Only use create_graph=True on FINAL step!
@@ -467,12 +470,15 @@ class PureFEPLayer(nn.Module):
         # ==================================================================
         # 7. Update gauge frames (if gauge evolution enabled)
         # ==================================================================
-        if self.config.gauge_evolution_enabled and phi.requires_grad:
+        # Only update gauge frames during training with gradients enabled
+        if self.config.gauge_evolution_enabled and phi.requires_grad and grad_enabled:
             # Compute gradient of VFE w.r.t. gauge frames
             # The gauge frames affect attention via transport operators
+            # Use vfe_loss if we computed it in differentiable mode
+            loss_for_phi = vfe_loss if (self.config.differentiable_vfe and grad_enabled) else (kl_self + alignment)
             try:
                 grad_phi = torch.autograd.grad(
-                    vfe_loss if self.config.differentiable_vfe else kl_self + alignment,
+                    loss_for_phi,
                     phi,
                     create_graph=False,
                     retain_graph=True,
@@ -492,8 +498,10 @@ class PureFEPLayer(nn.Module):
         # ==================================================================
         # 8. Compute metrics
         # ==================================================================
-        if not self.config.differentiable_vfe:
-            # Recompute for metrics (only needed in analytical mode)
+        # Recompute metrics if we didn't run differentiable path
+        # (either analytical mode or eval mode with grad disabled)
+        if not (self.config.differentiable_vfe and grad_enabled):
+            # Recompute for metrics (needed in analytical mode or eval mode)
             kl_self = 0.5 * (
                 sigma_q / sigma_p.clamp(min=self.config.eps)
                 + (mu_q - mu_p)**2 / sigma_p.clamp(min=self.config.eps)
