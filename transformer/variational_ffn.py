@@ -1039,14 +1039,23 @@ class VariationalFFNGradientEngine(nn.Module):
                     grad_mu, grad_sigma, sigma_current
                 )
 
-                # Update: descent direction (negative gradient) with trust region
-                # Limit mu change to avoid drifting too far from prior (which causes gradient explosion)
+                # Update: descent direction (negative gradient) with WHITENED trust region
+                # The natural gradient nat_grad_mu = Σ @ grad scales with σ, so we need
+                # whitened trust region: ||δμ / √σ|| instead of ||δμ|| / ||μ||
                 delta_mu = -self.lr * nat_grad_mu
-                mu_norm = torch.linalg.norm(mu_current, dim=-1, keepdim=True).clamp(min=1e-6)
-                delta_norm = torch.linalg.norm(delta_mu, dim=-1, keepdim=True)
-                # Trust region: max 20% change per iteration
-                mu_trust_region = 0.2
-                scale = torch.clamp(mu_trust_region * mu_norm / (delta_norm + 1e-6), max=1.0)
+
+                # Whitened trust region for mu (diagonal approximation)
+                if is_diagonal_cov:
+                    sigma_sqrt = torch.sqrt(sigma_current.clamp(min=1e-6))
+                    whitened_delta = delta_mu / sigma_sqrt  # Whiten by √σ
+                else:
+                    # For full covariance, use diagonal approximation
+                    sigma_diag = torch.diagonal(sigma_current, dim1=-2, dim2=-1).clamp(min=1e-6)
+                    whitened_delta = delta_mu / torch.sqrt(sigma_diag)
+
+                whitened_norm = torch.linalg.norm(whitened_delta, dim=-1, keepdim=True)
+                mu_trust_region = 2.0  # Trust region on whitened norm
+                scale = torch.clamp(mu_trust_region / (whitened_norm + 1e-6), max=1.0)
                 mu_current = mu_current + scale * delta_mu
 
                 # Update sigma using SPD-preserving retraction
@@ -1411,14 +1420,23 @@ class VariationalFFNDynamic(nn.Module):
             )
 
             # =================================================================
-            # STEP 4: Update beliefs (E-step)
+            # STEP 4: Update beliefs (E-step) with WHITENED trust region
             # =================================================================
-            # Trust region on mu to prevent drift from prior
+            # The natural gradient nat_grad_mu = Σ @ grad scales with σ
+            # Use whitened trust region: ||δμ / √σ|| instead of raw norm
             delta_mu = -self.lr * nat_grad_mu
-            mu_norm = torch.linalg.norm(mu_current, dim=-1, keepdim=True).clamp(min=eps)
-            delta_norm = torch.linalg.norm(delta_mu, dim=-1, keepdim=True)
-            mu_trust_region = 0.2  # Max 20% change per iteration
-            scale = torch.clamp(mu_trust_region * mu_norm / (delta_norm + eps), max=1.0)
+
+            # Whitened trust region for mu
+            if is_diagonal:
+                sigma_sqrt = torch.sqrt(sigma_current.clamp(min=eps))
+                whitened_delta = delta_mu / sigma_sqrt
+            else:
+                sigma_diag = torch.diagonal(sigma_current, dim1=-2, dim2=-1).clamp(min=eps)
+                whitened_delta = delta_mu / torch.sqrt(sigma_diag)
+
+            whitened_norm = torch.linalg.norm(whitened_delta, dim=-1, keepdim=True)
+            mu_trust_region = 2.0  # Trust region on whitened norm
+            scale = torch.clamp(mu_trust_region / (whitened_norm + eps), max=1.0)
             mu_current = mu_current + scale * delta_mu
 
             if self.update_sigma:
@@ -1783,14 +1801,23 @@ class VariationalFFNDynamicStable(nn.Module):
             )
 
             # =================================================================
-            # STEP 9: Update beliefs
+            # STEP 9: Update beliefs with WHITENED trust region
             # =================================================================
-            # Trust region on mu to prevent drift from prior
+            # The natural gradient nat_grad_mu = Σ @ grad scales with σ
+            # Use whitened trust region: ||δμ / √σ|| instead of raw norm
             delta_mu = -self.lr * nat_grad_mu
-            mu_norm = torch.linalg.norm(mu_current, dim=-1, keepdim=True).clamp(min=eps)
-            delta_norm = torch.linalg.norm(delta_mu, dim=-1, keepdim=True)
-            mu_trust_region = 0.2  # Max 20% change per iteration
-            scale = torch.clamp(mu_trust_region * mu_norm / (delta_norm + eps), max=1.0)
+
+            # Whitened trust region for mu
+            if is_diagonal:
+                sigma_sqrt = torch.sqrt(sigma_current.clamp(min=eps))
+                whitened_delta = delta_mu / sigma_sqrt
+            else:
+                sigma_diag = torch.diagonal(sigma_current, dim1=-2, dim2=-1).clamp(min=eps)
+                whitened_delta = delta_mu / torch.sqrt(sigma_diag)
+
+            whitened_norm = torch.linalg.norm(whitened_delta, dim=-1, keepdim=True)
+            mu_trust_region = 2.0  # Trust region on whitened norm
+            scale = torch.clamp(mu_trust_region / (whitened_norm + eps), max=1.0)
             mu_current = mu_current + scale * delta_mu
 
             if self.update_sigma:
