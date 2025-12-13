@@ -9,6 +9,9 @@ Uses torch.compile for kernel fusion when available (PyTorch 2.0+).
 These operations are critical for achieving the 50-100x speedup target
 by replacing Python loops with vectorized GPU kernels.
 
+Note: Core KL and pairwise functions are imported from gradients.torch_energy
+to avoid duplication. This module adds compilation and additional utilities.
+
 Author: Claude (refactoring)
 Date: December 2024
 """
@@ -17,9 +20,17 @@ import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional
 
+# Import canonical implementations from torch_energy (avoid duplication)
+from gradients.torch_energy import (
+    kl_divergence_gaussian as batched_kl_divergence,
+    batched_pairwise_kl as compute_all_pairwise_kl,
+    transport_gaussian as batched_transport_gaussian,
+    compute_transport_operator,
+)
+
 
 # =============================================================================
-# Core Batched Operations
+# Core Batched Operations (unique to this module)
 # =============================================================================
 
 def batched_matrix_exp(X: torch.Tensor) -> torch.Tensor:
@@ -80,7 +91,7 @@ def batched_logdet_from_cholesky(L: torch.Tensor, eps: float = 1e-8) -> torch.Te
 
 
 # =============================================================================
-# Batched Transport Operations
+# Batched Transport Operator (separate phi arrays version)
 # =============================================================================
 
 def batched_transport_operator(
@@ -111,147 +122,9 @@ def batched_transport_operator(
     return exp_i @ exp_neg_j
 
 
-def batched_transport_gaussian(
-    mu: torch.Tensor,      # (..., K)
-    Sigma: torch.Tensor,   # (..., K, K)
-    Omega: torch.Tensor,   # (..., K, K)
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Transport Gaussian distributions by operators.
-
-    Args:
-        mu: Means, shape (..., K)
-        Sigma: Covariances, shape (..., K, K)
-        Omega: Transport operators, shape (..., K, K)
-
-    Returns:
-        mu_t: Transported means, shape (..., K)
-        Sigma_t: Transported covariances, shape (..., K, K)
-    """
-    # Transport mean
-    mu_t = torch.einsum('...ij,...j->...i', Omega, mu)
-
-    # Transport covariance
-    Sigma_t = Omega @ Sigma @ Omega.transpose(-2, -1)
-
-    # Symmetrize
-    Sigma_t = 0.5 * (Sigma_t + Sigma_t.transpose(-2, -1))
-
-    return mu_t, Sigma_t
-
-
 # =============================================================================
-# Batched KL Divergence
+# Attention Computation
 # =============================================================================
-
-def batched_kl_divergence(
-    mu_q: torch.Tensor,     # (..., K)
-    Sigma_q: torch.Tensor,  # (..., K, K)
-    mu_p: torch.Tensor,     # (..., K)
-    Sigma_p: torch.Tensor,  # (..., K, K)
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    """
-    Batched KL divergence: KL(q || p) for multivariate Gaussians.
-
-    Args:
-        mu_q: Source means, shape (..., K)
-        Sigma_q: Source covariances, shape (..., K, K)
-        mu_p: Target means, shape (..., K)
-        Sigma_p: Target covariances, shape (..., K, K)
-        eps: Regularization
-
-    Returns:
-        KL divergences, shape (...)
-    """
-    K = mu_q.shape[-1]
-    device = mu_q.device
-    dtype = mu_q.dtype
-
-    # Regularize
-    eye = torch.eye(K, device=device, dtype=dtype)
-    Sigma_q_reg = Sigma_q + eps * eye
-    Sigma_p_reg = Sigma_p + eps * eye
-
-    # Cholesky
-    L_q = torch.linalg.cholesky(Sigma_q_reg)
-    L_p = torch.linalg.cholesky(Sigma_p_reg)
-
-    # Log determinants
-    logdet_q = batched_logdet_from_cholesky(L_q, eps)
-    logdet_p = batched_logdet_from_cholesky(L_p, eps)
-
-    # Trace term
-    Sigma_p_inv = torch.cholesky_inverse(L_p)
-    trace = torch.sum(Sigma_p_inv * Sigma_q_reg, dim=(-2, -1))
-
-    # Quadratic term
-    delta = mu_p - mu_q
-    y = torch.linalg.solve_triangular(L_p, delta.unsqueeze(-1), upper=False)
-    quad = torch.sum(y ** 2, dim=(-2, -1))
-
-    # KL
-    kl = 0.5 * (trace + quad - K + logdet_p - logdet_q)
-
-    return kl.clamp(min=0.0)
-
-
-# =============================================================================
-# Full Pairwise Operations (N x N)
-# =============================================================================
-
-def compute_all_pairwise_kl(
-    mu: torch.Tensor,        # (N, K)
-    Sigma: torch.Tensor,     # (N, K, K)
-    phi: torch.Tensor,       # (N, 3)
-    generators: torch.Tensor, # (3, K, K)
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    """
-    Compute all N x N pairwise KL divergences with transport.
-
-    KL[i, j] = KL(q_i || Omega_ij[q_j])
-
-    Args:
-        mu: All means, shape (N, K)
-        Sigma: All covariances, shape (N, K, K)
-        phi: All gauge fields, shape (N, 3)
-        generators: Lie algebra generators, shape (3, K, K)
-        eps: Regularization
-
-    Returns:
-        KL matrix, shape (N, N)
-    """
-    N, K = mu.shape
-    device = mu.device
-    dtype = mu.dtype
-
-    # Compute all transport operators: Omega[i, j] = exp(phi_i . J) @ exp(-phi_j . J)
-    phi_i = phi.unsqueeze(1)  # (N, 1, 3)
-    phi_j = phi.unsqueeze(0)  # (1, N, 3)
-
-    X_i = torch.einsum('nia,akl->nikl', phi_i.expand(N, N, 3), generators)
-    X_j = torch.einsum('nja,akl->njkl', phi_j.expand(N, N, 3), generators)
-
-    exp_i = torch.linalg.matrix_exp(X_i)
-    exp_neg_j = torch.linalg.matrix_exp(-X_j)
-    Omega = exp_i @ exp_neg_j  # (N, N, K, K)
-
-    # Transport all targets
-    mu_j_t = torch.einsum('ijkl,jl->ijk', Omega, mu)  # (N, N, K)
-    Sigma_j = Sigma.unsqueeze(0).expand(N, N, K, K)
-    Sigma_j_t = Omega @ Sigma_j @ Omega.transpose(-2, -1)
-    Sigma_j_t = 0.5 * (Sigma_j_t + Sigma_j_t.transpose(-2, -1))
-
-    # Broadcast sources
-    mu_i = mu.unsqueeze(1).expand(N, N, K)
-    Sigma_i = Sigma.unsqueeze(1).expand(N, N, K, K)
-
-    # Compute KL for all pairs
-    kl = batched_kl_divergence(mu_i, Sigma_i, mu_j_t, Sigma_j_t, eps)
-
-    return kl
-
 
 def compute_softmax_attention(
     kl_matrix: torch.Tensor,  # (N, N)
