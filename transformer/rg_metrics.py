@@ -38,8 +38,30 @@ Date: December 2025
 import torch
 import torch.nn.functional as F
 import numpy as np
-from typing import Optional, Tuple, List, Dict, NamedTuple
+from typing import Optional, Tuple, List, Dict, NamedTuple, Union
 from dataclasses import dataclass, field
+
+
+# =============================================================================
+# Backend Compatibility Helpers
+# =============================================================================
+
+def _to_tensor(x: Union[np.ndarray, torch.Tensor, None], device: str = 'cpu') -> Optional[torch.Tensor]:
+    """Convert NumPy array to PyTorch tensor if needed."""
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(x.astype(np.float32)).to(device)
+    return x
+
+
+def _to_numpy(x: Union[np.ndarray, torch.Tensor, None]) -> Optional[np.ndarray]:
+    """Convert PyTorch tensor to NumPy array if needed."""
+    if x is None:
+        return None
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return x
 
 
 # =============================================================================
@@ -165,8 +187,8 @@ class RGFlowSummary:
 # =============================================================================
 
 def compute_modularity(
-    beta: torch.Tensor,
-    cluster_labels: Optional[torch.Tensor] = None,
+    beta: Union[torch.Tensor, np.ndarray],
+    cluster_labels: Optional[Union[torch.Tensor, np.ndarray]] = None,
     resolution: float = 1.0,
 ) -> float:
     """
@@ -193,6 +215,10 @@ def compute_modularity(
     Returns:
         modularity: Average modularity across batch
     """
+    # Auto-convert NumPy to PyTorch
+    beta = _to_tensor(beta)
+    cluster_labels = _to_tensor(cluster_labels) if cluster_labels is not None else None
+
     # Handle batch dimension
     if beta.dim() == 2:
         beta = beta.unsqueeze(0)
@@ -240,7 +266,7 @@ def compute_modularity(
 
 
 def compute_effective_rank(
-    beta: torch.Tensor,
+    beta: Union[torch.Tensor, np.ndarray],
     eps: float = 1e-10,
 ) -> float:
     """
@@ -254,12 +280,15 @@ def compute_effective_rank(
     Lower effective rank indicates attention is concentrating on fewer modes.
 
     Args:
-        beta: Attention matrix (B, N, N) or (N, N)
+        beta: Attention matrix (B, N, N) or (N, N) - NumPy or PyTorch
         eps: Numerical stability
 
     Returns:
         effective_rank: Average effective rank across batch
     """
+    # Auto-convert NumPy to PyTorch
+    beta = _to_tensor(beta)
+
     if beta.dim() == 2:
         beta = beta.unsqueeze(0)
 
@@ -290,7 +319,7 @@ def compute_effective_rank(
 
 
 def compute_beta_entropy(
-    beta: torch.Tensor,
+    beta: Union[torch.Tensor, np.ndarray],
     eps: float = 1e-10,
 ) -> float:
     """
@@ -302,12 +331,15 @@ def compute_beta_entropy(
     Higher entropy means attention is more diffuse (uniform).
 
     Args:
-        beta: Attention matrix (B, N, N) or (N, N)
+        beta: Attention matrix (B, N, N) or (N, N) - NumPy or PyTorch
         eps: Numerical stability
 
     Returns:
         mean_entropy: Average entropy across all positions
     """
+    # Auto-convert NumPy to PyTorch
+    beta = _to_tensor(beta)
+
     if beta.dim() == 2:
         beta = beta.unsqueeze(0)
 
@@ -324,7 +356,7 @@ def compute_beta_entropy(
 # =============================================================================
 
 def detect_clusters_spectral(
-    beta: torch.Tensor,
+    beta: Union[torch.Tensor, np.ndarray],
     n_clusters: Optional[int] = None,
     min_clusters: int = 2,
     max_clusters: int = None,
@@ -335,7 +367,7 @@ def detect_clusters_spectral(
     Uses the Fiedler eigenvector method for graph partitioning.
 
     Args:
-        beta: Attention matrix (B, N, N) or (N, N)
+        beta: Attention matrix (B, N, N) or (N, N) - NumPy or PyTorch
         n_clusters: Number of clusters (auto-detect if None)
         min_clusters: Minimum clusters to consider
         max_clusters: Maximum clusters (default: N//2)
@@ -343,6 +375,9 @@ def detect_clusters_spectral(
     Returns:
         cluster_labels: Cluster assignments (B, N) or (N,)
     """
+    # Auto-convert NumPy to PyTorch
+    beta = _to_tensor(beta)
+
     squeeze_output = False
     if beta.dim() == 2:
         beta = beta.unsqueeze(0)
@@ -627,9 +662,9 @@ def _agglomerative_kl(
 # =============================================================================
 
 def compute_kl_within_clusters(
-    mu: torch.Tensor,           # (B, N, K) belief means
-    sigma: torch.Tensor,        # (B, N, K) or (B, N, K, K)
-    cluster_labels: torch.Tensor,  # (B, N)
+    mu: Union[torch.Tensor, np.ndarray],           # (B, N, K) belief means
+    sigma: Union[torch.Tensor, np.ndarray],        # (B, N, K) or (B, N, K, K)
+    cluster_labels: Union[torch.Tensor, np.ndarray],  # (B, N)
     eps: float = 1e-6,
 ) -> Tuple[float, float]:
     """
@@ -638,14 +673,19 @@ def compute_kl_within_clusters(
     Lower values indicate tighter clusters (more coherent meta-agents).
 
     Args:
-        mu: Belief means
-        sigma: Belief covariances
-        cluster_labels: Cluster assignments
+        mu: Belief means - NumPy or PyTorch
+        sigma: Belief covariances - NumPy or PyTorch
+        cluster_labels: Cluster assignments - NumPy or PyTorch
 
     Returns:
         mean_kl: Mean KL divergence within clusters
         std_kl: Standard deviation
     """
+    # Auto-convert NumPy to PyTorch
+    mu = _to_tensor(mu)
+    sigma = _to_tensor(sigma)
+    cluster_labels = _to_tensor(cluster_labels)
+
     if mu.dim() == 2:
         mu = mu.unsqueeze(0)
         sigma = sigma.unsqueeze(0)
@@ -689,9 +729,9 @@ def compute_kl_within_clusters(
 
 
 def compute_kl_between_clusters(
-    mu: torch.Tensor,           # (B, N, K)
-    sigma: torch.Tensor,        # (B, N, K) or (B, N, K, K)
-    cluster_labels: torch.Tensor,  # (B, N)
+    mu: Union[torch.Tensor, np.ndarray],           # (B, N, K)
+    sigma: Union[torch.Tensor, np.ndarray],        # (B, N, K) or (B, N, K, K)
+    cluster_labels: Union[torch.Tensor, np.ndarray],  # (B, N)
     eps: float = 1e-6,
 ) -> Tuple[float, float]:
     """
@@ -700,14 +740,19 @@ def compute_kl_between_clusters(
     Stable values indicate clusters remain distinct (good RG behavior).
 
     Args:
-        mu: Belief means
-        sigma: Belief covariances
-        cluster_labels: Cluster assignments
+        mu: Belief means - NumPy or PyTorch
+        sigma: Belief covariances - NumPy or PyTorch
+        cluster_labels: Cluster assignments - NumPy or PyTorch
 
     Returns:
         mean_kl: Mean KL between cluster centroids
         std_kl: Standard deviation
     """
+    # Auto-convert NumPy to PyTorch
+    mu = _to_tensor(mu)
+    sigma = _to_tensor(sigma)
+    cluster_labels = _to_tensor(cluster_labels)
+
     if mu.dim() == 2:
         mu = mu.unsqueeze(0)
         sigma = sigma.unsqueeze(0)
@@ -862,9 +907,9 @@ def construct_meta_agents(
 # =============================================================================
 
 def compute_rg_diagnostics(
-    mu: torch.Tensor,           # (B, N, K)
-    sigma: torch.Tensor,        # (B, N, K) or (B, N, K, K)
-    beta: torch.Tensor,         # (B, N, N)
+    mu: Union[torch.Tensor, np.ndarray],           # (B, N, K)
+    sigma: Union[torch.Tensor, np.ndarray],        # (B, N, K) or (B, N, K, K)
+    beta: Union[torch.Tensor, np.ndarray],         # (B, N, N)
     step: int,
     auto_cluster: bool = True,
     n_clusters: Optional[int] = None,
@@ -873,9 +918,9 @@ def compute_rg_diagnostics(
     Compute full RG diagnostics for a single VFE step.
 
     Args:
-        mu: Belief means
-        sigma: Belief covariances
-        beta: Attention matrix
+        mu: Belief means - NumPy or PyTorch
+        sigma: Belief covariances - NumPy or PyTorch
+        beta: Attention matrix - NumPy or PyTorch
         step: VFE iteration number
         auto_cluster: Auto-detect clusters if True
         n_clusters: Fixed number of clusters (if not auto)
@@ -883,6 +928,11 @@ def compute_rg_diagnostics(
     Returns:
         RGDiagnostics with all metrics
     """
+    # Auto-convert NumPy to PyTorch
+    mu = _to_tensor(mu)
+    sigma = _to_tensor(sigma)
+    beta = _to_tensor(beta)
+
     # Detect clusters
     if auto_cluster:
         cluster_labels = detect_clusters_spectral(beta, n_clusters=n_clusters)
