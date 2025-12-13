@@ -891,18 +891,23 @@ def plot_trajectory_dashboard(
     # Row 3: Attention & Phase Space
     # =========================================================================
 
-    # 3.1: Attention (last layer)
+    # 3.1: Attention (last layer) - with diagonal masked and log scale
     ax = fig.add_subplot(gs[2, 0])
     last_layer = trajectory.layer_trajectories[-1] if trajectory.layer_trajectories else None
     if last_layer and last_layer.beta is not None:
         beta = last_layer.beta[batch_idx]
         if beta.ndim == 3:
             beta = beta[0]  # First head
-        im = ax.imshow(beta, cmap=get_attention_cmap(), vmin=0)
+        beta = np.array(beta)
+        # Mask diagonal and use log scale for better visualization
+        beta_plot = beta.copy()
+        np.fill_diagonal(beta_plot, np.nan)
+        beta_plot = np.log10(np.maximum(beta_plot, 1e-6))
+        im = ax.imshow(beta_plot, cmap='viridis', aspect='auto')
         ax.set_xlabel('Key')
         ax.set_ylabel('Query')
-        ax.set_title(f'Attention (L{last_layer.layer_idx})')
-        plt.colorbar(im, ax=ax)
+        ax.set_title(f'Attention (L{last_layer.layer_idx}) [log, diag masked]')
+        plt.colorbar(im, ax=ax, label='log₁₀(β)')
     else:
         ax.text(0.5, 0.5, 'No attention data', ha='center', va='center')
         ax.set_title('Attention (no data)')
