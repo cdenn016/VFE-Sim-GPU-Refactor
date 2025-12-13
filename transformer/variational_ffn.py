@@ -1035,24 +1035,24 @@ class VariationalFFNGradientEngine(nn.Module):
 
                 # Update sigma using SPD-preserving retraction
                 # This is CRITICAL for stability with multiple iterations!
+                # Use MUCH smaller step size for sigma (like simulation_runner uses 0.005 vs 0.1 for mu)
+                sigma_lr = self.lr * 0.05  # 5% of mu learning rate
                 if self.update_sigma and is_diagonal_cov:
                     # Diagonal case: exponential retraction σ_new = σ * exp(τ * δσ / σ)
-                    # The natural gradient is the descent direction (negative)
                     sigma_current = retract_spd_diagonal_torch(
                         sigma_diag=sigma_current,
-                        delta_sigma=-nat_grad_sigma,  # Descent direction
-                        step_size=self.lr,
-                        trust_region=5.0,  # Limit step size in whitened space
+                        delta_sigma=-nat_grad_sigma,
+                        step_size=sigma_lr,
+                        trust_region=0.2,  # Max 20% change per iteration
                         eps=1e-6,
                     )
                 elif self.update_sigma and not is_diagonal_cov:
-                    # Full covariance: proper SPD manifold retraction
-                    # Σ_new = Σ^{1/2} exp(τ · Σ^{-1/2} ΔΣ Σ^{-1/2}) Σ^{1/2}
+                    # Full covariance: SPD-preserving retraction with trust region
                     sigma_current = retract_spd_torch(
                         Sigma=sigma_current,
-                        delta_Sigma=-nat_grad_sigma,  # Descent direction
-                        step_size=self.lr,
-                        trust_region=2.0,  # Conservative for full covariance
+                        delta_Sigma=-nat_grad_sigma,
+                        step_size=sigma_lr,
+                        trust_region=0.1,  # Max 10% change per iteration
                         eps=1e-6,
                     )
 
@@ -1401,20 +1401,22 @@ class VariationalFFNDynamic(nn.Module):
 
             if self.update_sigma:
                 # Use SPD-preserving retraction for stability with multiple iterations
+                # Much smaller lr for sigma (matches simulation_runner: 0.005 vs 0.1)
+                sigma_lr = self.lr * 0.05
                 if is_diagonal:
                     sigma_current = retract_spd_diagonal_torch(
                         sigma_diag=sigma_current,
                         delta_sigma=-nat_grad_sigma,
-                        step_size=self.lr,
-                        trust_region=5.0,
+                        step_size=sigma_lr,
+                        trust_region=0.2,  # Max 20% change per iteration
                         eps=eps,
                     )
                 else:
                     sigma_current = retract_spd_torch(
                         Sigma=sigma_current,
                         delta_Sigma=-nat_grad_sigma,
-                        step_size=self.lr,
-                        trust_region=2.0,
+                        step_size=sigma_lr,
+                        trust_region=0.1,  # Max 10% change per iteration
                         eps=eps,
                     )
 
@@ -1765,20 +1767,22 @@ class VariationalFFNDynamicStable(nn.Module):
 
             if self.update_sigma:
                 # Use SPD-preserving retraction for stability with multiple iterations
+                # Much smaller lr for sigma (matches simulation_runner: 0.005 vs 0.1)
+                sigma_lr = self.lr * 0.05
                 if is_diagonal:
                     sigma_current = retract_spd_diagonal_torch(
                         sigma_diag=sigma_current,
                         delta_sigma=-nat_grad_sigma,
-                        step_size=self.lr,
-                        trust_region=5.0,
+                        step_size=sigma_lr,
+                        trust_region=0.2,  # Max 20% change per iteration
                         eps=eps,
                     )
                 else:
                     sigma_current = retract_spd_torch(
                         Sigma=sigma_current,
                         delta_Sigma=-nat_grad_sigma,
-                        step_size=self.lr,
-                        trust_region=2.0,
+                        step_size=sigma_lr,
+                        trust_region=0.1,  # Max 10% change per iteration
                         eps=eps,
                     )
 
