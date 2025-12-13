@@ -199,16 +199,9 @@ def is_compiled() -> bool:
 # Utility Functions
 # =============================================================================
 
-def symmetrize(M: torch.Tensor) -> torch.Tensor:
-    """Symmetrize a matrix: sym(M) = (M + Mᵀ)/2"""
-    return 0.5 * (M + M.transpose(-1, -2))
-
-
 def ensure_spd(Sigma: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
-    Project matrix to SPD cone via eigenvalue clipping.
-
-    Handles AMP/mixed precision safely by computing eigendecomposition in FP32.
+    Ensure matrix is symmetric positive definite.
 
     Args:
         Sigma: Matrix, shape (..., K, K)
@@ -217,30 +210,17 @@ def ensure_spd(Sigma: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     Returns:
         SPD matrix, shape (..., K, K)
     """
-    orig_dtype = Sigma.dtype
-    K = Sigma.shape[-1]
-    device = Sigma.device
+    # Symmetrize
+    Sigma_sym = 0.5 * (Sigma + Sigma.transpose(-2, -1))
 
-    # Add diagonal regularization before eigendecomposition
-    eye = torch.eye(K, device=device, dtype=Sigma.dtype)
-    # Broadcast eye to match batch dimensions
-    for _ in range(Sigma.ndim - 2):
-        eye = eye.unsqueeze(0)
-    Sigma_reg = Sigma + eps * eye
-    Sigma_reg = symmetrize(Sigma_reg)
+    # Eigendecomposition
+    eigvals, eigvecs = torch.linalg.eigh(Sigma_sym)
 
-    # Eigendecomposition (force FP32 for numerical stability under AMP)
-    try:
-        eigenvalues, eigenvectors = torch.linalg.eigh(Sigma_reg.float())
-        # Clip eigenvalues to be positive
-        eigenvalues_clipped = torch.clamp(eigenvalues, min=eps)
-        # Reconstruct and cast back to original dtype
-        Sigma_spd = (eigenvectors @ torch.diag_embed(eigenvalues_clipped) @ eigenvectors.transpose(-1, -2)).to(orig_dtype)
-    except RuntimeError:
-        # Fallback to regularized identity
-        Sigma_spd = (eps * eye).expand_as(Sigma).clone()
+    # Clamp eigenvalues
+    eigvals_clamped = eigvals.clamp(min=eps)
 
-    return symmetrize(Sigma_spd)
+    # Reconstruct
+    return eigvecs @ torch.diag_embed(eigvals_clamped) @ eigvecs.transpose(-2, -1)
 
 
 def project_to_principal_ball(phi: torch.Tensor, max_norm: float = 3.1) -> torch.Tensor:
