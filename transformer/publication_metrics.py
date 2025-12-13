@@ -1528,8 +1528,22 @@ class PublicationMetrics:
         input_ids: torch.Tensor,
         tokenizer=None,
         save_name: str = "attention_heatmap",
+        mask_diagonal: bool = True,
+        log_scale: bool = True,
     ):
-        """Plot attention heatmap."""
+        """
+        Plot attention heatmap with enhanced visualization.
+
+        Args:
+            beta: Attention weights (B, N, N) or (B, H, N, N)
+            input_ids: Token IDs for labels
+            tokenizer: Optional tokenizer for decoding
+            save_name: Filename for saved plot
+            mask_diagonal: If True, mask out diagonal (self-attention) for clarity
+            log_scale: If True, use log scale to enhance small values
+        """
+        import numpy as np
+
         # Average over batch and heads
         if beta.dim() == 4:  # (B, H, N, N)
             attn = beta[0].mean(dim=0).cpu().numpy()  # First batch, avg heads
@@ -1537,6 +1551,23 @@ class PublicationMetrics:
             attn = beta[0].cpu().numpy()
 
         N = attn.shape[0]
+
+        # Mask diagonal (self-attention often dominates)
+        if mask_diagonal:
+            attn_masked = attn.copy()
+            np.fill_diagonal(attn_masked, np.nan)
+            attn_plot = attn_masked
+        else:
+            attn_plot = attn
+
+        # Apply log scale to enhance small values
+        if log_scale:
+            # Log scale: log10(attn + eps) to handle zeros
+            eps = 1e-6
+            attn_plot = np.log10(np.maximum(attn_plot, eps))
+            cbar_label = 'log₁₀(Attention Weight)'
+        else:
+            cbar_label = 'Attention Weight'
 
         # Get token labels
         if tokenizer is not None:
@@ -1552,7 +1583,9 @@ class PublicationMetrics:
 
         fig, ax = plt.subplots(figsize=(10, 8))
 
-        im = ax.imshow(attn, cmap='Greys', aspect='auto')
+        # Use viridis for log scale (better for continuous data)
+        cmap = 'viridis' if log_scale else 'Greys'
+        im = ax.imshow(attn_plot, cmap=cmap, aspect='auto')
 
         ax.set_xticks(range(min(N, 32)))
         ax.set_yticks(range(min(N, 32)))
@@ -1563,9 +1596,12 @@ class PublicationMetrics:
 
         ax.set_xlabel('Key Position')
         ax.set_ylabel('Query Position')
-        ax.set_title('Attention Weights (averaged over heads)')
+        title = 'Attention Weights (averaged over heads)'
+        if mask_diagonal:
+            title += ' [diagonal masked]'
+        ax.set_title(title)
 
-        plt.colorbar(im, ax=ax, label='Attention Weight')
+        plt.colorbar(im, ax=ax, label=cbar_label)
 
         plt.tight_layout()
         fig.savefig(self.interpretability.save_dir / f"{save_name}.png", dpi=150, bbox_inches='tight')

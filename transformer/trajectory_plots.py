@@ -390,6 +390,8 @@ def plot_attention_pattern(
     batch_idx: int = 0,
     figsize: Tuple[int, int] = (6, 5),
     save_path: Optional[str] = None,
+    mask_diagonal: bool = True,
+    log_scale: bool = True,
 ) -> Optional[plt.Figure]:
     """
     Plot attention matrix β for a specific layer and head.
@@ -401,6 +403,8 @@ def plot_attention_pattern(
         batch_idx: Which batch element
         figsize: Figure size
         save_path: If provided, save figure to this path
+        mask_diagonal: If True, mask out diagonal (self-attention) for clarity
+        log_scale: If True, use log scale to enhance small values
 
     Returns:
         matplotlib Figure or None if matplotlib unavailable
@@ -423,13 +427,36 @@ def plot_attention_pattern(
     if beta.ndim == 3:
         beta = beta[head_idx]  # (N, N)
 
+    # Convert to numpy for manipulation
+    beta = np.array(beta)
+
+    # Mask diagonal (self-attention often dominates)
+    if mask_diagonal:
+        beta_plot = beta.copy()
+        np.fill_diagonal(beta_plot, np.nan)
+    else:
+        beta_plot = beta
+
+    # Apply log scale to enhance small values
+    if log_scale:
+        eps = 1e-6
+        beta_plot = np.log10(np.maximum(beta_plot, eps))
+        cbar_label = 'log₁₀(β_ij)'
+        cmap = 'viridis'
+    else:
+        cbar_label = 'β_ij'
+        cmap = get_attention_cmap()
+
     fig, ax = plt.subplots(figsize=figsize)
 
-    im = ax.imshow(beta, cmap=get_attention_cmap(), vmin=0, vmax=beta.max())
+    im = ax.imshow(beta_plot, cmap=cmap, aspect='auto')
     ax.set_xlabel('Key (j)')
     ax.set_ylabel('Query (i)')
-    ax.set_title(f'Attention β (Layer {layer_idx}, Head {head_idx})')
-    plt.colorbar(im, ax=ax, label='β_ij')
+    title = f'Attention β (Layer {layer_idx}, Head {head_idx})'
+    if mask_diagonal:
+        title += ' [diag masked]'
+    ax.set_title(title)
+    plt.colorbar(im, ax=ax, label=cbar_label)
 
     plt.tight_layout()
 
