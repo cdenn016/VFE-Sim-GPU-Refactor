@@ -222,9 +222,27 @@ def gaussian_kl_divergence(
         if sigma_p is None:
             sigma_p = torch.eye(K, device=device, dtype=dtype).expand(*mu_p.shape[:-1], K, K)
 
-        # Regularize for numerical stability
-        sigma_q_reg = sigma_q + eps * torch.eye(K, device=device, dtype=dtype)
-        sigma_p_reg = sigma_p + eps * torch.eye(K, device=device, dtype=dtype)
+        # =================================================================
+        # ROBUST REGULARIZATION: Eigenvalue clamping for positive-definiteness
+        # =================================================================
+        # Simple additive regularization eps*I is insufficient when eigenvalues
+        # are significantly negative. Use eigenvalue clamping instead.
+        min_eig = 1e-4  # Minimum eigenvalue floor (larger than eps for stability)
+
+        def ensure_positive_definite(sigma, min_eig=min_eig):
+            """Ensure matrix is positive-definite via eigenvalue clamping."""
+            # Symmetrize first (handles numerical asymmetry)
+            sigma_sym = 0.5 * (sigma + sigma.transpose(-1, -2))
+            # Eigendecomposition
+            eigenvalues, eigenvectors = torch.linalg.eigh(sigma_sym)
+            # Clamp eigenvalues to minimum
+            eigenvalues_clamped = torch.clamp(eigenvalues, min=min_eig)
+            # Reconstruct: V @ diag(λ) @ V^T
+            sigma_pd = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
+            return sigma_pd
+
+        sigma_q_reg = ensure_positive_definite(sigma_q)
+        sigma_p_reg = ensure_positive_definite(sigma_p)
 
         # Compute Σ_p⁻¹ via Cholesky
         L_p = torch.linalg.cholesky(sigma_p_reg)

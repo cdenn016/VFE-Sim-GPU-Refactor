@@ -899,15 +899,16 @@ class VariationalFFNGradientEngine(nn.Module):
                 # (diagonal sigma update is simpler)
                 if self.update_sigma and is_diagonal_cov:
                     # For diagonal, simple additive update with positivity constraint
-                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=1e-6)
+                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=1e-4)
                 elif self.update_sigma and not is_diagonal_cov:
-                    # Full covariance update - use simple additive for now
-                    # (proper SPD retraction would be better but slower)
+                    # Full covariance update with proper eigenvalue clamping
                     sigma_current = sigma_current - self.lr * nat_grad_sigma
-                    # Ensure positive definiteness via eigenvalue clamping
+                    # Symmetrize
                     sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    # Add small regularization
-                    sigma_current = sigma_current + 1e-6 * torch.eye(K, device=device)
+                    # Eigenvalue clamping to ensure positive definiteness
+                    eigenvalues, eigenvectors = torch.linalg.eigh(sigma_current)
+                    eigenvalues_clamped = torch.clamp(eigenvalues, min=1e-4)
+                    sigma_current = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
 
             # Return updated parameters (detached from computation graph)
             if self.update_sigma:
@@ -1254,11 +1255,15 @@ class VariationalFFNDynamic(nn.Module):
 
             if self.update_sigma:
                 if is_diagonal:
-                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=eps)
+                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=1e-4)
                 else:
                     sigma_current = sigma_current - self.lr * nat_grad_sigma
+                    # Symmetrize
                     sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    sigma_current = sigma_current + eps * torch.eye(K, device=device, dtype=dtype)
+                    # Eigenvalue clamping to ensure positive definiteness
+                    eigenvalues, eigenvectors = torch.linalg.eigh(sigma_current)
+                    eigenvalues_clamped = torch.clamp(eigenvalues, min=1e-4)
+                    sigma_current = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
 
             # =================================================================
             # STEP 5: Optional M-step (prior update)
@@ -1607,11 +1612,15 @@ class VariationalFFNDynamicStable(nn.Module):
 
             if self.update_sigma:
                 if is_diagonal:
-                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=eps)
+                    sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=1e-4)
                 else:
                     sigma_current = sigma_current - self.lr * nat_grad_sigma
+                    # Symmetrize
                     sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    sigma_current = sigma_current + eps * torch.eye(K, device=device, dtype=dtype)
+                    # Eigenvalue clamping to ensure positive definiteness
+                    eigenvalues, eigenvectors = torch.linalg.eigh(sigma_current)
+                    eigenvalues_clamped = torch.clamp(eigenvalues, min=1e-4)
+                    sigma_current = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
 
             # =================================================================
             # STEP 10: Optional M-step
