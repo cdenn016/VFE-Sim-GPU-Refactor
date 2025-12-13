@@ -388,11 +388,14 @@ def compute_free_energy_loss(
     # =================================================================
     if alpha > 0.0:
         # Proper KL divergence between evolved beliefs and embedding priors
+        # CRITICAL: Detach sigmas to prevent gradient flow through Cholesky decomposition!
+        # This matches simulation_runner.py which uses NumPy (no autograd through Cholesky).
+        # Gradients to sigma embeddings come from other terms, not KL backward through Cholesky.
         kl_per_agent = gaussian_kl_divergence(
-            mu_q=mu_q,        # Evolved beliefs
-            sigma_q=sigma_q,  # Evolved covariances (or None)
+            mu_q=mu_q,        # Evolved beliefs (gradients flow through mu)
+            sigma_q=sigma_q.detach() if sigma_q is not None else None,  # Detach to avoid Cholesky backward
             mu_p=mu_p,        # Embedding priors
-            sigma_p=sigma_p,  # Embedding covariances
+            sigma_p=sigma_p.detach() if sigma_p is not None else None,  # Detach to avoid Cholesky backward
         )  # (B, N)
 
         # CRITICAL: Normalize by K to keep gradients O(1) regardless of dimension
