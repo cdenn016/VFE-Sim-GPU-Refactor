@@ -309,6 +309,10 @@ class PureFEPLayer(nn.Module):
         if self.config.differentiable_vfe:
             # DIFFERENTIABLE MODE: Compute VFE via autograd with create_graph=True
             # This makes VFE dynamics visible to backprop!
+            #
+            # IMPORTANT: Only use KL terms here, NOT CE loss!
+            # The CE gradient comes from backward() in train_step.
+            # This avoids double-use of the computation graph.
 
             # Self-coupling: α·KL(q||p)
             sigma_q_safe = sigma_q.clamp(min=self.config.eps)
@@ -323,21 +327,10 @@ class PureFEPLayer(nn.Module):
             # Alignment: λ·Σ β_ij·KL_ij (use precomputed)
             alignment = (beta * kl_matrix).sum(dim=-1).mean()
 
-            # Observation term (cross-entropy)
-            if targets is not None:
-                logits = self.output_proj(mu_q)
-                ce_loss = F.cross_entropy(
-                    logits.view(-1, self.config.vocab_size),
-                    targets.view(-1),
-                    reduction='mean'
-                )
-            else:
-                ce_loss = torch.tensor(0.0, device=device)
-
-            # Total VFE
+            # VFE for belief update = KL terms only (no CE)
+            # CE gradient comes from final backward() in train_step
             vfe_loss = (self.config.alpha * kl_self +
-                       self.config.lambda_belief * alignment +
-                       ce_loss)
+                       self.config.lambda_belief * alignment)
 
             # Compute gradient via autograd WITH create_graph=True
             # This is the key: the gradient itself is in the computation graph!
@@ -349,6 +342,18 @@ class PureFEPLayer(nn.Module):
 
             # For sigma, use simpler approach (no second-order for now)
             grad_sigma = torch.zeros_like(sigma_q)
+
+            # For metrics, compute CE loss but don't include in VFE gradient
+            if targets is not None:
+                with torch.no_grad():
+                    logits = self.output_proj(mu_q)
+                    ce_loss = F.cross_entropy(
+                        logits.view(-1, self.config.vocab_size),
+                        targets.view(-1),
+                        reduction='mean'
+                    )
+            else:
+                ce_loss = torch.tensor(0.0, device=device)
 
         else:
             # ANALYTICAL MODE: Compute gradients manually (faster but not differentiable)
