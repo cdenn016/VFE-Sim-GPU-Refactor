@@ -2240,12 +2240,23 @@ class PureFEPTransformer(nn.Module):
             # Update priors
             self._update_priors_with_prediction_error(info)
 
+        # =====================================================================
+        # DYNAMIC LAYER EMERGENCE: Check if spawning/merging is needed
+        # =====================================================================
+        if self.config.dynamic_layers_enabled:
+            layer_infos = info.get('layer_infos', [])
+            self._apply_dynamic_emergence(layer_infos, ce_loss.item())
+
+        # Increment step counter
+        self.step_count += 1
+
         # Perplexity
         ppl = torch.exp(ce_loss.detach()).item()
 
         metrics = {
             'ce_loss': ce_loss.item(),
             'perplexity': ppl,
+            'num_layers': len(self.layers),  # Track dynamic layer count
             **info['metrics'],
         }
 
@@ -2278,6 +2289,237 @@ class PureFEPTransformer(nn.Module):
                 prediction_error=prediction_errors,
                 per_position_error=per_position_errors,
             )
+
+    # =========================================================================
+    # DYNAMIC LAYER EMERGENCE: Spawn/merge layers based on VFE pressure
+    # =========================================================================
+
+    def _check_emergence_conditions(
+        self,
+        layer_infos: List[Dict],
+        ce_loss: float,
+    ) -> Tuple[bool, Optional[int], str]:
+        """
+        Check if conditions warrant spawning or merging layers.
+
+        Emergence Logic:
+        ----------------
+        1. SPAWN: When VFE gradients are high AND prediction error is high
+           - Signals that current hierarchy can't capture the structure
+           - New layer inserted to add representational capacity
+
+        2. MERGE: When adjacent layers have very similar beliefs
+           - Signals redundant representation
+           - Layers combined to reduce computational cost
+
+        Args:
+            layer_infos: List of layer outputs from forward pass
+            ce_loss: Cross-entropy loss for this step
+
+        Returns:
+            should_act: Whether to spawn or merge
+            layer_idx: Which layer to act on (spawn after / merge with next)
+            action: 'spawn', 'merge', or 'none'
+        """
+        if not self.config.dynamic_layers_enabled:
+            return False, None, 'none'
+
+        num_layers = len(self.layers)
+
+        # Check layer cap before spawning
+        if num_layers >= self.config.max_layers:
+            return False, None, 'none'
+
+        # Compute VFE gradient norms for each layer
+        vfe_grad_norms = []
+        for layer_info in layer_infos:
+            metrics = layer_info.get('metrics', {})
+            grad_norm = metrics.get('grad_norm_mu', 0.0) + metrics.get('grad_norm_sigma', 0.0)
+            vfe_grad_norms.append(grad_norm)
+
+        # Compute belief similarity between adjacent layers
+        belief_similarities = []
+        for i in range(num_layers - 1):
+            mu_i, sigma_i = layer_infos[i]['beliefs']
+            mu_j, sigma_j = layer_infos[i + 1]['beliefs']
+
+            # Simplified similarity: cosine similarity of means
+            similarity = F.cosine_similarity(
+                mu_i.view(-1), mu_j.view(-1), dim=0
+            ).item()
+            belief_similarities.append(similarity)
+
+        # =====================================================================
+        # SPAWN CONDITION: High VFE gradient + high loss
+        # =====================================================================
+        # Find layer with highest VFE gradient
+        if vfe_grad_norms:
+            max_grad_idx = int(np.argmax(vfe_grad_norms))
+            max_grad = vfe_grad_norms[max_grad_idx]
+
+            # Spawn if gradient exceeds threshold and we have capacity
+            if max_grad > self.config.layer_spawn_threshold and num_layers < self.config.max_layers:
+                # Insert new layer after the one with highest gradient
+                return True, max_grad_idx, 'spawn'
+
+        # =====================================================================
+        # MERGE CONDITION: Very high belief similarity between adjacent layers
+        # =====================================================================
+        merge_threshold = 0.99  # Very high similarity threshold
+        for i, sim in enumerate(belief_similarities):
+            if sim > merge_threshold and num_layers > 1:
+                # Merge layers i and i+1
+                return True, i, 'merge'
+
+        return False, None, 'none'
+
+    def _spawn_layer(self, after_idx: int):
+        """
+        Spawn a new layer after the specified index.
+
+        The new layer is initialized with:
+        - Priors interpolated from neighbors
+        - Fresh generators (same structure as existing layers)
+        - Identity gauge frames
+
+        Args:
+            after_idx: Insert new layer after this index
+        """
+        if len(self.layers) >= self.config.max_layers:
+            print(f"[Dynamic] Cannot spawn: max_layers ({self.config.max_layers}) reached")
+            return
+
+        print(f"[Dynamic] Spawning new layer after layer {after_idx}")
+
+        # Create new layer
+        new_scale = after_idx + 1  # Will be inserted at this position
+        new_layer = PureFEPLayer(
+            embed_dim=self.config.embed_dim,
+            scale=new_scale,
+            config=self.config,
+            prior_bank=self.prior_bank,
+        )
+
+        # Move to same device as existing layers
+        device = next(self.layers[0].parameters()).device
+        new_layer = new_layer.to(device)
+
+        # Initialize priors from neighbors (interpolation)
+        if after_idx < len(self.layers) - 1:
+            # Interpolate between layer[after_idx] and layer[after_idx+1]
+            layer_before = self.layers[after_idx]
+            layer_after = self.layers[after_idx + 1]
+
+            with torch.no_grad():
+                # Average the priors from neighboring layers
+                N_prior = min(
+                    layer_before.prior_mu.shape[0],
+                    layer_after.prior_mu.shape[0],
+                    new_layer.prior_mu.shape[0]
+                )
+                new_layer.prior_mu[:N_prior] = 0.5 * (
+                    layer_before.prior_mu[:N_prior] + layer_after.prior_mu[:N_prior]
+                )
+                new_layer.prior_sigma[:N_prior] = 0.5 * (
+                    layer_before.prior_sigma[:N_prior] + layer_after.prior_sigma[:N_prior]
+                )
+        else:
+            # Last layer - copy from the layer before
+            layer_before = self.layers[after_idx]
+            with torch.no_grad():
+                N_prior = min(layer_before.prior_mu.shape[0], new_layer.prior_mu.shape[0])
+                new_layer.prior_mu[:N_prior] = layer_before.prior_mu[:N_prior].clone()
+                new_layer.prior_sigma[:N_prior] = layer_before.prior_sigma[:N_prior].clone()
+
+        # Insert into layer list
+        # Convert ModuleList to list, insert, convert back
+        layers_list = list(self.layers)
+        layers_list.insert(after_idx + 1, new_layer)
+
+        # Update scale indices for all layers after the insertion
+        for i, layer in enumerate(layers_list):
+            layer.scale = i
+
+        # Replace ModuleList
+        self.layers = nn.ModuleList(layers_list)
+
+        print(f"[Dynamic] New layer count: {len(self.layers)}")
+
+    def _merge_layers(self, layer_idx: int):
+        """
+        Merge layer at layer_idx with layer at layer_idx+1.
+
+        The merged layer inherits:
+        - Average of priors from both layers
+        - Combined statistics
+
+        Args:
+            layer_idx: Merge this layer with the next one
+        """
+        if len(self.layers) <= 1:
+            print("[Dynamic] Cannot merge: only one layer remaining")
+            return
+
+        if layer_idx >= len(self.layers) - 1:
+            print(f"[Dynamic] Cannot merge: layer {layer_idx} has no next layer")
+            return
+
+        print(f"[Dynamic] Merging layers {layer_idx} and {layer_idx + 1}")
+
+        layer_keep = self.layers[layer_idx]
+        layer_remove = self.layers[layer_idx + 1]
+
+        # Average the priors
+        with torch.no_grad():
+            N_prior = min(layer_keep.prior_mu.shape[0], layer_remove.prior_mu.shape[0])
+            layer_keep.prior_mu[:N_prior] = 0.5 * (
+                layer_keep.prior_mu[:N_prior] + layer_remove.prior_mu[:N_prior]
+            )
+            layer_keep.prior_sigma[:N_prior] = 0.5 * (
+                layer_keep.prior_sigma[:N_prior] + layer_remove.prior_sigma[:N_prior]
+            )
+
+            # Average statistics
+            layer_keep.prior_update_count[:N_prior] = (
+                layer_keep.prior_update_count[:N_prior] + layer_remove.prior_update_count[:N_prior]
+            ) / 2
+
+        # Remove the merged layer
+        layers_list = list(self.layers)
+        del layers_list[layer_idx + 1]
+
+        # Update scale indices
+        for i, layer in enumerate(layers_list):
+            layer.scale = i
+
+        # Replace ModuleList
+        self.layers = nn.ModuleList(layers_list)
+
+        print(f"[Dynamic] New layer count: {len(self.layers)}")
+
+    def _apply_dynamic_emergence(
+        self,
+        layer_infos: List[Dict],
+        ce_loss: float,
+    ):
+        """
+        Apply dynamic layer emergence based on VFE analysis.
+
+        Called at the end of train_step when dynamic_layers_enabled is True.
+
+        Args:
+            layer_infos: Layer outputs from forward pass
+            ce_loss: Cross-entropy loss for this step
+        """
+        should_act, layer_idx, action = self._check_emergence_conditions(layer_infos, ce_loss)
+
+        if not should_act:
+            return
+
+        if action == 'spawn':
+            self._spawn_layer(layer_idx)
+        elif action == 'merge':
+            self._merge_layers(layer_idx)
 
 
 class PureFEPTrainer:
