@@ -56,6 +56,32 @@ except ImportError:
     TRANSPORT_AVAILABLE = False
     print("⚠️  Transport module not available")
 
+# Import SPD utilities for robust Cholesky handling
+try:
+    from math_utils.batched_ops import ensure_spd, symmetrize
+    SPD_UTILS_AVAILABLE = True
+except ImportError:
+    SPD_UTILS_AVAILABLE = False
+    # Fallback implementations
+    def symmetrize(M: torch.Tensor) -> torch.Tensor:
+        return 0.5 * (M + M.transpose(-1, -2))
+
+    def ensure_spd(Sigma: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        """Fallback SPD projection via eigenvalue clipping."""
+        K = Sigma.shape[-1]
+        device = Sigma.device
+        eye = torch.eye(K, device=device, dtype=Sigma.dtype)
+        for _ in range(Sigma.ndim - 2):
+            eye = eye.unsqueeze(0)
+        Sigma_reg = symmetrize(Sigma + eps * eye)
+        try:
+            eigenvalues, eigenvectors = torch.linalg.eigh(Sigma_reg.float())
+            eigenvalues_clipped = torch.clamp(eigenvalues, min=eps)
+            Sigma_spd = (eigenvectors @ torch.diag_embed(eigenvalues_clipped) @ eigenvectors.transpose(-1, -2)).to(Sigma.dtype)
+        except RuntimeError:
+            Sigma_spd = (eps * eye).expand_as(Sigma).clone()
+        return symmetrize(Sigma_spd)
+
 
 # =============================================================================
 # Sparse Attention Patterns
@@ -462,16 +488,17 @@ def _compute_kl_matrix_torch(
     # Step 4: Compute all KL divergences
     # KL(q_i || Ω_ij[q_j]) = KL(N(μ_i, Σ_i) || N(μ_j^{→i}, Σ_j^{→i}))
     # =========================================================================
-    I = torch.eye(K, device=device, dtype=dtype)
-    Sigma_i_reg = Sigma_i + eps * I
-    Sigma_transported_reg = Sigma_transported + eps * I
+    # Apply robust SPD projection to handle numerical errors from transport
+    # The transported covariances may not be perfectly symmetric or PD
+    Sigma_i_spd = ensure_spd(Sigma_i, eps=eps)
+    Sigma_transported_spd = ensure_spd(Sigma_transported, eps=eps)
 
     try:
         # Cholesky of transported covariances (prior in KL)
-        L_p = torch.linalg.cholesky(Sigma_transported_reg)
+        L_p = torch.linalg.cholesky(Sigma_transported_spd)
 
         # Trace term: tr(Σ_p⁻¹ Σ_q) where Σ_p = Σ_j^{→i}, Σ_q = Σ_i
-        Y = torch.linalg.solve_triangular(L_p, Sigma_i_reg, upper=False)
+        Y = torch.linalg.solve_triangular(L_p, Sigma_i_spd, upper=False)
         Z = torch.linalg.solve_triangular(L_p.transpose(-1, -2), Y, upper=True)
         trace_term = torch.diagonal(Z, dim1=-2, dim2=-1).sum(dim=-1)  # (B, N, N)
 
@@ -484,11 +511,11 @@ def _compute_kl_matrix_torch(
 
         # Log determinant terms
         logdet_p = 2.0 * torch.sum(
-            torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1) + eps), dim=-1
+            torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1
         )
-        L_q = torch.linalg.cholesky(Sigma_i_reg)
+        L_q = torch.linalg.cholesky(Sigma_i_spd)
         logdet_q = 2.0 * torch.sum(
-            torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1) + eps), dim=-1
+            torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1
         )
         logdet_term = logdet_p - logdet_q  # (B, N, N)
 
@@ -501,6 +528,7 @@ def _compute_kl_matrix_torch(
 
     except RuntimeError:
         # Fallback to loop-based computation if Cholesky fails
+        # This path now uses _kl_gaussian_torch which has robust SPD handling
         for b in range(B):
             for i in range(N):
                 for j in range(N):
@@ -553,46 +581,58 @@ def _kl_gaussian_torch(
     sigma1: torch.Tensor,  # (K, K)
     mu2: torch.Tensor,     # (K,)
     sigma2: torch.Tensor,  # (K, K)
-    eps: float = 1e-8
+    eps: float = 1e-6
 ) -> torch.Tensor:
     """
     KL divergence between two Gaussians: KL(N(μ1,Σ1) || N(μ2,Σ2)).
 
     Formula:
         KL = 0.5 * [tr(Σ2^{-1} Σ1) + (μ2-μ1)^T Σ2^{-1} (μ2-μ1) - K + log|Σ2|/|Σ1|]
+
+    Uses robust SPD projection to handle ill-conditioned matrices that would
+    otherwise cause Cholesky decomposition to fail.
     """
     K = mu1.shape[0]
+    device = sigma1.device
+    dtype = sigma1.dtype
 
-    # Regularize for stability
-    sigma1_reg = sigma1 + eps * torch.eye(K, device=sigma1.device, dtype=sigma1.dtype)
-    sigma2_reg = sigma2 + eps * torch.eye(K, device=sigma2.device, dtype=sigma2.dtype)
+    # Robust SPD projection: symmetrize and ensure positive eigenvalues
+    # This handles numerical errors from transport operations
+    sigma1_spd = ensure_spd(sigma1, eps=eps)
+    sigma2_spd = ensure_spd(sigma2, eps=eps)
 
-    # Cholesky decomposition for numerical stability
-    L1 = torch.linalg.cholesky(sigma1_reg)
-    L2 = torch.linalg.cholesky(sigma2_reg)
+    try:
+        # Cholesky decomposition for numerical stability
+        L1 = torch.linalg.cholesky(sigma1_spd)
+        L2 = torch.linalg.cholesky(sigma2_spd)
 
-    # Log determinants: log|Σ| = 2*sum(log(diag(L)))
-    logdet1 = 2.0 * torch.sum(torch.log(torch.diag(L1)))
-    logdet2 = 2.0 * torch.sum(torch.log(torch.diag(L2)))
+        # Log determinants: log|Σ| = 2*sum(log(diag(L)))
+        logdet1 = 2.0 * torch.sum(torch.log(torch.diag(L1).clamp(min=eps)))
+        logdet2 = 2.0 * torch.sum(torch.log(torch.diag(L2).clamp(min=eps)))
 
-    # Trace term: tr(Σ2^{-1} Σ1)
-    # Solve L2 Y = Σ1 for Y, then solve L2^T Z = Y for Z
-    Y = torch.linalg.solve_triangular(L2, sigma1_reg, upper=False)
-    Z = torch.linalg.solve_triangular(L2.T, Y, upper=True)
-    trace_term = torch.trace(Z)
+        # Trace term: tr(Σ2^{-1} Σ1)
+        # Solve L2 Y = Σ1 for Y, then solve L2^T Z = Y for Z
+        Y = torch.linalg.solve_triangular(L2, sigma1_spd, upper=False)
+        Z = torch.linalg.solve_triangular(L2.T, Y, upper=True)
+        trace_term = torch.trace(Z)
 
-    # Quadratic term: (μ2-μ1)^T Σ2^{-1} (μ2-μ1)
-    delta_mu = mu2 - mu1
-    # solve_triangular needs 2D input - reshape (K,) → (K, 1)
-    y = torch.linalg.solve_triangular(L2, delta_mu.unsqueeze(-1), upper=False).squeeze(-1)
-    z = torch.linalg.solve_triangular(L2.T, y.unsqueeze(-1), upper=True).squeeze(-1)
-    quad_term = torch.dot(delta_mu, z)
+        # Quadratic term: (μ2-μ1)^T Σ2^{-1} (μ2-μ1)
+        delta_mu = mu2 - mu1
+        # solve_triangular needs 2D input - reshape (K,) → (K, 1)
+        y = torch.linalg.solve_triangular(L2, delta_mu.unsqueeze(-1), upper=False).squeeze(-1)
+        z = torch.linalg.solve_triangular(L2.T, y.unsqueeze(-1), upper=True).squeeze(-1)
+        quad_term = torch.dot(delta_mu, z)
 
-    # Combine
-    kl = 0.5 * (trace_term + quad_term - K + logdet2 - logdet1)
+        # Combine
+        kl = 0.5 * (trace_term + quad_term - K + logdet2 - logdet1)
 
-    # Numerical safety: clamp to [0, ∞)
-    return torch.clamp(kl, min=0.0)
+        # Numerical safety: clamp to [0, ∞)
+        return torch.clamp(kl, min=0.0)
+
+    except RuntimeError:
+        # Ultimate fallback: return a large but finite KL value
+        # This prevents training from crashing while signaling high divergence
+        return torch.tensor(100.0, device=device, dtype=dtype)
 
 
 def _compute_kl_matrix_diagonal(
@@ -808,14 +848,13 @@ def compute_attention_weights_local(
                 Omega, sigma_j, Omega.transpose(-1, -2)
             )  # (B, n_pairs, K, K)
 
-            # Compute KL via Cholesky
-            I = torch.eye(K, device=device, dtype=dtype)
-            sigma_i_reg = sigma_i + eps * I
-            Sigma_j_reg = Sigma_j_transported + eps * I
+            # Apply robust SPD projection to handle numerical errors from transport
+            sigma_i_spd = ensure_spd(sigma_i, eps=eps)
+            Sigma_j_spd = ensure_spd(Sigma_j_transported, eps=eps)
 
             try:
-                L_p = torch.linalg.cholesky(Sigma_j_reg)
-                Y = torch.linalg.solve_triangular(L_p, sigma_i_reg, upper=False)
+                L_p = torch.linalg.cholesky(Sigma_j_spd)
+                Y = torch.linalg.solve_triangular(L_p, sigma_i_spd, upper=False)
                 Z = torch.linalg.solve_triangular(L_p.transpose(-1, -2), Y, upper=True)
                 trace_term = torch.diagonal(Z, dim1=-2, dim2=-1).sum(dim=-1)
 
@@ -826,11 +865,11 @@ def compute_attention_weights_local(
                 mahal_term = torch.sum(v ** 2, dim=-1)
 
                 logdet_p = 2.0 * torch.sum(
-                    torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1) + eps), dim=-1
+                    torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1
                 )
-                L_q = torch.linalg.cholesky(sigma_i_reg)
+                L_q = torch.linalg.cholesky(sigma_i_spd)
                 logdet_q = 2.0 * torch.sum(
-                    torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1) + eps), dim=-1
+                    torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1
                 )
                 logdet_term = logdet_p - logdet_q
 
@@ -986,14 +1025,13 @@ def compute_attention_weights_sparse(
             # Transport sigma_j
             Sigma_j_transported = torch.bmm(torch.bmm(Omega, sigma_j), Omega.transpose(-1, -2))
 
-            # KL computation
-            I = torch.eye(K, device=device, dtype=dtype)
-            sigma_i_reg = sigma_i + eps * I
-            Sigma_j_reg = Sigma_j_transported + eps * I
+            # Apply robust SPD projection to handle numerical errors from transport
+            sigma_i_spd = ensure_spd(sigma_i, eps=eps)
+            Sigma_j_spd = ensure_spd(Sigma_j_transported, eps=eps)
 
             try:
-                L_p = torch.linalg.cholesky(Sigma_j_reg)
-                Y = torch.linalg.solve_triangular(L_p, sigma_i_reg, upper=False)
+                L_p = torch.linalg.cholesky(Sigma_j_spd)
+                Y = torch.linalg.solve_triangular(L_p, sigma_i_spd, upper=False)
                 Z = torch.linalg.solve_triangular(L_p.transpose(-1, -2), Y, upper=True)
                 trace_term = torch.diagonal(Z, dim1=-2, dim2=-1).sum(dim=-1)
 
@@ -1004,11 +1042,11 @@ def compute_attention_weights_sparse(
                 mahal_term = torch.sum(v ** 2, dim=-1)
 
                 logdet_p = 2.0 * torch.sum(
-                    torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1) + eps), dim=-1
+                    torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1
                 )
-                L_q = torch.linalg.cholesky(sigma_i_reg)
+                L_q = torch.linalg.cholesky(sigma_i_spd)
                 logdet_q = 2.0 * torch.sum(
-                    torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1) + eps), dim=-1
+                    torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1
                 )
                 logdet_term = logdet_p - logdet_q
 
