@@ -516,9 +516,12 @@ class PureFEPLayer(nn.Module):
             sigma_p_new = sigma_q_batch.mean(dim=(0, 1))  # (K,)
 
         # Exponential moving average update (prior_lr controls learning speed)
+        # CRITICAL: Detach to prevent graph accumulation across batches!
+        # Without detach, priors become part of computation graph, causing
+        # "backward through graph a second time" error on next batch.
         blend = self.config.prior_lr
-        self.prior_mu.lerp_(mu_p_new, blend)
-        self.prior_sigma.lerp_(sigma_p_new, blend)
+        self.prior_mu.lerp_(mu_p_new.detach(), blend)
+        self.prior_sigma.lerp_(sigma_p_new.detach(), blend)
 
         # Ensure sigma stays positive
         self.prior_sigma.clamp_(min=self.config.eps)
