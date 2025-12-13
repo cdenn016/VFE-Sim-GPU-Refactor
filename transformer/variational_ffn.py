@@ -68,7 +68,7 @@ from geometry.geometry_base import BaseManifold, TopologyType
 from gradients.retraction import retract_spd  # For SPD manifold updates
 
 # Import attention computation for dynamic β
-from transformer.attention import compute_attention_weights
+from transformer.attention import compute_attention_weights, _fast_regularize, ensure_spd
 
 
 # =============================================================================
@@ -143,17 +143,25 @@ def compute_vfe_gradients_gpu(
         # Self-coupling gradient w.r.t. σ (diagonal)
         grad_sigma_self = alpha * 0.5 * (1.0 / sigma_p_safe - 1.0 / sigma_q_safe)  # (B, N, K)
     else:
-        # Full covariance - use matrix operations
+        # Full covariance - use matrix operations with lazy SPD handling
         # ∂KL/∂μ_q = Σ_p^{-1} (μ_q - μ_p)
-        sigma_p_reg = sigma_p + eps * torch.eye(K, device=device, dtype=dtype)
-        sigma_p_inv = torch.linalg.inv(sigma_p_reg)  # (B, N, K, K)
+        sigma_p_fast = _fast_regularize(sigma_p, eps=eps)
+        try:
+            sigma_p_inv = torch.linalg.inv(sigma_p_fast)  # (B, N, K, K)
+        except RuntimeError:
+            sigma_p_spd = ensure_spd(sigma_p, eps=eps)
+            sigma_p_inv = torch.linalg.inv(sigma_p_spd)
 
         delta_mu = mu_q - mu_p  # (B, N, K)
         grad_mu_self = alpha * torch.einsum('bnij,bnj->bni', sigma_p_inv, delta_mu)
 
         # ∂KL/∂Σ_q = 0.5 * (Σ_p^{-1} - Σ_q^{-1})
-        sigma_q_reg = sigma_q + eps * torch.eye(K, device=device, dtype=dtype)
-        sigma_q_inv = torch.linalg.inv(sigma_q_reg)
+        sigma_q_fast = _fast_regularize(sigma_q, eps=eps)
+        try:
+            sigma_q_inv = torch.linalg.inv(sigma_q_fast)
+        except RuntimeError:
+            sigma_q_spd = ensure_spd(sigma_q, eps=eps)
+            sigma_q_inv = torch.linalg.inv(sigma_q_spd)
         grad_sigma_self = alpha * 0.5 * (sigma_p_inv - sigma_q_inv)
 
     # =================================================================
@@ -201,9 +209,13 @@ def compute_vfe_gradients_gpu(
             Omega, sigma_j_diag, Omega.transpose(-1, -2)
         )  # (B, N, N, K, K)
 
-        # Regularize and invert transported covariance
-        sigma_j_reg = sigma_j_transported + eps * torch.eye(K, device=device, dtype=dtype)
-        sigma_j_inv = torch.linalg.inv(sigma_j_reg)  # (B, N, N, K, K)
+        # Regularize and invert transported covariance with lazy SPD handling
+        sigma_j_fast = _fast_regularize(sigma_j_transported, eps=eps)
+        try:
+            sigma_j_inv = torch.linalg.inv(sigma_j_fast)  # (B, N, N, K, K)
+        except RuntimeError:
+            sigma_j_spd = ensure_spd(sigma_j_transported, eps=eps)
+            sigma_j_inv = torch.linalg.inv(sigma_j_spd)
 
         # ∂KL_ij/∂μ_i = Σ_j_transported^{-1} @ (μ_i - μ_j_transported)
         grad_kl_per_pair = torch.einsum('bijkl,bijl->bijk', sigma_j_inv, delta_mu_ij)  # (B, N, N, K)
@@ -221,9 +233,15 @@ def compute_vfe_gradients_gpu(
         trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_expanded))
 
         # Log-determinant terms
-        # For transported covariance (full matrix): use Cholesky
-        L_j_t = torch.linalg.cholesky(sigma_j_reg)  # (B, N, N, K, K)
-        logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N, N)
+        # For transported covariance (full matrix): use Cholesky with lazy SPD handling
+        sigma_j_fast = _fast_regularize(sigma_j_transported, eps=eps)
+        try:
+            L_j_t = torch.linalg.cholesky(sigma_j_fast)  # (B, N, N, K, K)
+        except RuntimeError:
+            # Fallback to expensive SPD projection
+            sigma_j_spd = ensure_spd(sigma_j_transported, eps=eps)
+            L_j_t = torch.linalg.cholesky(sigma_j_spd)
+        logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1)  # (B, N, N)
         # For source covariance (diagonal): log|diag(σ)| = sum(log(σ))
         logdet_i = torch.sum(torch.log(sigma_q.clamp(min=eps)), dim=-1)  # (B, N)
         logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
@@ -281,9 +299,13 @@ def compute_vfe_gradients_gpu(
             Omega, sigma_q, Omega.transpose(-1, -2)
         )  # (B, N, N, K, K)
 
-        # Regularize and invert
-        sigma_j_reg = sigma_j_transported + eps * torch.eye(K, device=device, dtype=dtype)
-        sigma_j_inv = torch.linalg.inv(sigma_j_reg)  # (B, N, N, K, K)
+        # Regularize and invert with lazy SPD handling
+        sigma_j_fast = _fast_regularize(sigma_j_transported, eps=eps)
+        try:
+            sigma_j_inv = torch.linalg.inv(sigma_j_fast)  # (B, N, N, K, K)
+        except RuntimeError:
+            sigma_j_spd = ensure_spd(sigma_j_transported, eps=eps)
+            sigma_j_inv = torch.linalg.inv(sigma_j_spd)
 
         # ∂KL_ij/∂μ_i
         grad_kl_per_pair = torch.einsum('bijkl,bijl->bijk', sigma_j_inv, delta_mu_ij)
@@ -298,13 +320,21 @@ def compute_vfe_gradients_gpu(
         sigma_i_expanded = sigma_q[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
         trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_expanded))
 
-        # Log-determinant terms using Cholesky
-        L_j_t = torch.linalg.cholesky(sigma_j_reg)  # (B, N, N, K, K)
-        logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N, N)
+        # Log-determinant terms using Cholesky with lazy SPD handling
+        try:
+            L_j_t = torch.linalg.cholesky(sigma_j_fast)  # (B, N, N, K, K)
+        except RuntimeError:
+            sigma_j_spd = ensure_spd(sigma_j_transported, eps=eps)
+            L_j_t = torch.linalg.cholesky(sigma_j_spd)
+        logdet_j_t = 2.0 * torch.sum(torch.log(torch.diagonal(L_j_t, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1)  # (B, N, N)
 
-        sigma_i_reg = sigma_q + eps * torch.eye(K, device=device, dtype=dtype)
-        L_i = torch.linalg.cholesky(sigma_i_reg)  # (B, N, K, K)
-        logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1) + eps), dim=-1)  # (B, N)
+        sigma_i_fast = _fast_regularize(sigma_q, eps=eps)
+        try:
+            L_i = torch.linalg.cholesky(sigma_i_fast)  # (B, N, K, K)
+        except RuntimeError:
+            sigma_i_spd = ensure_spd(sigma_q, eps=eps)
+            L_i = torch.linalg.cholesky(sigma_i_spd)
+        logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1).clamp(min=eps)), dim=-1)  # (B, N)
         logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
 
         # Full KL divergence
