@@ -47,41 +47,54 @@ CONFIG = {
         ('ℓ2', 10, 5),   # 50 dims (rank-2 tensors)
     ],  # = 127 total
 
+    # =========================================================================
+    # PURE FEP MODE - TRUE FREE ENERGY PRINCIPLE LEARNING
+    # =========================================================================
+    # When True: NO backprop on embeddings, ALL learning via prior evolution
+    # When False: Hybrid mode with backprop + prior evolution
+    'pure_fep_mode': True,        # THE KEY SETTING!
+
     # VFE parameters
-    'alpha': 1,                # Self-coupling weight KL(q||p)
+    'alpha': 0.1,                 # Self-coupling weight KL(q||p)
     'lambda_belief': 1.0,         # Belief alignment weight
-    'kappa': 1,                 # Attention temperature (LOWER = sharper attention!)
+    'lambda_obs': 1.0,            # Observation likelihood weight (CE in VFE)
+    'kappa': 0.1,                 # Attention temperature (LOWER = sharper attention!)
 
-    # Learning rates (natural gradient allows larger steps!)
-    'mu_lr': 0.1,                # Belief mean update (slightly reduced for stability)
-    'sigma_lr': 0.05,            # Belief variance update
-    'prior_lr': 0.05,              # Prior update (FASTER learning)
-    'phi_lr': 0.1,               # Gauge frame update
+    # Learning rates
+    'mu_lr': 0.1,                 # Belief mean update
+    'sigma_lr': 0.025,            # Belief variance update
+    'prior_lr': 0.01,             # Prior update (SLOWER for stability)
+    'phi_lr': 0.05,               # Gauge frame update
 
-    # Timescales - CRITICAL FOR LEARNING!
-    'n_vfe_steps': 5,             # VFE iterations per forward pass (MORE = better convergence)
-    'prior_update_interval': 5,   # Steps between hierarchical prior updates (FASTER)
+    # =========================================================================
+    # TIMESCALES - CRITICAL FOR FEP LEARNING!
+    # =========================================================================
+    # Fast timescale: VFE gradient descent (perception)
+    # Slow timescale: Prior updates (learning)
+    # Rule: More VFE steps = better belief convergence before prior update
+    'n_vfe_steps': 20,            # VFE iterations per forward (MORE for convergence)
+    'prior_update_interval': 1,   # Update priors every batch
 
     # Stability
     'grad_clip': 1.0,
 
-    # VFE mode - CRITICAL for gradient flow!
-    'differentiable_vfe': True,   # Use autograd for VFE (enables backprop through dynamics)
+    # VFE mode - only used when pure_fep_mode=False
+    'differentiable_vfe': True,
 
     # =========================================================================
-    # ADVANCED FEP FEATURES (experimental, all OFF by default)
+    # ADVANCED FEP FEATURES (experimental)
     # =========================================================================
     # Prior coupling: priors learn from each other via KL(p_i || Ω_ij·p_j)
     'prior_coupling_enabled': False,
-    'lambda_prior': 0.1,          # Weight for prior-prior coupling
+    'lambda_prior': 0.1,
 
     # Gradient-based prior updates: use VFE gradient instead of EMA
     'gradient_prior_updates': False,
-    'prior_grad_lr': 0.01,        # LR for gradient-based prior updates
+    'prior_grad_lr': 0.01,
 
     # Gauge field evolution: learn gauge frames via gradient descent
     'gauge_evolution_enabled': False,
-    'gauge_lr': 0.01,             # LR for gauge frame evolution
+    'gauge_lr': 0.01,
 
     # Dynamic layers: spawn/merge layers based on VFE (experimental)
     'dynamic_layers_enabled': False,
@@ -90,8 +103,8 @@ CONFIG = {
 
     # Training
     'batch_size': 24,
-    'epochs': 2,
-    'log_interval': 50,           # More frequent logging
+    'epochs': 5,                  # More epochs for pure FEP learning
+    'log_interval': 50,
 
     # Data
     'dataset': 'synthetic',       # 'synthetic' or 'wikitext2'
@@ -301,16 +314,23 @@ def main():
         seq_length=config['seq_length'],
         vocab_size=vocab_size,
         irrep_spec=config.get('irrep_spec'),  # None = auto-generate
+        # VFE parameters
         alpha=config['alpha'],
         lambda_belief=config['lambda_belief'],
+        lambda_obs=config.get('lambda_obs', 1.0),  # Observation weight in VFE
         kappa=config['kappa'],
+        # Learning rates
         mu_lr=config['mu_lr'],
         sigma_lr=config['sigma_lr'],
         prior_lr=config['prior_lr'],
         phi_lr=config['phi_lr'],
+        # Timescales
         belief_steps=config['n_vfe_steps'],
         prior_update_interval=config['prior_update_interval'],
+        # Stability
         grad_clip=config['grad_clip'],
+        # PURE FEP MODE - the key setting!
+        pure_fep_mode=config.get('pure_fep_mode', True),
         differentiable_vfe=config.get('differentiable_vfe', True),
         # Advanced FEP features
         prior_coupling_enabled=config.get('prior_coupling_enabled', False),
@@ -331,7 +351,16 @@ def main():
     print(f"  mu_lr: {model_config.mu_lr}")
     print(f"  prior_lr: {model_config.prior_lr}")
     print(f"  alpha: {model_config.alpha}")
+    print(f"  lambda_obs: {model_config.lambda_obs}")
     print(f"  n_vfe_steps: {config['n_vfe_steps']}")
+
+    # Show learning mode
+    if model_config.pure_fep_mode:
+        print(f"\n  [PURE FEP MODE] No backprop - learning via prior evolution only!")
+        print(f"    - Position-dependent priors: ({model_config.seq_length}, {model_config.embed_dim})")
+        print(f"    - Observations INSIDE VFE (λ_obs={model_config.lambda_obs})")
+    else:
+        print(f"\n  [HYBRID MODE] Backprop + prior evolution")
 
     # Print advanced features if enabled
     if model_config.prior_coupling_enabled:
