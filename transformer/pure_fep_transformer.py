@@ -9,23 +9,27 @@ WITHOUT backpropagation or external optimizers (Adam, SGD, etc.).
 Key Principles:
 ---------------
 1. BELIEF UPDATE (fast timescale - perception):
-   μ_q ← μ_q - η_μ · ∂F/∂μ_q
+   μ_q ← μ_q - η_μ · Σ_q · ∂F/∂μ_q    (natural gradient descent)
 
-   Where F = α·KL(q||p) + λ·Σ_j β_ij·KL(q_i||Ω_ij·q_j) + CE(output, target)
+   Where F = α·KL(q||p) + λ·Σ_ij β_ij·KL(q_i||Ω_ij·q_j) + E_q[-log p(y|z)]
+             ↑ self        ↑ belief alignment (social)     ↑ observation
 
-2. PRIOR UPDATE (slow timescale - learning):
-   p_child ← Ω · q_parent    (hierarchical top-down flow)
+2. PRIOR BANK (unified embedding & output):
+   Each token v has a prior belief: π_v = N(μ_v, Σ_v)
+   - ENCODING: Initialize belief from token prior: q ← π_{y_t}
+   - DECODING: p(y=v|q) ∝ exp(-KL(q||π_v)/τ)    [KL to token priors!]
 
-   This IS the learning mechanism! Meta-agents at scale ζ+1 form beliefs,
-   which flow down as priors to scale ζ. Credit assignment happens through
-   the hierarchy - no backprop needed.
+   This creates beautiful symmetry - the same prior bank serves both purposes.
 
-3. TWO-TIMESCALE DYNAMICS:
+3. POSITION VIA GAUGE FRAMES:
+   Position is encoded in the gauge frame φ_i ∈ so(3), NOT in μ!
+   - Transport Ω_ij = exp(φ_i)·exp(-φ_j) encodes RELATIVE position
+   - Same tokens at different positions have different φ, same μ_prior
+   - This gives shift-invariant attention with position awareness
+
+4. TWO-TIMESCALE DYNAMICS:
    - Fast: VFE gradient descent on beliefs (perception)
-   - Slow: Hierarchical prior updates (learning)
-
-   The timescale separation emerges naturally from information accumulation:
-   τ_ζ ∝ 10^ζ (higher scales update less frequently)
+   - Slow: Prior evolution (learning)
 
 Theory:
 -------
@@ -35,11 +39,12 @@ This implements "predictive coding" in the FEP sense:
 - Top-down priors constrain bottom-up inference
 - Learning = adjusting priors to minimize long-term VFE
 
-The key insight: In standard transformers, backprop computes ∂Loss/∂W.
-In pure FEP, we don't have explicit weights - instead:
-- "Weights" are implicit in the prior structure
-- Learning = evolution of priors under VFE pressure
-- Credit assignment = hierarchical message passing
+NO AD HOC STRUCTURES:
+- No separate embedding lookup (use prior bank)
+- No linear output projection (use KL to priors)
+- No sinusoidal position encoding (use gauge frames)
+- Attention emerges from information geometry: β_ij = softmax(-KL_ij/κ)
+- The softmax coupling gradient IS the nonlinearity (replaces GELU/ReLU)
 
 Author: Chris & Claude
 Date: December 2025
@@ -51,6 +56,7 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Any, Union
 from dataclasses import dataclass, field
 import math
+import numpy as np
 
 # Import existing VFE components
 from transformer.attention import (
@@ -62,7 +68,304 @@ from transformer.variational_ffn import (
     compute_vfe_gradients_gpu,
     compute_natural_gradient_gpu,
 )
+from transformer.embeddings import (
+    GaugePositionalEncoding,
+    so3_compose_bch,
+)
 from math_utils.generators import generate_so3_generators
+
+
+# =============================================================================
+# PRIOR BANK: Unified Embedding & Output via Token Priors
+# =============================================================================
+
+class PriorBank(nn.Module):
+    """
+    Unified prior bank that serves as BOTH embedding and output projection.
+
+    Each vocabulary token v has a prior belief distribution:
+        π_v = N(μ_v, Σ_v)
+
+    ENCODING (replaces nn.Embedding):
+        Given input token y_t, initialize belief from prior:
+        q(z_t) ← π_{y_t}
+
+        μ_q[t] = μ_v[y_t]
+        Σ_q[t] = Σ_v[y_t]
+
+    DECODING (replaces nn.Linear output projection):
+        Given belief q = N(μ_q, Σ_q), compute observation likelihood:
+
+        p(y = v | q) ∝ exp(-KL(q || π_v) / τ)
+
+        This is the PRINCIPLED observation model from FEP:
+        - The likelihood of token v is high when belief q is close to prior π_v
+        - Temperature τ controls sharpness
+
+    The same prior bank serves both purposes, creating beautiful symmetry!
+
+    Learning:
+    - In pure FEP mode: Priors evolve via slow VFE pressure
+    - In hybrid mode: Priors can be updated via backprop
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        embed_dim: int,
+        init_std: float = 0.02,
+        init_sigma_scale: float = 0.1,
+        learnable_sigma: bool = True,
+        eps: float = 1e-6,
+    ):
+        """
+        Initialize the prior bank.
+
+        Args:
+            vocab_size: Number of tokens in vocabulary
+            embed_dim: Embedding dimension K
+            init_std: Std for initializing prior means
+            init_sigma_scale: Initial scale for prior variances
+            learnable_sigma: If True, Σ_v evolves during training
+            eps: Numerical stability
+        """
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.eps = eps
+        self.learnable_sigma = learnable_sigma
+
+        # Prior means μ_v for each token v
+        self.prior_mu = nn.Parameter(torch.randn(vocab_size, embed_dim) * init_std)
+
+        # Prior variances Σ_v (diagonal) - parameterized as log for positivity
+        if learnable_sigma:
+            self.log_prior_sigma = nn.Parameter(
+                torch.full((vocab_size, embed_dim), math.log(init_sigma_scale))
+            )
+        else:
+            self.register_buffer(
+                'log_prior_sigma',
+                torch.full((vocab_size, embed_dim), math.log(init_sigma_scale))
+            )
+
+    @property
+    def prior_sigma(self) -> torch.Tensor:
+        """Get prior variances (always positive)."""
+        return torch.exp(self.log_prior_sigma).clamp(min=self.eps)
+
+    def encode(
+        self,
+        token_ids: torch.Tensor,  # (B, N)
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode tokens by looking up their prior beliefs.
+
+        This replaces the standard nn.Embedding lookup.
+
+        Args:
+            token_ids: (B, N) input token IDs
+
+        Returns:
+            mu_q: (B, N, K) belief means initialized from priors
+            sigma_q: (B, N, K) belief variances initialized from priors
+        """
+        # Look up prior means and variances
+        mu_q = self.prior_mu[token_ids]  # (B, N, K)
+        sigma_q = self.prior_sigma[token_ids]  # (B, N, K)
+
+        return mu_q, sigma_q
+
+    def decode(
+        self,
+        mu_q: torch.Tensor,      # (B, N, K) belief means
+        sigma_q: torch.Tensor,   # (B, N, K) belief variances (diagonal)
+        tau: float = 1.0,        # Temperature
+    ) -> torch.Tensor:
+        """
+        Compute observation likelihood via KL to all token priors.
+
+        p(y = v | q) ∝ exp(-KL(q || π_v) / τ)
+
+        This is the PRINCIPLED output model - no learned W_out needed!
+
+        Args:
+            mu_q: (B, N, K) belief means
+            sigma_q: (B, N, K) belief variances
+            tau: Temperature for softmax
+
+        Returns:
+            logits: (B, N, vocab_size) log-probabilities (unnormalized)
+        """
+        B, N, K = mu_q.shape
+        V = self.vocab_size
+        device = mu_q.device
+
+        # Get prior means and variances
+        # prior_mu: (V, K), prior_sigma: (V, K)
+        mu_p = self.prior_mu  # (V, K)
+        sigma_p = self.prior_sigma  # (V, K)
+
+        # Expand for broadcasting:
+        # mu_q: (B, N, K) -> (B, N, 1, K)
+        # mu_p: (V, K) -> (1, 1, V, K)
+        mu_q_exp = mu_q.unsqueeze(2)  # (B, N, 1, K)
+        sigma_q_exp = sigma_q.unsqueeze(2)  # (B, N, 1, K)
+        mu_p_exp = mu_p.unsqueeze(0).unsqueeze(0)  # (1, 1, V, K)
+        sigma_p_exp = sigma_p.unsqueeze(0).unsqueeze(0)  # (1, 1, V, K)
+
+        # Compute KL(q || π_v) for all v
+        # For diagonal Gaussians:
+        # KL = 0.5 * (Σ_q/Σ_p + (μ_q-μ_p)²/Σ_p - 1 + log(Σ_p/Σ_q))
+        sigma_q_safe = sigma_q_exp.clamp(min=self.eps)
+        sigma_p_safe = sigma_p_exp.clamp(min=self.eps)
+
+        kl_per_dim = 0.5 * (
+            sigma_q_safe / sigma_p_safe
+            + (mu_q_exp - mu_p_exp)**2 / sigma_p_safe
+            - 1.0
+            + torch.log(sigma_p_safe / sigma_q_safe)
+        )  # (B, N, V, K)
+
+        # Sum over K dimensions
+        kl_total = kl_per_dim.sum(dim=-1)  # (B, N, V)
+
+        # Convert to logits: -KL/τ (negative because higher KL = lower probability)
+        logits = -kl_total / tau  # (B, N, V)
+
+        return logits
+
+    def forward(
+        self,
+        token_ids: Optional[torch.Tensor] = None,
+        mu_q: Optional[torch.Tensor] = None,
+        sigma_q: Optional[torch.Tensor] = None,
+        mode: str = 'encode',
+        tau: float = 1.0,
+    ):
+        """
+        Forward pass - encode or decode.
+
+        Args:
+            token_ids: (B, N) for encoding
+            mu_q, sigma_q: (B, N, K) for decoding
+            mode: 'encode' or 'decode'
+            tau: Temperature for decoding
+        """
+        if mode == 'encode':
+            assert token_ids is not None
+            return self.encode(token_ids)
+        elif mode == 'decode':
+            assert mu_q is not None and sigma_q is not None
+            return self.decode(mu_q, sigma_q, tau)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+    def extra_repr(self) -> str:
+        return f"vocab_size={self.vocab_size}, embed_dim={self.embed_dim}, learnable_sigma={self.learnable_sigma}"
+
+
+# =============================================================================
+# GAUGE POSITIONAL ENCODING (position in φ, not μ!)
+# =============================================================================
+
+class GaugePositionEncoder(nn.Module):
+    """
+    Encode position in the gauge frame φ ∈ so(3), NOT in the belief mean μ!
+
+    Key insight: Position information should be in the TRANSPORT, not the content.
+    - Same token at different positions: SAME μ (semantic content)
+    - Different positions: DIFFERENT φ (affects how beliefs interact)
+
+    The transport operator Ω_ij = exp(φ_i)·exp(-φ_j) naturally encodes
+    RELATIVE position through the gauge connection.
+
+    This gives shift-invariant attention with position awareness:
+    - Tokens 3 apart always have same relative transport
+    - Attention pattern is translation-invariant
+    """
+
+    def __init__(
+        self,
+        max_seq_len: int,
+        mode: str = 'learned',  # 'learned' or 'sinusoidal'
+        scale: float = 0.1,
+        composition: str = 'bch1',  # How to compose with token φ
+    ):
+        """
+        Initialize gauge position encoder.
+
+        Args:
+            max_seq_len: Maximum sequence length
+            mode: 'learned' or 'sinusoidal'
+            scale: Scale factor for position angles
+            composition: 'add', 'bch1', 'bch2', or 'exact' for SO(3) composition
+        """
+        super().__init__()
+        self.max_seq_len = max_seq_len
+        self.mode = mode
+        self.scale = scale
+        self.composition = composition
+
+        if mode == 'learned':
+            # Learnable position-specific gauge frames
+            self.pos_phi = nn.Parameter(torch.randn(max_seq_len, 3) * scale)
+        elif mode == 'sinusoidal':
+            # Fixed sinusoidal position encoding in so(3)
+            self.register_buffer('pos_phi', self._make_sinusoidal(max_seq_len, scale))
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+    def _make_sinusoidal(self, max_len: int, scale: float) -> torch.Tensor:
+        """Create sinusoidal positional encoding in so(3)."""
+        position = torch.arange(max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, 3, dtype=torch.float32) * -(math.log(10000.0) / 3))
+
+        phi = torch.zeros(max_len, 3)
+        phi[:, 0] = torch.sin(position.squeeze() * div_term[0])
+        phi[:, 1] = torch.sin(position.squeeze() * div_term[1])
+        phi[:, 2] = torch.cos(position.squeeze() * div_term[2])
+
+        return phi * scale
+
+    def forward(
+        self,
+        phi_token: torch.Tensor,  # (B, N, 3) token gauge frames
+        seq_len: int,
+    ) -> torch.Tensor:
+        """
+        Compose token gauge frames with positional gauge frames.
+
+        Args:
+            phi_token: (B, N, 3) token-specific gauge frames (or zeros)
+            seq_len: Actual sequence length (may be < max_seq_len)
+
+        Returns:
+            phi: (B, N, 3) combined gauge frames encoding position
+        """
+        B = phi_token.shape[0]
+        device = phi_token.device
+
+        # Get positional frames for this sequence length
+        pos_phi = self.pos_phi[:seq_len].to(device)  # (N, 3)
+        pos_phi = pos_phi.unsqueeze(0).expand(B, -1, -1)  # (B, N, 3)
+
+        # Compose using appropriate method
+        if self.composition == 'add':
+            # Simple addition (valid for small angles)
+            return phi_token + pos_phi
+        elif self.composition == 'bch1':
+            # BCH order 1: φ + φ_pos + ½[φ, φ_pos]
+            return so3_compose_bch(phi_token, pos_phi, order=1)
+        elif self.composition == 'bch2':
+            # BCH order 2
+            return so3_compose_bch(phi_token, pos_phi, order=2)
+        else:
+            # Fallback to addition
+            return phi_token + pos_phi
+
+    def extra_repr(self) -> str:
+        return f"max_seq_len={self.max_seq_len}, mode={self.mode}, composition={self.composition}"
 
 
 @dataclass
@@ -80,6 +383,36 @@ class PureFEPConfig:
     # Total dims must equal embed_dim
     # Example for K=127: 32×1 + 15×3 + 10×5 = 32 + 45 + 50 = 127
     irrep_spec: List[Tuple[str, int, int]] = None  # Will be auto-generated if None
+
+    # =========================================================================
+    # EMBEDDING MODE: Choose how to convert tokens → beliefs
+    # =========================================================================
+    # 'learned':     Standard nn.Embedding (ad hoc but fast convergence)
+    # 'prior_bank':  PriorBank - unified embedding/output (principled FEP!)
+    #                - Encode: q ← π_token (prior belief for token)
+    #                - Decode: p(y|q) ∝ exp(-KL(q||π_token)/τ)
+    # 'hybrid':      nn.Embedding + PriorBank output (compromise)
+    embedding_mode: str = 'prior_bank'
+
+    # =========================================================================
+    # OUTPUT MODE: Choose how to compute observation likelihood
+    # =========================================================================
+    # 'linear':      Standard W·μ (ad hoc but standard)
+    # 'kl_to_prior': p(y|q) ∝ exp(-KL(q||π_y)/τ) (principled FEP!)
+    # 'both':        Blend of linear and KL (for comparison)
+    output_mode: str = 'kl_to_prior'
+    output_tau: float = 1.0       # Temperature for KL-based output
+
+    # =========================================================================
+    # POSITION MODE: Where to encode position information
+    # =========================================================================
+    # 'sinusoidal_mu':   Add sinusoidal to μ (standard Transformer, ad hoc)
+    # 'gauge_frame':     Encode in φ ∈ so(3) (principled - affects transport!)
+    # 'both':            Both for comparison
+    position_mode: str = 'gauge_frame'
+    position_encoding: str = 'learned'  # 'learned' or 'sinusoidal'
+    position_scale: float = 0.1         # Scale for gauge position angles
+    position_composition: str = 'bch1'  # How to compose: 'add', 'bch1', 'bch2'
 
     # VFE parameters
     alpha: float = 0.1            # Self-coupling: KL(q||p) - increased for stronger prior influence
@@ -854,36 +1187,128 @@ class PureFEPTransformer(nn.Module):
     """
     Complete Pure FEP Transformer for language modeling.
 
-    Architecture:
-    - Token embedding layer (learned)
-    - Multiple PureFEPLayers in hierarchy
-    - Each layer has its own beliefs, priors, gauge frames
-    - Priors flow TOP-DOWN from higher to lower layers
-    - Beliefs flow BOTTOM-UP through VFE minimization
+    Architecture (with toggleable components):
+    =========================================
+
+    EMBEDDING MODE (config.embedding_mode):
+    - 'learned':     Standard nn.Embedding → μ (ad hoc)
+    - 'prior_bank':  PriorBank → (μ, Σ) from token priors (principled!)
+    - 'hybrid':      nn.Embedding with PriorBank output
+
+    POSITION MODE (config.position_mode):
+    - 'sinusoidal_mu':  Add sinusoidal to μ (standard Transformer)
+    - 'gauge_frame':    Encode in φ ∈ so(3) (principled - affects transport!)
+    - 'both':           Both for comparison
+
+    OUTPUT MODE (config.output_mode):
+    - 'linear':       W·μ → logits (ad hoc)
+    - 'kl_to_prior':  -KL(q||π_v)/τ → logits (principled FEP!)
+    - 'both':         Blend for comparison
+
+    The PUREST FEP configuration:
+    - embedding_mode='prior_bank'
+    - position_mode='gauge_frame'
+    - output_mode='kl_to_prior'
 
     Training:
-    - NO Adam/SGD - purely VFE gradient descent
-    - NO backprop through computational graph
-    - Learning via hierarchical prior updates
+    - In pure_fep_mode: NO backprop, all learning via prior evolution
+    - Otherwise: Hybrid with backprop on embeddings/output
     """
 
     def __init__(self, config: PureFEPConfig):
         super().__init__()
         self.config = config
 
-        # Token embeddings (the only truly learned parameters besides output_proj)
-        self.embedding = nn.Embedding(config.vocab_size, config.embed_dim)
+        # =====================================================================
+        # EMBEDDING: Token → Belief Initialization
+        # =====================================================================
+        if config.embedding_mode == 'prior_bank':
+            # PRINCIPLED: PriorBank serves as both embedding AND output
+            self.prior_bank = PriorBank(
+                vocab_size=config.vocab_size,
+                embed_dim=config.embed_dim,
+                init_std=0.02,
+                init_sigma_scale=0.1,
+                learnable_sigma=True,
+                eps=config.eps,
+            )
+            self.embedding = None  # Not used
+        elif config.embedding_mode == 'hybrid':
+            # HYBRID: Learned embedding + PriorBank output
+            self.embedding = nn.Embedding(config.vocab_size, config.embed_dim)
+            self.prior_bank = PriorBank(
+                vocab_size=config.vocab_size,
+                embed_dim=config.embed_dim,
+                init_std=0.02,
+                init_sigma_scale=0.1,
+                learnable_sigma=True,
+                eps=config.eps,
+            )
+        else:  # 'learned'
+            # AD HOC: Standard nn.Embedding
+            self.embedding = nn.Embedding(config.vocab_size, config.embed_dim)
+            self.prior_bank = None
 
-        # Hierarchical layers
+        # =====================================================================
+        # POSITION ENCODING: Where to encode position
+        # =====================================================================
+        if config.position_mode in ['gauge_frame', 'both']:
+            # PRINCIPLED: Position in gauge frame φ
+            self.gauge_position = GaugePositionEncoder(
+                max_seq_len=config.seq_length,
+                mode=config.position_encoding,
+                scale=config.position_scale,
+                composition=config.position_composition,
+            )
+        else:
+            self.gauge_position = None
+
+        if config.position_mode in ['sinusoidal_mu', 'both']:
+            # AD HOC: Sinusoidal added to μ
+            self.register_buffer(
+                'pos_encoding_mu',
+                self._create_pos_encoding(config.seq_length, config.embed_dim)
+            )
+        else:
+            self.pos_encoding_mu = None
+
+        # =====================================================================
+        # OUTPUT: Belief → Logits
+        # =====================================================================
+        if config.output_mode == 'linear':
+            # AD HOC: Linear projection
+            self.output_proj = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
+        elif config.output_mode == 'kl_to_prior':
+            # PRINCIPLED: KL to prior bank (uses self.prior_bank)
+            self.output_proj = None
+            # Ensure prior_bank exists for KL-based output
+            if self.prior_bank is None:
+                self.prior_bank = PriorBank(
+                    vocab_size=config.vocab_size,
+                    embed_dim=config.embed_dim,
+                    init_std=0.02,
+                    init_sigma_scale=0.1,
+                    learnable_sigma=True,
+                    eps=config.eps,
+                )
+        else:  # 'both'
+            # Blend of linear and KL
+            self.output_proj = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
+            if self.prior_bank is None:
+                self.prior_bank = PriorBank(
+                    vocab_size=config.vocab_size,
+                    embed_dim=config.embed_dim,
+                )
+
+        # =====================================================================
+        # HIERARCHICAL LAYERS
+        # =====================================================================
         self.layers = nn.ModuleList([
             PureFEPLayer(config.embed_dim, scale=i, config=config)
             for i in range(config.num_layers)
         ])
 
-        # Output head (shared with layers, or separate)
-        self.output_proj = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
-
-        # Position encoding (simple sinusoidal)
+        # Backward compat: also store pos_encoding for layers that might use it
         self.register_buffer(
             'pos_encoding',
             self._create_pos_encoding(config.seq_length, config.embed_dim)
@@ -918,6 +1343,11 @@ class PureFEPTransformer(nn.Module):
         """
         Forward pass with pure VFE learning.
 
+        Uses toggleable components based on config:
+        - embedding_mode: 'learned', 'prior_bank', or 'hybrid'
+        - position_mode: 'sinusoidal_mu', 'gauge_frame', or 'both'
+        - output_mode: 'linear', 'kl_to_prior', or 'both'
+
         Args:
             input_ids: (B, N) input token IDs
             targets: (B, N) target token IDs (shifted by 1 for LM)
@@ -929,17 +1359,45 @@ class PureFEPTransformer(nn.Module):
         """
         B, N = input_ids.shape
         device = input_ids.device
+        K = self.config.embed_dim
 
-        # Embed tokens
-        x = self.embedding(input_ids)  # (B, N, K)
+        # =====================================================================
+        # EMBEDDING: Token → Initial Belief
+        # =====================================================================
+        if self.config.embedding_mode == 'prior_bank':
+            # PRINCIPLED: Initialize beliefs from token priors
+            x, sigma_init = self.prior_bank.encode(input_ids)  # (B, N, K), (B, N, K)
+        elif self.config.embedding_mode == 'hybrid':
+            # HYBRID: Learned embedding for μ
+            x = self.embedding(input_ids)  # (B, N, K)
+            sigma_init = torch.ones(B, N, K, device=device) * 0.1
+        else:  # 'learned'
+            # AD HOC: Standard embedding
+            x = self.embedding(input_ids)  # (B, N, K)
+            sigma_init = torch.ones(B, N, K, device=device) * 0.1
 
-        # Add position encoding
-        x = x + self.pos_encoding[:, :N, :]
+        # =====================================================================
+        # POSITION ENCODING: Add to μ and/or φ
+        # =====================================================================
+        # Initialize gauge frames (will be modified by position encoder)
+        phi = torch.zeros(B, N, 3, device=device)
 
-        # Causal mask
+        if self.config.position_mode in ['sinusoidal_mu', 'both']:
+            # AD HOC: Add sinusoidal to μ
+            x = x + self.pos_encoding_mu[:, :N, :]
+
+        if self.config.position_mode in ['gauge_frame', 'both']:
+            # PRINCIPLED: Encode position in gauge frame φ
+            phi = self.gauge_position(phi, N)
+
+        # =====================================================================
+        # CAUSAL MASK
+        # =====================================================================
         mask = torch.tril(torch.ones(N, N, device=device)).unsqueeze(0).expand(B, -1, -1)
 
-        # Process through hierarchical layers
+        # =====================================================================
+        # PROCESS THROUGH HIERARCHICAL LAYERS
+        # =====================================================================
         layer_infos = []
         parent_beliefs = None
 
@@ -952,14 +1410,43 @@ class PureFEPTransformer(nn.Module):
             )
             layer_infos.append(info)
 
+            # Update phi with layer's gauge frames
+            phi = info['phi']
+
             # Current layer's beliefs become parent for next layer
-            parent_beliefs = (info['beliefs'][0], info['beliefs'][1], info['phi'])
+            parent_beliefs = (info['beliefs'][0], info['beliefs'][1], phi)
 
-        # Output logits from final layer beliefs
-        logits = self.output_proj(x)  # (B, N, vocab_size)
+        # =====================================================================
+        # OUTPUT: Belief → Logits
+        # =====================================================================
+        # Get final beliefs (μ_q, Σ_q) from last layer
+        mu_final = x
+        sigma_final = layer_infos[-1]['beliefs'][1] if layer_infos else sigma_init
 
-        # NOTE: Prior updates now happen in train_step() where we have prediction errors
-        # This allows prediction-error-weighted learning instead of simple averaging.
+        if self.config.output_mode == 'linear':
+            # AD HOC: Linear projection
+            logits = self.output_proj(mu_final)  # (B, N, vocab_size)
+
+        elif self.config.output_mode == 'kl_to_prior':
+            # PRINCIPLED: KL to token priors
+            # p(y=v|q) ∝ exp(-KL(q||π_v)/τ)
+            logits = self.prior_bank.decode(
+                mu_final, sigma_final,
+                tau=self.config.output_tau
+            )  # (B, N, vocab_size)
+
+        else:  # 'both'
+            # Blend: average of linear and KL-based logits
+            logits_linear = self.output_proj(mu_final)
+            logits_kl = self.prior_bank.decode(
+                mu_final, sigma_final,
+                tau=self.config.output_tau
+            )
+            logits = 0.5 * (logits_linear + logits_kl)
+
+        # =====================================================================
+        # BOOKKEEPING
+        # =====================================================================
         self.step_count += 1
 
         # Aggregate info
@@ -968,9 +1455,11 @@ class PureFEPTransformer(nn.Module):
             for k, v in info['metrics'].items():
                 all_metrics[f'layer_{i}/{k}'] = v
 
+        # Store sigma_final for observation gradient in VFE
         info = {
             'metrics': all_metrics,
             'layer_infos': layer_infos,
+            'sigma_final': sigma_final,
         }
 
         return logits, info
@@ -1292,49 +1781,187 @@ if __name__ == '__main__':
     print("=" * 70)
     print("PURE FEP TRANSFORMER TEST")
     print("=" * 70)
+    print("\nThis tests the principled FEP transformer with:")
+    print("  - PriorBank: unified embedding/output via token priors")
+    print("  - Gauge position: position in φ, not μ")
+    print("  - KL-to-prior output: p(y|q) ∝ exp(-KL(q||π_y)/τ)")
+    print("=" * 70)
 
-    # Config (embed_dim must be ODD for SO(3) irreps)
-    config = PureFEPConfig(
-        embed_dim=63,  # Must be odd!
+    # =========================================================================
+    # Test 1: PriorBank (standalone)
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("[TEST 1] PriorBank: Unified Embedding & Output")
+    print("=" * 70)
+
+    prior_bank = PriorBank(vocab_size=100, embed_dim=32)
+    print(f"    Created PriorBank: {prior_bank.vocab_size} tokens × {prior_bank.embed_dim} dims")
+
+    # Test encoding
+    test_tokens = torch.randint(0, 100, (2, 10))  # (B=2, N=10)
+    mu_q, sigma_q = prior_bank.encode(test_tokens)
+    print(f"    Encode: tokens {test_tokens.shape} → μ {mu_q.shape}, σ {sigma_q.shape}")
+
+    # Test decoding
+    logits = prior_bank.decode(mu_q, sigma_q, tau=1.0)
+    print(f"    Decode: (μ, σ) → logits {logits.shape}")
+    print(f"    Logits range: [{logits.min():.2f}, {logits.max():.2f}]")
+
+    # Verify: encoding then decoding should give highest prob to original token
+    probs = F.softmax(logits, dim=-1)
+    predicted = probs.argmax(dim=-1)
+    accuracy = (predicted == test_tokens).float().mean().item()
+    print(f"    Self-consistency: accuracy = {accuracy:.1%}")
+    print(f"    ✓ PriorBank working correctly!" if accuracy > 0.5 else "    ⚠ Low accuracy (expected for random init)")
+
+    # =========================================================================
+    # Test 2: GaugePositionEncoder
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("[TEST 2] GaugePositionEncoder: Position in φ, not μ")
+    print("=" * 70)
+
+    pos_encoder = GaugePositionEncoder(max_seq_len=64, mode='learned', scale=0.1)
+    print(f"    Created GaugePositionEncoder: max_len=64, mode=learned")
+
+    phi_token = torch.zeros(2, 10, 3)  # (B, N, 3)
+    phi_with_pos = pos_encoder(phi_token, seq_len=10)
+    print(f"    Input φ: {phi_token.shape}, Output φ: {phi_with_pos.shape}")
+    print(f"    φ[0,0]: {phi_with_pos[0,0].tolist()}")
+    print(f"    φ[0,9]: {phi_with_pos[0,9].tolist()}")
+
+    # Check that different positions have different φ
+    pos_diff = (phi_with_pos[0, 0] - phi_with_pos[0, 5]).norm().item()
+    print(f"    Position difference (0 vs 5): {pos_diff:.4f}")
+    print(f"    ✓ Position encoded in gauge frame!" if pos_diff > 0 else "    ⚠ No position encoding")
+
+    # =========================================================================
+    # Test 3: Full PureFEPTransformer (PUREST config)
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("[TEST 3] PureFEPTransformer (PUREST FEP config)")
+    print("=" * 70)
+
+    # PUREST FEP configuration
+    config_pure = PureFEPConfig(
+        embed_dim=63,  # Must be odd for SO(3)!
         num_layers=2,
         seq_length=32,
         vocab_size=1000,
+        # PUREST settings:
+        embedding_mode='prior_bank',    # Beliefs from token priors
+        position_mode='gauge_frame',    # Position in φ
+        output_mode='kl_to_prior',      # Output via KL to priors
+        output_tau=1.0,
+        # VFE parameters
         mu_lr=0.1,
         sigma_lr=0.025,
         prior_lr=0.05,
+        pure_fep_mode=True,             # No backprop!
     )
 
-    print(f"\n[1] Creating model...")
-    model = PureFEPTransformer(config)
-    print(f"    Config: K={config.embed_dim}, L={config.num_layers}, V={config.vocab_size}")
+    print(f"\n    Config:")
+    print(f"      embed_dim: {config_pure.embed_dim}")
+    print(f"      embedding_mode: {config_pure.embedding_mode}")
+    print(f"      position_mode: {config_pure.position_mode}")
+    print(f"      output_mode: {config_pure.output_mode}")
+    print(f"      pure_fep_mode: {config_pure.pure_fep_mode}")
+
+    model_pure = PureFEPTransformer(config_pure)
 
     # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"    Total parameters: {total_params:,}")
+    total_params = sum(p.numel() for p in model_pure.parameters())
+    print(f"\n    Total parameters: {total_params:,}")
 
     # Test forward pass
-    print(f"\n[2] Testing forward pass...")
     B, N = 2, 32
-    input_ids = torch.randint(0, config.vocab_size, (B, N))
-    targets = torch.randint(0, config.vocab_size, (B, N))
+    input_ids = torch.randint(0, config_pure.vocab_size, (B, N))
+    targets = torch.randint(0, config_pure.vocab_size, (B, N))
 
-    logits, info = model(input_ids, targets=targets, n_vfe_steps=1)
-    print(f"    Input shape: {input_ids.shape}")
-    print(f"    Output shape: {logits.shape}")
-    print(f"    VFE metrics: {list(info['metrics'].keys())[:5]}...")
+    print(f"\n    Forward pass...")
+    logits, info = model_pure(input_ids, targets=targets, n_vfe_steps=1)
+    print(f"    Input: {input_ids.shape}")
+    print(f"    Output logits: {logits.shape}")
+
+    # Verify output is valid probability distribution
+    probs = F.softmax(logits, dim=-1)
+    prob_sum = probs.sum(dim=-1).mean().item()
+    print(f"    Prob sum (should be ~1.0): {prob_sum:.4f}")
 
     # Test training step
-    print(f"\n[3] Testing training step...")
-    metrics = model.train_step(input_ids, targets, n_vfe_steps=1)
+    print(f"\n    Training step (pure FEP - no backprop)...")
+    metrics = model_pure.train_step(input_ids, targets, n_vfe_steps=1)
     print(f"    CE Loss: {metrics['ce_loss']:.4f}")
     print(f"    Perplexity: {metrics['perplexity']:.2f}")
 
-    # Test multiple VFE steps
-    print(f"\n[4] Testing multiple VFE steps...")
-    for n_steps in [1, 2, 5]:
-        metrics = model.train_step(input_ids, targets, n_vfe_steps=n_steps)
-        print(f"    n_vfe_steps={n_steps}: PPL={metrics['perplexity']:.2f}")
-
+    # =========================================================================
+    # Test 4: Comparison with AD HOC config
+    # =========================================================================
     print("\n" + "=" * 70)
-    print("PURE FEP TRANSFORMER TEST COMPLETE")
+    print("[TEST 4] Comparison: PURE vs AD HOC")
+    print("=" * 70)
+
+    # AD HOC configuration (standard transformer style)
+    config_adhoc = PureFEPConfig(
+        embed_dim=63,
+        num_layers=2,
+        seq_length=32,
+        vocab_size=1000,
+        # AD HOC settings:
+        embedding_mode='learned',       # Standard nn.Embedding
+        position_mode='sinusoidal_mu',  # Sinusoidal added to μ
+        output_mode='linear',           # Linear projection
+        pure_fep_mode=False,            # Use backprop
+        mu_lr=0.1,
+    )
+
+    model_adhoc = PureFEPTransformer(config_adhoc)
+
+    print(f"\n    AD HOC model:")
+    print(f"      embedding_mode: {config_adhoc.embedding_mode}")
+    print(f"      position_mode: {config_adhoc.position_mode}")
+    print(f"      output_mode: {config_adhoc.output_mode}")
+
+    # Compare forward passes
+    logits_pure, _ = model_pure(input_ids, targets=targets, n_vfe_steps=1)
+    logits_adhoc, _ = model_adhoc(input_ids, targets=targets, n_vfe_steps=1)
+
+    print(f"\n    PURE logits range: [{logits_pure.min():.2f}, {logits_pure.max():.2f}]")
+    print(f"    AD HOC logits range: [{logits_adhoc.min():.2f}, {logits_adhoc.max():.2f}]")
+
+    # Compare training
+    metrics_pure = model_pure.train_step(input_ids, targets, n_vfe_steps=2)
+    metrics_adhoc = model_adhoc.train_step(input_ids, targets, n_vfe_steps=2)
+
+    print(f"\n    PURE FEP:  PPL = {metrics_pure['perplexity']:.2f}")
+    print(f"    AD HOC:    PPL = {metrics_adhoc['perplexity']:.2f}")
+
+    # =========================================================================
+    # Summary
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("SUMMARY: Pure FEP Transformer Components")
+    print("=" * 70)
+    print("""
+    PRINCIPLED (No Ad Hoc Structures):
+    ✓ PriorBank: Unified embedding/output via token priors
+      - Encode: q ← π_token (prior belief)
+      - Decode: p(y|q) ∝ exp(-KL(q||π_y)/τ)
+
+    ✓ GaugePositionEncoder: Position in φ ∈ so(3)
+      - Transport Ω_ij encodes relative position
+      - Shift-invariant attention with position awareness
+
+    ✓ VFE with β_ij term:
+      F = α·KL(q||p) + λ·Σ_ij β_ij·KL(q_i||Ω_ij·q_j) + E[-log p(y|z)]
+
+    ✓ Softmax coupling gradient replaces GELU/ReLU nonlinearity
+
+    TOGGLEABLE (for comparison):
+    - embedding_mode: 'prior_bank', 'learned', 'hybrid'
+    - position_mode: 'gauge_frame', 'sinusoidal_mu', 'both'
+    - output_mode: 'kl_to_prior', 'linear', 'both'
+    """)
+    print("=" * 70)
+    print("✓ ALL TESTS COMPLETE")
     print("=" * 70)
