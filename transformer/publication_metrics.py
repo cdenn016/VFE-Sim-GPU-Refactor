@@ -1584,8 +1584,12 @@ class PublicationMetrics:
         fig, ax = plt.subplots(figsize=(10, 8))
 
         # Use viridis for log scale (better for continuous data)
+        # vmin=-3, vmax=0 to see medium-weight connections (0.001 to 1.0)
         cmap = 'viridis' if log_scale else 'Greys'
-        im = ax.imshow(attn_plot, cmap=cmap, aspect='auto')
+        if log_scale:
+            im = ax.imshow(attn_plot, cmap=cmap, aspect='auto', vmin=-3, vmax=0)
+        else:
+            im = ax.imshow(attn_plot, cmap=cmap, aspect='auto')
 
         ax.set_xticks(range(min(N, 32)))
         ax.set_yticks(range(min(N, 32)))
