@@ -549,6 +549,10 @@ class PureFEPLayer(nn.Module):
 
     CRITICAL FIX: Priors are now POSITION-DEPENDENT (N, K) not global (K,)
     This allows the model to learn position-specific patterns.
+
+    OBSERVATION GRADIENT: Uses the appropriate output mode:
+    - 'linear': W·μ (uses self.output_proj)
+    - 'kl_to_prior': -KL(q||π_v)/τ (uses prior_bank)
     """
 
     def __init__(
@@ -556,6 +560,7 @@ class PureFEPLayer(nn.Module):
         embed_dim: int,
         scale: int,  # Hierarchical scale ζ
         config: PureFEPConfig,
+        prior_bank: Optional['PriorBank'] = None,  # Reference to prior bank for KL output
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -564,13 +569,20 @@ class PureFEPLayer(nn.Module):
         self.scale = scale
         self.config = config
 
+        # Reference to prior bank (for KL-to-prior output mode)
+        self.prior_bank = prior_bank
+
         # SO(3) generators for gauge transport
         gen_np = generate_so3_generators(embed_dim)
         self.register_buffer('generators', torch.from_numpy(gen_np).float())
 
         # Output projection - maps beliefs to logits for observation likelihood
+        # Only used when output_mode='linear' or as fallback
         # In pure FEP mode, this is updated via VFE pressure on priors, not backprop
-        self.output_proj = nn.Linear(embed_dim, config.vocab_size, bias=False)
+        if config.output_mode == 'linear' or prior_bank is None:
+            self.output_proj = nn.Linear(embed_dim, config.vocab_size, bias=False)
+        else:
+            self.output_proj = None  # Use prior_bank instead
 
         # =====================================================================
         # POSITION-DEPENDENT PRIORS - the key to learning structure!
@@ -727,11 +739,25 @@ class PureFEPLayer(nn.Module):
         prior_coupling = self.compute_prior_coupling_loss(mu_p, sigma_p, phi, mask)
 
         # ==================================================================
-        # OBSERVATION TERM: E_q[-log p(y|x)] ≈ CE(W·μ_q, targets)
+        # OBSERVATION TERM: E_q[-log p(y|x)]
         # ==================================================================
-        # This is the CRITICAL addition - observations are INSIDE the VFE
+        # Uses the appropriate output mode:
+        # - 'linear': CE(W·μ_q, targets)
+        # - 'kl_to_prior': CE(-KL(q||π_v)/τ, targets)
         if targets is not None:
-            logits = self.output_proj(mu_q)
+            if self.config.output_mode == 'kl_to_prior' and self.prior_bank is not None:
+                # PRINCIPLED: KL to token priors
+                logits = self.prior_bank.decode(
+                    mu_q, sigma_q,
+                    tau=getattr(self.config, 'output_tau', 1.0)
+                )
+            elif self.output_proj is not None:
+                # AD HOC: Linear projection
+                logits = self.output_proj(mu_q)
+            else:
+                # Fallback: use prior_bank if available
+                logits = self.prior_bank.decode(mu_q, sigma_q, tau=1.0)
+
             ce_loss = F.cross_entropy(
                 logits.view(-1, self.config.vocab_size),
                 targets.view(-1),
@@ -767,16 +793,37 @@ class PureFEPLayer(nn.Module):
             )
 
             # Add observation gradient (CE) analytically
+            # CRITICAL: Use the SAME output mode as the forward pass!
             if targets is not None:
                 with torch.enable_grad():
                     mu_q_grad = mu_q.detach().requires_grad_(True)
-                    logits_grad = self.output_proj(mu_q_grad)
+                    sigma_q_grad = sigma_q.detach().requires_grad_(True)
+
+                    if self.config.output_mode == 'kl_to_prior' and self.prior_bank is not None:
+                        # PRINCIPLED: KL to token priors
+                        logits_grad = self.prior_bank.decode(
+                            mu_q_grad, sigma_q_grad,
+                            tau=getattr(self.config, 'output_tau', 1.0)
+                        )
+                    elif self.output_proj is not None:
+                        # AD HOC: Linear projection
+                        logits_grad = self.output_proj(mu_q_grad)
+                    else:
+                        # Fallback
+                        logits_grad = self.prior_bank.decode(mu_q_grad, sigma_q_grad, tau=1.0)
+
                     ce_for_grad = F.cross_entropy(
                         logits_grad.view(-1, self.config.vocab_size),
                         targets.view(-1),
                         reduction='sum'
                     )
-                    grad_mu_ce = torch.autograd.grad(ce_for_grad, mu_q_grad)[0]
+                    grad_mu_ce = torch.autograd.grad(ce_for_grad, mu_q_grad, retain_graph=True)[0]
+
+                    # Also get sigma gradient for KL-based output (affects logits!)
+                    if self.config.output_mode == 'kl_to_prior' and self.prior_bank is not None:
+                        grad_sigma_ce = torch.autograd.grad(ce_for_grad, sigma_q_grad)[0]
+                        grad_sigma = grad_sigma + lambda_obs * grad_sigma_ce / (B * N)
+
                 # Add CE gradient with lambda_obs weight
                 grad_mu = grad_mu + lambda_obs * grad_mu_ce / (B * N)
         else:
@@ -1303,8 +1350,14 @@ class PureFEPTransformer(nn.Module):
         # =====================================================================
         # HIERARCHICAL LAYERS
         # =====================================================================
+        # Pass prior_bank reference so layers can use KL-to-prior output
         self.layers = nn.ModuleList([
-            PureFEPLayer(config.embed_dim, scale=i, config=config)
+            PureFEPLayer(
+                config.embed_dim,
+                scale=i,
+                config=config,
+                prior_bank=self.prior_bank,  # Share prior_bank for KL output
+            )
             for i in range(config.num_layers)
         ])
 
