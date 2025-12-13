@@ -230,16 +230,40 @@ def gaussian_kl_divergence(
         min_eig = 1e-4  # Minimum eigenvalue floor (larger than eps for stability)
 
         def ensure_positive_definite(sigma, min_eig=min_eig):
-            """Ensure matrix is positive-definite via eigenvalue clamping."""
-            # Symmetrize first (handles numerical asymmetry)
-            sigma_sym = 0.5 * (sigma + sigma.transpose(-1, -2))
-            # Eigendecomposition
-            eigenvalues, eigenvectors = torch.linalg.eigh(sigma_sym)
-            # Clamp eigenvalues to minimum
-            eigenvalues_clamped = torch.clamp(eigenvalues, min=min_eig)
-            # Reconstruct: V @ diag(λ) @ V^T
-            sigma_pd = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
-            return sigma_pd
+            """Ensure matrix is positive-definite via eigenvalue clamping.
+
+            Handles ill-conditioned matrices by:
+            1. Clamping extreme values to prevent numerical overflow
+            2. Adding small regularization before eigendecomposition
+            3. Falling back to regularized identity if eigh fails
+            """
+            # Clamp extreme values to prevent ill-conditioning
+            sigma_clamped = torch.clamp(sigma, min=-1e6, max=1e6)
+            # Replace any NaN/Inf with zeros
+            sigma_clamped = torch.where(
+                torch.isfinite(sigma_clamped), sigma_clamped,
+                torch.zeros_like(sigma_clamped)
+            )
+            # Symmetrize (handles numerical asymmetry)
+            sigma_sym = 0.5 * (sigma_clamped + sigma_clamped.transpose(-1, -2))
+            # Add small regularization to improve conditioning before eigh
+            reg = 1e-3 * torch.eye(sigma_sym.shape[-1], device=sigma_sym.device, dtype=sigma_sym.dtype)
+            sigma_reg = sigma_sym + reg
+
+            try:
+                # Eigendecomposition
+                eigenvalues, eigenvectors = torch.linalg.eigh(sigma_reg)
+                # Clamp eigenvalues to minimum
+                eigenvalues_clamped = torch.clamp(eigenvalues, min=min_eig)
+                # Reconstruct: V @ diag(λ) @ V^T
+                sigma_pd = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
+                return sigma_pd
+            except RuntimeError:
+                # Fallback: return well-conditioned identity-like matrix
+                # This happens when matrix is severely ill-conditioned
+                return 0.1 * torch.eye(
+                    sigma_sym.shape[-1], device=sigma_sym.device, dtype=sigma_sym.dtype
+                ).expand_as(sigma_sym)
 
         sigma_q_reg = ensure_positive_definite(sigma_q)
         sigma_p_reg = ensure_positive_definite(sigma_p)

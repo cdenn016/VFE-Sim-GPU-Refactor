@@ -72,6 +72,56 @@ from transformer.attention import compute_attention_weights
 
 
 # =============================================================================
+# Robust SPD Projection Helper
+# =============================================================================
+
+def ensure_positive_definite_robust(sigma: torch.Tensor, min_eig: float = 1e-4) -> torch.Tensor:
+    """Ensure matrix is positive-definite via eigenvalue clamping.
+
+    Handles ill-conditioned matrices by:
+    1. Clamping extreme values to prevent numerical overflow
+    2. Adding small regularization before eigendecomposition
+    3. Falling back to regularized identity if eigh fails
+
+    Args:
+        sigma: Covariance matrix (..., K, K)
+        min_eig: Minimum eigenvalue floor
+
+    Returns:
+        Positive-definite matrix with same shape
+    """
+    K = sigma.shape[-1]
+    device = sigma.device
+    dtype = sigma.dtype
+
+    # Clamp extreme values to prevent ill-conditioning
+    sigma_clamped = torch.clamp(sigma, min=-1e6, max=1e6)
+    # Replace any NaN/Inf with zeros
+    sigma_clamped = torch.where(
+        torch.isfinite(sigma_clamped), sigma_clamped,
+        torch.zeros_like(sigma_clamped)
+    )
+    # Symmetrize (handles numerical asymmetry)
+    sigma_sym = 0.5 * (sigma_clamped + sigma_clamped.transpose(-1, -2))
+    # Add small regularization to improve conditioning before eigh
+    reg = 1e-3 * torch.eye(K, device=device, dtype=dtype)
+    sigma_reg = sigma_sym + reg
+
+    try:
+        # Eigendecomposition
+        eigenvalues, eigenvectors = torch.linalg.eigh(sigma_reg)
+        # Clamp eigenvalues to minimum
+        eigenvalues_clamped = torch.clamp(eigenvalues, min=min_eig)
+        # Reconstruct: V @ diag(λ) @ V^T
+        sigma_pd = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
+        return sigma_pd
+    except RuntimeError:
+        # Fallback: return well-conditioned identity-like matrix
+        # This happens when matrix is severely ill-conditioned
+        return 0.1 * torch.eye(K, device=device, dtype=dtype).expand_as(sigma_sym)
+
+
+# =============================================================================
 # GPU-Based Gradient Computation (PyTorch - FAST!)
 # =============================================================================
 
@@ -901,14 +951,9 @@ class VariationalFFNGradientEngine(nn.Module):
                     # For diagonal, simple additive update with positivity constraint
                     sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=1e-4)
                 elif self.update_sigma and not is_diagonal_cov:
-                    # Full covariance update with proper eigenvalue clamping
+                    # Full covariance update with robust eigenvalue clamping
                     sigma_current = sigma_current - self.lr * nat_grad_sigma
-                    # Symmetrize
-                    sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    # Eigenvalue clamping to ensure positive definiteness
-                    eigenvalues, eigenvectors = torch.linalg.eigh(sigma_current)
-                    eigenvalues_clamped = torch.clamp(eigenvalues, min=1e-4)
-                    sigma_current = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
+                    sigma_current = ensure_positive_definite_robust(sigma_current)
 
             # Return updated parameters (detached from computation graph)
             if self.update_sigma:
@@ -1257,13 +1302,9 @@ class VariationalFFNDynamic(nn.Module):
                 if is_diagonal:
                     sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=1e-4)
                 else:
+                    # Full covariance update with robust eigenvalue clamping
                     sigma_current = sigma_current - self.lr * nat_grad_sigma
-                    # Symmetrize
-                    sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    # Eigenvalue clamping to ensure positive definiteness
-                    eigenvalues, eigenvectors = torch.linalg.eigh(sigma_current)
-                    eigenvalues_clamped = torch.clamp(eigenvalues, min=1e-4)
-                    sigma_current = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
+                    sigma_current = ensure_positive_definite_robust(sigma_current)
 
             # =================================================================
             # STEP 5: Optional M-step (prior update)
@@ -1614,13 +1655,9 @@ class VariationalFFNDynamicStable(nn.Module):
                 if is_diagonal:
                     sigma_current = (sigma_current - self.lr * nat_grad_sigma).clamp(min=1e-4)
                 else:
+                    # Full covariance update with robust eigenvalue clamping
                     sigma_current = sigma_current - self.lr * nat_grad_sigma
-                    # Symmetrize
-                    sigma_current = 0.5 * (sigma_current + sigma_current.transpose(-1, -2))
-                    # Eigenvalue clamping to ensure positive definiteness
-                    eigenvalues, eigenvectors = torch.linalg.eigh(sigma_current)
-                    eigenvalues_clamped = torch.clamp(eigenvalues, min=1e-4)
-                    sigma_current = eigenvectors @ torch.diag_embed(eigenvalues_clamped) @ eigenvectors.transpose(-1, -2)
+                    sigma_current = ensure_positive_definite_robust(sigma_current)
 
             # =================================================================
             # STEP 10: Optional M-step
