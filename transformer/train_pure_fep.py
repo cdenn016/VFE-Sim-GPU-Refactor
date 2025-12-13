@@ -382,6 +382,8 @@ def main():
         print(f"  [ENABLED] Gauge evolution: lr={model_config.gauge_lr}")
     if model_config.enable_ouroboros_tower:
         print(f"  [ENABLED] Ouroboros Tower: depth={model_config.tower_max_depth}, decay={model_config.tower_decay}")
+    if model_config.dynamic_layers_enabled:
+        print(f"  [ENABLED] Dynamic layers: threshold={model_config.layer_spawn_threshold}, max={model_config.max_layers}")
 
     # Create model
     print(f"\nCreating model...")
