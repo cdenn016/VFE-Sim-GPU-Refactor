@@ -489,6 +489,26 @@ class PureFEPConfig:
     max_layers: int = 8                   # Maximum allowed layers
 
     # =========================================================================
+    # OUROBOROS TOWER: Multi-level hyperpriors from ALL ancestors
+    # =========================================================================
+    # Instead of just parent → child prior flow (Markovian), collect priors
+    # from grandparent, great-grandparent, etc. (non-Markovian memory).
+    #
+    # Ouroboros Tower:
+    #     p_i^(ζ)     ← q_M^(ζ+1)      (parent - immediate prior)
+    #     h_i^(ζ,0)   ← q_M^(ζ+2)      (grandparent - 1st hyperprior)
+    #     h_i^(ζ,1)   ← q_M^(ζ+3)      (great-grandparent - 2nd hyperprior)
+    #
+    # Each hyperprior contributes to the VFE with decaying weight:
+    #     F += Σ_d decay^d · KL(p_i || h_i^d)
+    #
+    # This creates long-range memory: top layers influence bottom layers
+    # beyond just their immediate parent, enabling deeper abstraction.
+    enable_ouroboros_tower: bool = False
+    tower_max_depth: int = 3              # How many ancestor levels to collect
+    tower_decay: float = 0.3              # Weight decay per level (0.3^d)
+
+    # =========================================================================
     # PERFORMANCE OPTIMIZATIONS
     # =========================================================================
     # Transport caching: cache Ω_ij when gauge frames don't evolve
@@ -672,6 +692,15 @@ class PureFEPLayer(nn.Module):
         # Initialized to None, will be created on first use with correct shape
         self.register_buffer('_momentum_mu', None, persistent=False)
         self.register_buffer('_momentum_sigma', None, persistent=False)
+
+        # =====================================================================
+        # OUROBOROS TOWER: Hyperpriors from ancestors (grandparent, great-grandparent, ...)
+        # =====================================================================
+        # These store transported beliefs from ancestor layers beyond the immediate parent.
+        # Each entry is a hyperprior at a different depth in the hierarchy.
+        # h_i^(d) = Ω_i·q_ancestor^(ζ+d+1) where d=0 is grandparent, d=1 is great-grandparent, etc.
+        self.hyperprior_mus: List[torch.Tensor] = []      # List of (N, K) tensors
+        self.hyperprior_sigmas: List[torch.Tensor] = []   # List of (N, K) tensors
 
         # Optional torch.compile for kernel fusion
         self._compiled = False
@@ -1221,6 +1250,235 @@ class PureFEPLayer(nn.Module):
 
         return prior_coupling_loss
 
+    def _compute_prior_alignment_gradient(
+        self,
+        mu_p: torch.Tensor,      # (N, K) prior means
+        sigma_p: torch.Tensor,   # (N, K) prior variances
+    ) -> torch.Tensor:
+        """
+        Compute prior alignment gradient: ∂/∂μ_p [λ_γ · Σ_j KL(p_i || Ω_ij p_j)]
+
+        This gradient encourages priors to form a coherent world model
+        by aligning with transported priors from other positions.
+
+        For diagonal Gaussians:
+            ∂KL(p_i || Ω_ij p_j)/∂μ_p[i] = Σ_j^{-1} @ (μ_p[i] - Ω_ij @ μ_p[j])
+
+        Args:
+            mu_p: Prior means (N, K)
+            sigma_p: Prior variances (N, K)
+
+        Returns:
+            grad_mu_p: Gradient w.r.t. μ_p, shape (N, K)
+        """
+        N, K = mu_p.shape
+        device = mu_p.device
+
+        # Need batch dimension for transport operators
+        mu_p_batch = mu_p.unsqueeze(0)  # (1, N, K)
+        sigma_p_batch = sigma_p.unsqueeze(0)  # (1, N, K)
+
+        # Create phi for prior (use zero gauge frames for priors)
+        # Priors exist in a "reference frame" at φ=0
+        phi = torch.zeros(1, N, 3, device=device)
+
+        # Compute transport operators
+        transport_cache = compute_transport_operators(phi, self.generators)
+        Omega = transport_cache['Omega']  # (1, N, N, K, K)
+
+        # Transport all priors: Ω_ij @ μ_p[j]
+        mu_p_transported = torch.einsum('bnmij,bmj->bnmi', Omega, mu_p_batch)  # (1, N, N, K)
+
+        # Transport covariance if exact mode enabled
+        sigma_p_safe = sigma_p_batch.clamp(min=self.config.eps)
+        if self.config.exact_covariance_transport:
+            sigma_j_diag = torch.diag_embed(sigma_p_safe)  # (1, N, K, K)
+            sigma_j_transported_full = torch.einsum(
+                'bnmij,bmjk,bnmlk->bnmil', Omega, sigma_j_diag, Omega
+            )
+            sigma_j_transported = torch.diagonal(
+                sigma_j_transported_full, dim1=-2, dim2=-1
+            )  # (1, N, N, K)
+        else:
+            sigma_j_transported = sigma_p_safe.unsqueeze(2).expand(-1, -1, N, -1)  # (1, N, N, K)
+
+        # Difference: μ_p[i] - Ω_ij @ μ_p[j]
+        mu_i = mu_p_batch.unsqueeze(2)  # (1, N, 1, K)
+        delta_mu = mu_i - mu_p_transported  # (1, N, N, K)
+
+        # Gradient per pair: Σ_j^{-1} @ δμ (for diagonal: δμ / σ_j)
+        grad_per_pair = delta_mu / sigma_j_transported.clamp(min=self.config.eps)  # (1, N, N, K)
+
+        # Sum over j (all positions contribute to gradient at i)
+        # Weight by attention-like factor (uniform for priors)
+        grad_mu_p = self.config.lambda_prior * grad_per_pair.sum(dim=2).squeeze(0) / N  # (N, K)
+
+        return grad_mu_p
+
+    def update_hyperpriors_from_ancestors(
+        self,
+        ancestor_beliefs: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        ancestor_generators: List[torch.Tensor],
+        phi: torch.Tensor,  # (B, N, 3) current layer gauge frames
+    ):
+        """
+        Ouroboros Tower: Collect hyperpriors from ALL ancestors beyond parent.
+
+        This creates non-Markovian memory in the hierarchy:
+        - h^(0) ← grandparent beliefs (layer ζ+2)
+        - h^(1) ← great-grandparent beliefs (layer ζ+3)
+        - h^(d) ← ancestor at depth d+2 above current layer
+
+        Each ancestor's beliefs are transported to the current layer's frame.
+
+        Args:
+            ancestor_beliefs: List of (mu_q, sigma_q, phi) from ancestors
+                              Index 0 = grandparent, 1 = great-grandparent, etc.
+            ancestor_generators: SO(3) generators for each ancestor layer
+            phi: Current layer's gauge frames (B, N, 3)
+
+        Updates:
+            self.hyperprior_mus: List of transported ancestor means (N, K)
+            self.hyperprior_sigmas: List of transported ancestor variances (N, K)
+        """
+        if not self.config.enable_ouroboros_tower or len(ancestor_beliefs) == 0:
+            self.hyperprior_mus = []
+            self.hyperprior_sigmas = []
+            return
+
+        device = phi.device
+        B, N, K = phi.shape[0], phi.shape[1], self.K
+
+        # Clear previous hyperpriors
+        self.hyperprior_mus = []
+        self.hyperprior_sigmas = []
+
+        # Limit to configured max depth
+        max_ancestors = min(len(ancestor_beliefs), self.config.tower_max_depth)
+
+        for depth in range(max_ancestors):
+            ancestor_mu_q, ancestor_sigma_q, ancestor_phi = ancestor_beliefs[depth]
+            ancestor_gen = ancestor_generators[depth]
+
+            # Compute transport from ancestor frame to current frame
+            # Ω = exp(φ_current) @ exp(-φ_ancestor)
+            phi_current_matrix = torch.einsum('bna,aij->bnij', phi, self.generators)
+            phi_ancestor_matrix = torch.einsum('bna,aij->bnij', ancestor_phi, ancestor_gen)
+
+            exp_current = torch.matrix_exp(phi_current_matrix)
+            exp_neg_ancestor = torch.matrix_exp(-phi_ancestor_matrix)
+
+            # Transport operator
+            Omega = torch.einsum('bnik,bnjk->bnij', exp_current, exp_neg_ancestor)
+
+            # Transport ancestor beliefs to current frame
+            mu_h = torch.einsum('bnij,bnj->bni', Omega, ancestor_mu_q)  # (B, N, K)
+
+            # Transport covariance
+            if self.config.exact_covariance_transport:
+                if self.config.diagonal_covariance:
+                    sigma_diag = torch.diag_embed(ancestor_sigma_q)  # (B, N, K, K)
+                    sigma_transported_full = torch.einsum(
+                        'bnij,bnjk,bnlk->bnil', Omega, sigma_diag, Omega
+                    )  # (B, N, K, K)
+                    sigma_h = torch.diagonal(
+                        sigma_transported_full, dim1=-2, dim2=-1
+                    )  # (B, N, K)
+                else:
+                    sigma_h = torch.einsum(
+                        'bnij,bnjk,bnlk->bnil', Omega, ancestor_sigma_q, Omega
+                    )
+            else:
+                # Approximate: covariance unchanged under rotation
+                sigma_h = ancestor_sigma_q.clone()
+
+            # Average across batch and store as hyperprior
+            # Store as (N, K) position-dependent hyperprior
+            mu_h_mean = mu_h.mean(dim=0)  # (N, K)
+            sigma_h_mean = sigma_h.mean(dim=0).clamp(min=self.config.eps)  # (N, K)
+
+            self.hyperprior_mus.append(mu_h_mean)
+            self.hyperprior_sigmas.append(sigma_h_mean)
+
+    def compute_hyperprior_kl_loss(
+        self,
+        mu_p: torch.Tensor,      # (N, K) prior means
+        sigma_p: torch.Tensor,   # (N, K) prior variances
+    ) -> torch.Tensor:
+        """
+        Compute KL loss from hyperpriors: Σ_d decay^d · KL(p || h^d)
+
+        This encourages priors to align with beliefs from ALL ancestors,
+        not just the immediate parent.
+
+        Args:
+            mu_p: Prior means (N, K)
+            sigma_p: Prior variances (N, K)
+
+        Returns:
+            Scalar loss value
+        """
+        if not self.config.enable_ouroboros_tower or len(self.hyperprior_mus) == 0:
+            return torch.tensor(0.0, device=mu_p.device)
+
+        total_kl = torch.tensor(0.0, device=mu_p.device)
+        decay = self.config.tower_decay
+
+        for depth, (mu_h, sigma_h) in enumerate(zip(self.hyperprior_mus, self.hyperprior_sigmas)):
+            # KL(p || h^d) for diagonal Gaussians
+            # = 0.5 * (σ_p/σ_h + (μ_p - μ_h)²/σ_h - 1 + log(σ_h/σ_p))
+            sigma_p_safe = sigma_p.clamp(min=self.config.eps)
+            sigma_h_safe = sigma_h.clamp(min=self.config.eps)
+
+            kl = 0.5 * (
+                sigma_p_safe / sigma_h_safe
+                + (mu_p - mu_h) ** 2 / sigma_h_safe
+                - 1.0
+                + torch.log(sigma_h_safe / sigma_p_safe)
+            ).sum(dim=-1).mean()  # Average over positions
+
+            # Weight by decay^d (grandparent has weight decay^0, great-grandparent has decay^1, etc.)
+            weight = decay ** depth
+            total_kl = total_kl + weight * kl
+
+        return total_kl
+
+    def _compute_hyperprior_gradient(
+        self,
+        mu_p: torch.Tensor,      # (N, K) prior means
+        sigma_p: torch.Tensor,   # (N, K) prior variances
+    ) -> torch.Tensor:
+        """
+        Compute gradient from hyperpriors: ∂/∂μ_p [Σ_d decay^d · KL(p || h^d)]
+
+        For diagonal Gaussians:
+            ∂KL(p || h^d)/∂μ_p = (μ_p - μ_h^d) / σ_h^d
+
+        Args:
+            mu_p: Prior means (N, K)
+            sigma_p: Prior variances (N, K)
+
+        Returns:
+            Gradient w.r.t. μ_p, shape (N, K)
+        """
+        if not self.config.enable_ouroboros_tower or len(self.hyperprior_mus) == 0:
+            return torch.zeros_like(mu_p)
+
+        grad = torch.zeros_like(mu_p)
+        decay = self.config.tower_decay
+
+        for depth, (mu_h, sigma_h) in enumerate(zip(self.hyperprior_mus, self.hyperprior_sigmas)):
+            sigma_h_safe = sigma_h.clamp(min=self.config.eps)
+
+            # ∂KL/∂μ_p = (μ_p - μ_h) / σ_h
+            grad_d = (mu_p - mu_h) / sigma_h_safe
+
+            # Weight by decay^d
+            weight = decay ** depth
+            grad = grad + weight * grad_d
+
+        return grad
+
     def update_persistent_prior(
         self,
         mu_q_batch: torch.Tensor,     # (B, N, K) batch belief means (after VFE)
@@ -1298,10 +1556,40 @@ class PureFEPLayer(nn.Module):
 
         if self.config.gradient_prior_updates:
             # GRADIENT-BASED PRIOR UPDATE
-            # ∂F/∂μ_p ∝ (μ_p - μ_q) / σ_p²
+            # Full VFE gradient w.r.t. prior:
+            #   ∂F/∂μ_p = α·Σ_p^{-1}·(μ_p - μ_q)           (self-coupling)
+            #           + λ_γ·Σ_j [prior alignment]         (inter-position)
+            #           + Σ_d decay^d · [hyperprior grad]   (Ouroboros Tower)
+
             # Use larger minimum (1e-4) to avoid explosion when σ² → 0
             sigma_squared = self.prior_sigma[:N_prior, :].clamp(min=1e-4) ** 2
-            grad_mu_p = (self.prior_mu[:N_prior, :] - mu_p_new) / sigma_squared
+
+            # Term 1: Self-coupling gradient ∂/∂μ_p [KL(q||p)]
+            # This pulls priors toward beliefs
+            grad_self = (self.prior_mu[:N_prior, :] - mu_p_new) / sigma_squared
+
+            # Term 2: Prior alignment gradient ∂/∂μ_p [λ_γ · Σ_j KL(p_i || Ω_ij p_j)]
+            # This makes priors consistent across positions
+            if self.config.prior_coupling_enabled:
+                grad_align = self._compute_prior_alignment_gradient(
+                    self.prior_mu[:N_prior, :],
+                    self.prior_sigma[:N_prior, :],
+                )
+            else:
+                grad_align = torch.zeros_like(grad_self)
+
+            # Term 3: Ouroboros Tower gradient ∂/∂μ_p [Σ_d decay^d · KL(p || h^d)]
+            # This pulls priors toward hyperpriors from ALL ancestors
+            if self.config.enable_ouroboros_tower:
+                grad_tower = self._compute_hyperprior_gradient(
+                    self.prior_mu[:N_prior, :],
+                    self.prior_sigma[:N_prior, :],
+                )
+            else:
+                grad_tower = torch.zeros_like(grad_self)
+
+            # Total gradient
+            grad_mu_p = self.config.alpha * grad_self + grad_align + grad_tower
 
             # Clip gradient to prevent explosion
             grad_norm = grad_mu_p.norm()
@@ -1721,11 +2009,20 @@ class PureFEPTransformer(nn.Module):
 
         CRITICAL: Updates are persisted to layer.prior_mu/prior_sigma buffers!
 
+        When Ouroboros Tower is enabled, also collects hyperpriors from ALL
+        ancestors (grandparent, great-grandparent, etc.) for non-Markovian memory.
+
         Args:
             layer_infos: List of layer outputs from forward pass
             prediction_errors: (B,) per-sample CE loss for weighted prior updates
             per_position_errors: (B, N) per-position CE for fine-grained learning
         """
+        # =====================================================================
+        # OUROBOROS TOWER: Collect hyperpriors from ALL ancestors
+        # =====================================================================
+        if self.config.enable_ouroboros_tower:
+            self._update_ouroboros_tower(layer_infos)
+
         # Process top-down: layer L-1 → layer 0
         for i in range(len(self.layers) - 1, 0, -1):
             parent_info = layer_infos[i]
@@ -1771,6 +2068,47 @@ class PureFEPTransformer(nn.Module):
                 top_mu_q, top_sigma_q,
                 prediction_error=prediction_errors,
                 per_position_error=per_position_errors,
+            )
+
+    def _update_ouroboros_tower(self, layer_infos: List[Dict]):
+        """
+        Ouroboros Tower: Collect hyperpriors from ALL ancestors for each layer.
+
+        For layer at index i, we collect beliefs from layers i+2, i+3, ... as hyperpriors.
+        - Layer 0: hyperpriors from layers 2, 3, 4, ... (grandparent, great-grandparent, ...)
+        - Layer 1: hyperpriors from layers 3, 4, 5, ...
+        - etc.
+
+        This creates non-Markovian memory where information from the top of the
+        hierarchy can directly influence the bottom, bypassing intermediate layers.
+
+        Args:
+            layer_infos: List of layer outputs from forward pass
+        """
+        num_layers = len(self.layers)
+
+        for i in range(num_layers):
+            child_layer = self.layers[i]
+            child_phi = layer_infos[i]['phi']
+
+            # Collect beliefs from ancestors beyond the immediate parent
+            # Grandparent is at i+2, great-grandparent at i+3, etc.
+            ancestor_beliefs = []
+            ancestor_generators = []
+
+            for ancestor_idx in range(i + 2, num_layers):
+                ancestor_info = layer_infos[ancestor_idx]
+                ancestor_mu_q, ancestor_sigma_q = ancestor_info['beliefs']
+                ancestor_phi = ancestor_info['phi']
+
+                ancestor_beliefs.append((ancestor_mu_q, ancestor_sigma_q, ancestor_phi))
+                ancestor_generators.append(self.layers[ancestor_idx].generators)
+
+            # Update hyperpriors for this layer
+            child_layer.update_hyperpriors_from_ancestors(
+                ancestor_beliefs,
+                ancestor_generators,
+                child_phi,
             )
 
     def train_step(
