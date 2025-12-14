@@ -52,7 +52,7 @@ class GaugeTokenEmbedding(nn.Module):
         vocab_size: int,
         embed_dim: int,
         irrep_spec: list = None,
-        init_std: float = 0.02,
+        init_std: float = None,  # Default: 1/sqrt(embed_dim) for O(1) KL
         init_sigma_scale: float = 0.1,
         learnable_sigma: bool = False,
         learnable_phi: bool = False,
@@ -86,6 +86,12 @@ class GaugeTokenEmbedding(nn.Module):
         self.learnable_sigma = learnable_sigma
         self.learnable_phi = learnable_phi
         self.gauge_fixed_priors = gauge_fixed_priors
+
+        # Dimension-aware initialization: 1/sqrt(K) keeps ||μ||² = O(1)
+        # This ensures KL divergence is O(1) regardless of embed_dim
+        if init_std is None:
+            init_std = 1.0 / np.sqrt(embed_dim)
+        self.init_std = init_std
 
         # CRITICAL: diagonal_covariance is incompatible with gauge_fixed_priors!
         # When gauge_fixed_priors=True, Σ_i = R_i Σ_0 R_i^T produces a FULL matrix

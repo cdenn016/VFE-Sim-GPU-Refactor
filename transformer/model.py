@@ -171,7 +171,7 @@ class GaugeTransformerLM(nn.Module):
             vocab_size=vocab_size,
             embed_dim=embed_dim,
             irrep_spec=irrep_spec,
-            init_std=0.02,
+            init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
             init_sigma_scale=0.1,
             learnable_sigma=False,  # Keep simple for now
             learnable_phi=gauge_fixed_priors,  # Enable phi learning if gauge_fixed_priors

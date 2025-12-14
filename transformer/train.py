@@ -398,9 +398,8 @@ def compute_free_energy_loss(
             sigma_p=sigma_p.detach() if sigma_p is not None else None,  # Detach to avoid Cholesky backward
         )  # (B, N)
 
-        # CRITICAL: Normalize by K to keep gradients O(1) regardless of dimension
-        K = mu_q.shape[-1]
-        kl_per_agent = kl_per_agent / K
+        # NOTE: With proper init_std=1/sqrt(K), KL is naturally O(1).
+        # No /K normalization needed - raw KL used directly.
 
         # Average over batch and agents
         self_consistency_loss = alpha * kl_per_agent.mean()
