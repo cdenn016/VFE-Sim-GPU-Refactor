@@ -762,6 +762,46 @@ class PublicationTrainer(FastTrainer):
 
         return norms
 
+    def sample_text(
+        self,
+        prompt: str = "The",
+        max_new_tokens: int = 50,
+        temperature: float = 0.8,
+        top_k: int = 40,
+    ) -> str:
+        """
+        Generate text to verify the model is learning.
+
+        Args:
+            prompt: Starting text
+            max_new_tokens: Number of tokens to generate
+            temperature: Sampling temperature (lower = more deterministic)
+            top_k: Top-k sampling
+
+        Returns:
+            Generated text string
+        """
+        self.model.eval()
+
+        # Encode prompt
+        prompt_ids = self.tokenizer.encode(prompt)
+        prompt_tensor = torch.tensor([prompt_ids], device=self.device)
+
+        # Generate
+        with torch.no_grad():
+            generated = self.model.generate(
+                prompt_ids=prompt_tensor,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+            )
+
+        # Decode
+        generated_text = self.tokenizer.decode(generated[0].tolist())
+
+        self.model.train()
+        return generated_text
+
     def train(self):
         """Training loop with publication metrics."""
         print(f"{'='*70}")
@@ -878,6 +918,13 @@ class PublicationTrainer(FastTrainer):
                     print(f"      Clusters (meta-agents): {metrics['rg/n_clusters']}")
                     print(f"      KL within: {metrics['rg/kl_within_mean']:.4f} (lower = tighter)")
                     print(f"      KL between: {metrics['rg/kl_between_mean']:.4f}")
+
+                # Generate sample text to verify learning
+                try:
+                    sample = self.sample_text(prompt="The", max_new_tokens=30, temperature=0.8)
+                    print(f"    Sample: {sample[:100]}...")
+                except Exception as e:
+                    print(f"    Sample generation failed: {e}")
                 print()
 
                 # Save attention visualization periodically

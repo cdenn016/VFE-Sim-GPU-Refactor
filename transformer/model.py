@@ -608,8 +608,8 @@ class GaugeTransformerLM(nn.Module):
             if generated.shape[1] > self.config['max_seq_len']:
                 generated = generated[:, -self.config['max_seq_len']:]
 
-            # Forward pass
-            logits = self.forward(generated)  # (1, T, V)
+            # Forward pass - unpack (logits, attention_info) tuple
+            logits, _ = self.forward(generated)  # (1, T, V)
 
             # Get logits for last token
             logits_next = logits[:, -1, :] / temperature  # (1, V)
