@@ -200,23 +200,23 @@ GPU_OPTIMIZED_CONFIG = {
     # Model architecture (realistic for 32GB VRAM)
     # Can't match Vaswani d=512 due to K² memory cost!
     
-    'vocab_size': 500,        # Full byte-level vocab
-    'embed_dim': 127,          # K=63 (ODD for SO(3)) - realistic for memory
+    'vocab_size': 50000,        # Full byte-level vocab
+    'embed_dim': 67,          # K=63 (ODD for SO(3)) - realistic for memory
     'n_layers': 1,            # Fewer layers to save memory
-    'hidden_dim': 508,        # 4×embed_dim
-    'max_seq_len': 48,        # N=64 - attention is O(N²×K²)!
+    'hidden_dim': 508,        # 4×embed_dim Only for 'learned'
+    'max_seq_len': 28,        # N=64 - attention is O(N²×K²)!
 
     # GPU Training - fits in 32GB
-    'batch_size': 24,         # Conservative for memory
+    'batch_size': 20,         # Conservative for memory
     'use_amp': False,         # Disabled - Hamiltonian dynamics needs FP32 precision
     'num_workers': 4,         # Parallel data loading
 
     # Gauge transformer parameters
-    'kappa_beta': 1,
+    'kappa_beta': 0.5,
     'epsilon': 1e-8,
     'pos_encoding_mode': 'learned',   #'learned' or 'sinusoidal'
     'evolve_sigma': True,     # Full geometric learning
-    'evolve_phi': False,       # Full geometric learning
+    'evolve_phi': True,       # Full geometric learning
     'tie_embeddings': False,
 
     # Attention pattern
@@ -231,13 +231,13 @@ GPU_OPTIMIZED_CONFIG = {
     # Diagonal loses off-diagonal correlations but keeps per-dim uncertainty.
     # =========================================================================
     'diagonal_covariance': False,
-
+    'use_positional_embedding': True,
     
     # Variational FFN parameters
     'ffn_mode': 'VFE_dynamic',
     'ffn_alpha': 1,
     'ffn_tau_eff': 1.0,
-    'ffn_kappa': 1.0,
+    'ffn_kappa': 0.5,
     'ffn_n_iterations': 1,
     'ffn_learnable_lr': True,
     'ffn_pattern': 'full',
@@ -264,7 +264,7 @@ GPU_OPTIMIZED_CONFIG = {
     'gauge_fixed_priors': True,
 
     # Training (scaled for GPU)
-    'max_steps': 10000 ,         # More steps for convergence
+    'max_steps': 5000 ,         # More steps for convergence
 
     # Learning rates (same natural gradient rates)
     'mu_lr': 0.2,
@@ -285,17 +285,17 @@ GPU_OPTIMIZED_CONFIG = {
     'grad_clip': 1.0,
 
     # Logging (less frequent for speed)
-    'log_interval': 1,
-    'eval_interval': 100,
-    'checkpoint_interval': 100,
+    'log_interval': 10,
+    'eval_interval': 200,
+    'checkpoint_interval': 1000,
     'patience': 5,
 
     # Irrep structure (for K=255)
     # 75×1 + 30×3 + 18×5 = 75 + 90 + 90 = 255 ✓
     'irrep_spec': [
-        ('ℓ0', 32, 1),   # 75 dimensions (scalars)
-        ('ℓ1', 15, 3),   # 90 dimensions (vectors)
-        ('ℓ2', 10, 5),   # 90 dimensions (rank-2 tensors)
+        ('ℓ0', 12, 1),   # 75 dimensions (scalars)
+        ('ℓ1', 10, 3),   # 90 dimensions (vectors)
+        ('ℓ2', 5, 5),   # 90 dimensions (rank-2 tensors)
     ],
 
     # RG Metrics Configuration (meta-agent emergence detection)
@@ -1491,4 +1491,5 @@ def main():
 
 
 if __name__ == '__main__':
+
     main()
