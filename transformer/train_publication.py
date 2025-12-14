@@ -783,8 +783,11 @@ class PublicationTrainer(FastTrainer):
         """
         self.model.eval()
 
-        # Encode prompt
-        prompt_ids = self.tokenizer.encode(prompt)
+        # Get dataset which has encode/decode methods
+        dataset = self.train_loader.dataset
+
+        # Encode prompt using dataset's method
+        prompt_ids = dataset.encode(prompt)
         prompt_tensor = torch.tensor([prompt_ids], device=self.device)
 
         # Generate
@@ -796,8 +799,8 @@ class PublicationTrainer(FastTrainer):
                 top_k=top_k,
             )
 
-        # Decode
-        generated_text = self.tokenizer.decode(generated[0].tolist())
+        # Decode using dataset's method
+        generated_text = dataset.decode(generated[0])
 
         self.model.train()
         return generated_text
