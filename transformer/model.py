@@ -140,6 +140,9 @@ class GaugeTransformerLM(nn.Module):
         diagonal_covariance = config.get('diagonal_covariance', False)
         self.diagonal_covariance = diagonal_covariance
 
+        # Positional embedding added to μ (like standard transformers)
+        use_positional_embedding = config.get('use_positional_embedding', False)
+
         # Store evolve_phi for cross-layer transport caching optimization
         self.evolve_phi = evolve_phi
 
@@ -178,6 +181,8 @@ class GaugeTransformerLM(nn.Module):
             gauge_fixed_priors=gauge_fixed_priors,
             generators=self.generators if gauge_fixed_priors else None,
             diagonal_covariance=diagonal_covariance,
+            max_seq_len=max_seq_len,
+            use_positional_embedding=use_positional_embedding,
         )
 
         # =================================================================

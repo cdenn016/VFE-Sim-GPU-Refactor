@@ -59,6 +59,8 @@ class GaugeTokenEmbedding(nn.Module):
         gauge_fixed_priors: bool = False,
         generators: Optional[torch.Tensor] = None,
         diagonal_covariance: bool = False,
+        max_seq_len: int = 2048,
+        use_positional_embedding: bool = False,
     ):
         """
         Initialize gauge token embedding.
@@ -78,6 +80,10 @@ class GaugeTokenEmbedding(nn.Module):
             generators: SO(3) generators (3, K, K), required if gauge_fixed_priors=True
             diagonal_covariance: If True, output sigma as (B,N,K) diagonal variances
                                 instead of (B,N,K,K) full matrices. Saves O(K) memory.
+            max_seq_len: Maximum sequence length for positional embeddings
+            use_positional_embedding: If True, add learnable positional embeddings to μ
+                                     (like standard transformers). This provides position
+                                     info in the content while keeping gauge transport Ω_ij.
         """
         super().__init__()
         self.vocab_size = vocab_size
@@ -166,6 +172,17 @@ class GaugeTokenEmbedding(nn.Module):
             # All tokens start at identity frame
             self.register_buffer('phi_base', torch.zeros(3))
 
+        # =================================================================
+        # Positional Embeddings (optional, like standard transformers)
+        # =================================================================
+        self.use_positional_embedding = use_positional_embedding
+        self.max_seq_len = max_seq_len
+
+        if use_positional_embedding:
+            # Learnable positional embeddings added to μ
+            self.pos_embed = nn.Embedding(max_seq_len, embed_dim)
+            nn.init.normal_(self.pos_embed.weight, mean=0.0, std=init_std)
+
     def forward(
         self,
         token_ids: torch.Tensor
@@ -247,6 +264,15 @@ class GaugeTokenEmbedding(nn.Module):
                 # Convert to full covariance matrices (diagonal)
                 sigma = torch.diag_embed(sigma_diag)  # (B, N, K, K)
 
+        # =================================================================
+        # Add positional embeddings to μ (like standard transformers)
+        # =================================================================
+        if self.use_positional_embedding:
+            # Create position indices [0, 1, 2, ..., N-1]
+            positions = torch.arange(num_agents, device=token_ids.device)  # (N,)
+            pos_emb = self.pos_embed(positions)  # (N, K)
+            mu = mu + pos_emb.unsqueeze(0)  # (B, N, K) + (1, N, K) -> (B, N, K)
+
         return mu, sigma, phi
 
     def extra_repr(self) -> str:
@@ -256,7 +282,8 @@ class GaugeTokenEmbedding(nn.Module):
             f"embed_dim={self.embed_dim}, "
             f"learnable_sigma={self.learnable_sigma}, "
             f"learnable_phi={self.learnable_phi}, "
-            f"gauge_fixed_priors={self.gauge_fixed_priors}"
+            f"gauge_fixed_priors={self.gauge_fixed_priors}, "
+            f"use_positional_embedding={self.use_positional_embedding}"
         )
 
 
