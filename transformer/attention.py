@@ -307,13 +307,11 @@ def compute_attention_weights(
     # Convert KL distances to attention weights
     # =========================================================================
 
-    # CRITICAL: Normalize KL by embedding dimension K to keep values O(1)
-    # Without this, KL scales as O(K) in high dimensions, causing:
-    # 1. Attention to collapse to self-attention (exp(-large) ≈ 0)
-    # 2. Loss gradients to explode (∂loss/∂μ ∝ K)
-    # 3. Training instability and PPL explosion
-    K = mu_q.shape[-1]
-    kl_matrix = kl_matrix / K  # Normalize: now O(1) instead of O(K)
+    # NOTE: KL divergence is used directly without /K normalization.
+    # With proper initialization (init_std = 1/sqrt(K)), the mean embeddings
+    # have ||μ||² = O(1), making KL divergence naturally O(1) regardless of K.
+    # This avoids artificial scaling that breaks the information-geometric
+    # interpretation of attention as belief similarity.
 
     # Attention logits: -KL / κ (more similar = less KL = higher attention)
     logits = -kl_matrix / kappa  # (B, N, N)
@@ -834,8 +832,7 @@ def compute_attention_weights_local(
         j_indices = torch.arange(j_start, j_end, device=device)
         kl_matrix[:, i_indices, j_indices] = kl_vals
 
-    # CRITICAL: Normalize KL by embedding dimension K to keep values O(1)
-    kl_matrix = kl_matrix / K
+    # NOTE: KL used directly - proper init_std=1/sqrt(K) ensures O(1) scaling
 
     # Convert KL to attention weights
     logits = -kl_matrix / kappa
@@ -1009,8 +1006,7 @@ def compute_attention_weights_sparse(
         # Scatter to output
         kl_matrix[b_idx, i_idx, j_idx] = kl_vals
 
-    # CRITICAL: Normalize KL by embedding dimension K to keep values O(1)
-    kl_matrix = kl_matrix / K
+    # NOTE: KL used directly - proper init_std=1/sqrt(K) ensures O(1) scaling
 
     # Convert to attention
     logits = -kl_matrix / kappa

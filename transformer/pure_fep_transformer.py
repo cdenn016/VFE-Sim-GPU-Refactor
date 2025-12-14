@@ -115,7 +115,7 @@ class PriorBank(nn.Module):
         self,
         vocab_size: int,
         embed_dim: int,
-        init_std: float = 0.02,
+        init_std: float = None,  # Default: 1/sqrt(embed_dim) for O(1) KL
         init_sigma_scale: float = 0.1,
         learnable_sigma: bool = True,
         eps: float = 1e-6,
@@ -126,7 +126,7 @@ class PriorBank(nn.Module):
         Args:
             vocab_size: Number of tokens in vocabulary
             embed_dim: Embedding dimension K
-            init_std: Std for initializing prior means
+            init_std: Std for initializing prior means (default: 1/sqrt(embed_dim))
             init_sigma_scale: Initial scale for prior variances
             learnable_sigma: If True, Σ_v evolves during training
             eps: Numerical stability
@@ -136,6 +136,10 @@ class PriorBank(nn.Module):
         self.embed_dim = embed_dim
         self.eps = eps
         self.learnable_sigma = learnable_sigma
+
+        # Dimension-aware initialization: 1/sqrt(K) keeps ||μ||² = O(1)
+        if init_std is None:
+            init_std = 1.0 / np.sqrt(embed_dim)
 
         # Prior means μ_v for each token v
         self.prior_mu = nn.Parameter(torch.randn(vocab_size, embed_dim) * init_std)
@@ -1750,7 +1754,7 @@ class PureFEPTransformer(nn.Module):
             self.prior_bank = PriorBank(
                 vocab_size=config.vocab_size,
                 embed_dim=config.embed_dim,
-                init_std=0.02,
+                init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
                 init_sigma_scale=0.1,
                 learnable_sigma=True,
                 eps=config.eps,
@@ -1762,7 +1766,7 @@ class PureFEPTransformer(nn.Module):
             self.prior_bank = PriorBank(
                 vocab_size=config.vocab_size,
                 embed_dim=config.embed_dim,
-                init_std=0.02,
+                init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
                 init_sigma_scale=0.1,
                 learnable_sigma=True,
                 eps=config.eps,
@@ -1809,7 +1813,7 @@ class PureFEPTransformer(nn.Module):
                 self.prior_bank = PriorBank(
                     vocab_size=config.vocab_size,
                     embed_dim=config.embed_dim,
-                    init_std=0.02,
+                    init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
                     init_sigma_scale=0.1,
                     learnable_sigma=True,
                     eps=config.eps,
