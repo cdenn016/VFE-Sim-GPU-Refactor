@@ -540,6 +540,31 @@ class WikiText2TiktokenDataset(Dataset):
         """Return the vocabulary mapping if vocab restriction was applied."""
         return getattr(self, '_vocab_mapping', None)
 
+    def encode(self, text: str) -> List[int]:
+        """Encode text to token IDs (handles vocab restriction)."""
+        tokens = self.tokenizer.encode(text)
+        if hasattr(self, '_vocab_mapping'):
+            tokens = [self._vocab_mapping.get(tok, self._unk_id) for tok in tokens]
+        return tokens
+
+    def decode(self, ids) -> str:
+        """Decode token IDs back to text (handles vocab restriction)."""
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+        if hasattr(self, '_vocab_mapping'):
+            # Build inverse mapping: new_id -> original_token_id
+            if not hasattr(self, '_inverse_vocab_mapping'):
+                self._inverse_vocab_mapping = {v: k for k, v in self._vocab_mapping.items()}
+            # Map back to original tokens, skip UNK tokens
+            original_tokens = []
+            for tok_id in ids:
+                if tok_id in self._inverse_vocab_mapping:
+                    original_tokens.append(self._inverse_vocab_mapping[tok_id])
+                # Skip UNK tokens in output
+            return self.tokenizer.decode(original_tokens)
+        else:
+            return self.tokenizer.decode(ids)
+
     def get_vocab_size(self) -> int:
         if hasattr(self, '_restricted_vocab_size'):
             return self._restricted_vocab_size
@@ -679,10 +704,16 @@ class WikiText2CharDataset(Dataset):
         """Return the character-to-id vocabulary mapping."""
         return self.char_to_id.copy()
 
-    def decode(self, indices: torch.Tensor) -> str:
+    def encode(self, text: str) -> List[int]:
+        """Encode text to character IDs."""
+        return [self.char_to_id.get(c, 0) for c in text]
+
+    def decode(self, indices) -> str:
         """Decode indices back to text."""
+        if isinstance(indices, torch.Tensor):
+            indices = indices.tolist()
         chars = []
-        for idx in indices.tolist():
+        for idx in indices:
             chars.append(self.id_to_char.get(idx, '<UNK>'))
         return ''.join(chars)
 
