@@ -518,6 +518,9 @@ def _run_standard_training(system, cfg, output_dir):
         lr_phi=cfg.lr_phi,
         checkpoint_every=1,
         checkpoint_dir=str(output_dir / "checkpoints"),
+        # Snapshot toggles from SimulationConfig
+        save_snapshots=cfg.generate_meta_visualizations,
+        snapshot_every=cfg.snapshot_interval,
     )
 
     # Initialize RG metrics tracker if enabled
@@ -747,8 +750,11 @@ def _run_hamiltonian_training(system, cfg, output_dir):
         lr_phi=cfg.lr_phi,
         checkpoint_every=1,
         checkpoint_dir=str(output_dir / "checkpoints"),
+        # Snapshot toggles from SimulationConfig
+        save_snapshots=cfg.generate_meta_visualizations,
+        snapshot_every=cfg.snapshot_interval,
     )
-    
+
     # Initialize Hamiltonian trainer with built-in phase space tracking
     from agent.hamiltonian_trainer import HamiltonianTrainer
     orbit_dir = output_dir / "orbit_analysis"

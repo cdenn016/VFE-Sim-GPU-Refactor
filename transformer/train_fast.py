@@ -590,13 +590,13 @@ if __name__ == '__main__':
     print("✓ Supports per-parameter group learning rates")
     print("\nExample usage:")
     print("""
-from transformer.config_publication import PUBLICATION_CONFIG
-from transformer.model import GaugeTransformerLM
+from transformer.model import GaugeTransformerLM, VFEConfig
 from transformer.data import create_dataloaders
 from transformer.train_fast import FastTrainer, FastTrainingConfig
 
 # Create model & data
-model = GaugeTransformerLM(PUBLICATION_CONFIG)
+config = VFEConfig()  # Use default config
+model = GaugeTransformerLM(config)
 train_loader, val_loader, vocab_size = create_dataloaders(...)
 
 # Fast training config
