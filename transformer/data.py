@@ -380,6 +380,30 @@ class WikiText2Dataset(Dataset):
             return self._restricted_vocab_size
         return len(self.tokenizer)
 
+    def encode(self, text: str) -> List[int]:
+        """Encode text to token IDs (handles vocab restriction)."""
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+        if hasattr(self, '_vocab_mapping'):
+            tokens = [self._vocab_mapping.get(tok, self._unk_id) for tok in tokens]
+        return tokens
+
+    def decode(self, ids) -> str:
+        """Decode token IDs back to text (handles vocab restriction)."""
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+        if hasattr(self, '_vocab_mapping'):
+            # Build inverse mapping: new_id -> original_token_id
+            if not hasattr(self, '_inverse_vocab_mapping'):
+                self._inverse_vocab_mapping = {v: k for k, v in self._vocab_mapping.items()}
+            # Map back to original tokens, skip UNK tokens
+            original_tokens = []
+            for tok_id in ids:
+                if tok_id in self._inverse_vocab_mapping:
+                    original_tokens.append(self._inverse_vocab_mapping[tok_id])
+            return self.tokenizer.decode(original_tokens)
+        else:
+            return self.tokenizer.decode(ids)
+
     def __len__(self) -> int:
         """Number of sequences in dataset."""
         return self.num_sequences

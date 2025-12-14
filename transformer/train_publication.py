@@ -927,7 +927,9 @@ class PublicationTrainer(FastTrainer):
                     sample = self.sample_text(prompt="The", max_new_tokens=30, temperature=0.8)
                     print(f"    Sample: {sample[:100]}...")
                 except Exception as e:
+                    import traceback
                     print(f"    Sample generation failed: {e}")
+                    traceback.print_exc()
                 print()
 
                 # Save attention visualization periodically
