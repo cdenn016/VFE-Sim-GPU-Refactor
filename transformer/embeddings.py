@@ -53,7 +53,7 @@ class GaugeTokenEmbedding(nn.Module):
         embed_dim: int,
         irrep_spec: list = None,
         init_std: float = None,  # Default: 1/sqrt(embed_dim) for O(1) KL
-        init_sigma_scale: float = 0.1,
+        init_sigma_scale: float = 1.0,  # Scaled to match init_std for O(1) KL
         learnable_sigma: bool = False,
         learnable_phi: bool = False,
         gauge_fixed_priors: bool = False,

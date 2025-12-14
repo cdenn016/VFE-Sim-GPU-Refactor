@@ -116,7 +116,7 @@ class PriorBank(nn.Module):
         vocab_size: int,
         embed_dim: int,
         init_std: float = None,  # Default: 1/sqrt(embed_dim) for O(1) KL
-        init_sigma_scale: float = 0.1,
+        init_sigma_scale: float = 1.0,  # Scaled to match init_std for O(1) KL
         learnable_sigma: bool = True,
         eps: float = 1e-6,
     ):
@@ -1755,7 +1755,7 @@ class PureFEPTransformer(nn.Module):
                 vocab_size=config.vocab_size,
                 embed_dim=config.embed_dim,
                 init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
-                init_sigma_scale=0.1,
+                init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
                 learnable_sigma=True,
                 eps=config.eps,
             )
@@ -1767,7 +1767,7 @@ class PureFEPTransformer(nn.Module):
                 vocab_size=config.vocab_size,
                 embed_dim=config.embed_dim,
                 init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
-                init_sigma_scale=0.1,
+                init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
                 learnable_sigma=True,
                 eps=config.eps,
             )
@@ -1814,7 +1814,7 @@ class PureFEPTransformer(nn.Module):
                     vocab_size=config.vocab_size,
                     embed_dim=config.embed_dim,
                     init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
-                    init_sigma_scale=0.1,
+                    init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
                     learnable_sigma=True,
                     eps=config.eps,
                 )
