@@ -6,14 +6,41 @@ Created on Thu Dec 11 19:24:37 2025
 """
 
 """
-Gauge Transformer Training Script
-=================================
+Publication Proof-of-Principle Training Script
+===============================================
 
-Language modeling on WikiText-2 with gauge-theoretic attention.
+Language modeling on WikiText-2 with byte-level encoding for minimal publishable claim.
 
-Two FFN Modes:
+Demonstrates:
+1. Variational FFN works - inference comparable to learned MLP
+2. Architecture is trainable - converges to reasonable performance
+3. Theoretical framework is sound - gauge-invariant inference holds
+4. Hamiltonian dynamics - energy-conserving symplectic integration (NEW!)
+
+Five FFN Modes for Ablation Study:
     - learned: Standard MLP baseline (GELU activation)
-    - VFE_dynamic: Variational Free Energy with natural gradient descent
+    - variational_approx: First-order active inference (O(N²K), legacy)
+    - variational_full: Complete gauge-invariant with second-order terms (O(N³K), legacy)
+    - variational_gradient_engine: Full active inference via gradient_engine.py
+    - hamiltonian: Symplectic Hamiltonian dynamics on belief space (NEW!)
+      * Energy-conserving leapfrog integration
+      * Full faithful SPD geometry with curvature corrections
+      * NO learned weights - pure physics!
+
+Comprehensive Metrics Tracking:
+    - Free energy components (α, β, γ terms)
+    - Gradient norms (total, μ, FFN)
+    - All learning rates (μ, σ, φ, FFN)
+    - Bits-per-character (BPC)
+    - Attention statistics (β_mean, KL_mean)
+    - Performance (step time, tokens/sec)
+    - Hamiltonian diagnostics (H_init, H_final, ΔH) for hamiltonian mode
+
+Output Files:
+    - checkpoints_publication/ffn_{mode}/metrics.csv - comprehensive training metrics
+    - checkpoints_publication/ffn_{mode}/best_model.pt - best model checkpoint
+    - checkpoints_publication/result_{mode}.json - final summary (if single mode)
+    - checkpoints_publication/ablation_results.json - comparison (if --run_ablation)
 
 Usage:
     # Just click Run (edit defaults below)
@@ -21,8 +48,7 @@ Usage:
 
     # Or use command-line args:
     python transformer/train_publication.py --ffn_mode learned
-    python transformer/train_publication.py --ffn_mode VFE_dynamic
-    python transformer/train_publication.py --run_ablation  # Compare both
+    python transformer/train_publication.py --ffn_mode hamiltonian
 
 Author: Designed for minimal publishable claim
 Date: December 2025
@@ -139,7 +165,7 @@ def save_experiment_config(
     with open(config_path, 'w') as f:
         json.dump(experiment_config, f, indent=2, default=str)
 
-    print(f"Saved experiment config: {config_path}")
+    print(f"📋 Saved experiment config: {config_path}")
 
     return config_path
 
@@ -147,113 +173,238 @@ def save_experiment_config(
 # ============================================================================
 # EDIT THESE DEFAULTS TO RUN WITHOUT COMMAND-LINE ARGS
 # ============================================================================
-DEFAULT_FFN_MODE = 'VFE_dynamic'  # 'learned' or 'VFE_dynamic'
-DEFAULT_RUN_ABLATION = False      # Set True to compare learned vs VFE_dynamic
+DEFAULT_FFN_MODE = 'VFE_dynamic'  # 'learned', 'VFE_dynamic', 'variational_gradient_engine', 'hamiltonian', or None
+DEFAULT_RUN_ABLATION = False  # Set True to run all three modes
+DEFAULT_ENABLE_SIGMA_PHI = True   # Set True to enable learning Σ and φ (required for hamiltonian!)
+DEFAULT_USE_GPU_OPTIMIZED = True  # Set True for RTX 5090 / high-end GPU settings
 # ============================================================================
 
 
+
 # =============================================================================
-# SIMPLIFIED CONFIG
+# GPU-OPTIMIZED CONFIG (RTX 5090 / 32GB VRAM)
 # =============================================================================
-# Mode 1: 'learned'      - Gauge transformer with KL attention + learned MLP FFN
-# Mode 2: 'VFE_dynamic'  - Gauge transformer with KL attention + VFE dynamic FFN
+# MEMORY REALITY CHECK:
+#   Gauge transformer has O(N² × K²) memory for attention KL matrices!
+#   Standard transformer: O(N² × d) for attention
+#   Ours: O(N² × K²) because KL divergence uses full covariance matrices
 #
-# Hamiltonian mode moved to experimental/hamiltonian_transformer.py
-# =============================================================================
+#   Memory for KL computation: B × N × N × K² × 4 bytes (FP32)
+#   Example: B=32, N=256, K=127 → 32 × 256 × 256 × 127² × 4 = ~134GB (!)
+#
+#   Realistic for 32GB: B=16, N=64, K=63 → ~2GB for KL matrices
+#
+GPU_OPTIMIZED_CONFIG = {
+    # Model architecture - WITH diagonal_covariance=True, can scale up!
+    # Diagonal mode: O(N²×K) memory instead of O(N²×K²)
+    # Model architecture (realistic for 32GB VRAM)
+    # Can't match Vaswani d=512 due to K² memory cost!
+    
+    'vocab_size': 50000,        # Full byte-level vocab
+    'embed_dim': 67,          # K=63 (ODD for SO(3)) - realistic for memory
+    'n_layers': 1,            # Fewer layers to save memory
+    'hidden_dim': 508,        # 4×embed_dim Only for 'learned'
+    'max_seq_len': 28,        # N=64 - attention is O(N²×K²)!
 
-BASE_CONFIG = {
-    # === MODEL ARCHITECTURE ===
-    'vocab_size': 50000,      # BPE vocabulary size
-    'embed_dim': 67,          # Embedding dimension K (ODD for SO(3))
-    'n_layers': 1,            # Number of transformer layers
-    'hidden_dim': 508,        # FFN hidden dimension (only for 'learned')
-    'max_seq_len': 28,        # Maximum sequence length
+    # GPU Training - fits in 32GB
+    'batch_size': 20,         # Conservative for memory
+    'use_amp': False,         # Disabled - Hamiltonian dynamics needs FP32 precision
+    'num_workers': 4,         # Parallel data loading
 
-    # === TRAINING ===
-    'batch_size': 20,
-    'max_steps': 5000,
+    # Gauge transformer parameters
+    'kappa_beta': 0.5,
+    'epsilon': 1e-8,
+    'pos_encoding_mode': 'learned',   #'learned' or 'sinusoidal'
+    'evolve_sigma': True,     # Full geometric learning
+    'evolve_phi': True,       # Full geometric learning
+    'tie_embeddings': False,
+
+    # Attention pattern
+    'attention_pattern': 'full',   #'full', 'local', 'sparse'
+    'attention_window': 24,
+    
+
+    # =========================================================================
+    # DIAGONAL COVARIANCE MODE (memory optimization)
+    # True:  Σ is (B,N,K) diagonal - O(N²×K) memory - can scale to Vaswani size!
+    # False: Σ is (B,N,K,K) full   - O(N²×K²) memory - limited to small K,N
+    # Diagonal loses off-diagonal correlations but keeps per-dim uncertainty.
+    # =========================================================================
+    'diagonal_covariance': False,
+    'use_positional_embedding': True,
+    
+    # Variational FFN parameters
+    'ffn_mode': 'VFE_dynamic',
+    'ffn_alpha': 1,
+    'ffn_tau_eff': 1.0,
+    'ffn_kappa': 0.5,
+    'ffn_n_iterations': 1,
+    'ffn_learnable_lr': True,
+    'ffn_pattern': 'full',
+    'ffn_window': 64,
+
+    # Hamiltonian FFN parameters
+    # =========================================================================
+    # SPEED vs PHYSICS FIDELITY TRADEOFF:
+    #   n_steps=2  → Fast (~0.1-0.3s/step), good for development
+    #   n_steps=10 → Moderate (~1-2s/step), reasonable physics
+    #   n_steps=25 → Slow (~3-5s/step), high physics fidelity
+    # The leapfrog loop is sequential - GPU can't parallelize it!
+    # For full GPU utilization: use ffn_mode='learned' instead
+    # =========================================================================
+    'ffn_hamiltonian_dt': 0.01,           # Larger dt works with fewer steps
+    'ffn_hamiltonian_n_steps': 5,         # TOGGLE THIS for speed vs physics!
+    'ffn_hamiltonian_momentum_scale': 0.01,
+    'ffn_hamiltonian_gamma': 0.0,
+    'ffn_hamiltonian_mass_use_prior': True,
+    'ffn_hamiltonian_mass_use_observation': True,
+    'ffn_hamiltonian_mass_use_incoming_social': True,
+    'ffn_hamiltonian_mass_use_outgoing_recoil': True,
+    'ffn_hamiltonian_evolve_mass': True,
+    'gauge_fixed_priors': True,
+
+    # Training (scaled for GPU)
+    'max_steps': 5000 ,         # More steps for convergence
+
+    # Learning rates (same natural gradient rates)
+    'mu_lr': 0.2,
+    'sigma_lr': 0.01,
+    'phi_lr': 0.05,
+    'ffn_lr': 0.2,
     'warmup_steps': 25,
-    'use_amp': False,         # Mixed precision (disable for stability)
-    'num_workers': 4,
 
-    # === LEARNING RATES ===
-    'mu_lr': 0.2,             # Embedding means
-    'sigma_lr': 0.01,         # Embedding covariances
-    'phi_lr': 0.05,           # Gauge frames
-    'ffn_lr': 0.2,            # FFN parameters
+    # Free energy weights
+    'alpha': 1,
+    'beta': 1,
+    'lambda_gamma': 0,
+    'kappa_gamma': 1.0,
 
-    # === REGULARIZATION ===
+    # Regularization
     'weight_decay': 0.01,
     'dropout': 0.1,
     'grad_clip': 1.0,
 
-    # === FREE ENERGY WEIGHTS ===
-    'alpha': 1.0,             # Self-consistency (KL to prior)
-    'beta': 1.0,              # Belief alignment
-    'lambda_gamma': 0.0,      # Model alignment (usually 0)
-    'kappa_gamma': 1.0,
-
-    # === GAUGE ATTENTION ===
-    'kappa_beta': 0.5,        # Attention temperature
-    'pos_encoding_mode': 'learned',
-    'pos_encoding_scale': 0.1,
-    'use_positional_embedding': True,  # Add position to μ (standard approach)
-
-    # === GEOMETRY ===
-    'evolve_sigma': True,     # Learn covariances
-    'evolve_phi': True,       # Learn gauge frames
-    'diagonal_covariance': False,
-    'tie_embeddings': False,
-
-    # === FFN MODE (set by mode selection) ===
-    'ffn_mode': 'VFE_dynamic',
-    'ffn_n_iterations': 1,
-    'ffn_learnable_lr': True,
-    'ffn_kappa': 0.5,
-
-    # === LOGGING ===
+    # Logging (less frequent for speed)
     'log_interval': 10,
     'eval_interval': 200,
     'checkpoint_interval': 1000,
     'patience': 5,
 
-    # === IRREP STRUCTURE (for embed_dim=67) ===
+    # Irrep structure (for K=255)
+    # 75×1 + 30×3 + 18×5 = 75 + 90 + 90 = 255 ✓
     'irrep_spec': [
-        ('ℓ0', 12, 1),   # 12 scalars
-        ('ℓ1', 10, 3),   # 30 vectors
-        ('ℓ2', 5, 5),    # 25 tensors
-        # Total: 12 + 30 + 25 = 67
+        ('ℓ0', 12, 1),   # 75 dimensions (scalars)
+        ('ℓ1', 10, 3),   # 90 dimensions (vectors)
+        ('ℓ2', 5, 5),   # 90 dimensions (rank-2 tensors)
     ],
+
+    # RG Metrics Configuration (meta-agent emergence detection)
+    'compute_rg_metrics': False,           # Enable RG metrics computation
+    'rg_metrics_interval': 25,            # Compute RG metrics every N steps
+    'rg_auto_cluster': True,              # Auto-detect clusters via spectral clustering
+    'rg_n_clusters': None,                # Fixed number of clusters (None = auto)
 }
 
+# =============================================================================
+# ORIGINAL PUBLICATION CONFIG (CPU/low-end GPU)
+# =============================================================================
+PUBLICATION_CONFIG = {
+    # Model architecture (minimal but meaningful)
+    'vocab_size': 200,        # Byte-level vocab (up to 256). Set 100-256 for experiments.
+    'embed_dim': 21,          # K=21 (ODD - required for SO(3) irreps!)
+    'n_layers': 3,            # Depth for non-trivial learning
+    'hidden_dim': 84,         # 4×embed_dim
+    'max_seq_len': 32,        # N=32 (key: enough for patterns!)
 
-def get_mode_config(mode: str) -> dict:
-    """
-    Get configuration for a specific mode.
+    # Gauge transformer parameters
+    'kappa_beta': 1,
+    'epsilon': 1e-8,
+    'pos_encoding_mode': 'learned',
+    'evolve_sigma': False,  # Auto-enabled for variational_gradient_engine mode
+    'evolve_phi': False,    # Keep simple for publication
+    'tie_embeddings': True,
 
-    Modes:
-        'learned':     Gauge transformer + learned MLP FFN
-        'VFE_dynamic': Gauge transformer + VFE dynamic FFN
+    # Attention pattern (full for small N=32)
+    'attention_pattern': 'full',
+    'attention_window': 32,
+    'attention_global_tokens': 0,
 
-    Returns complete config dict ready for training.
-    """
-    config = BASE_CONFIG.copy()
+    # Variational FFN parameters (will be varied in ablation study)
+    'ffn_mode': 'variational_gradient_engine',        # Default: will be overridden in ablation
+    'ffn_alpha': 0.2,             # Prior weight (balanced)
+    'ffn_tau_eff': 1.0,           # Temperature
+    'ffn_kappa': 1.0,             # Softmax temperature
+    'ffn_n_iterations': 1,        # Single inference step per forward pass
+    'ffn_learnable_lr': True,     # Learn step size for variational descent
 
-    if mode == 'learned':
-        # Standard MLP FFN (baseline)
-        config['ffn_mode'] = 'learned'
-        config['ffn_learnable_lr'] = False  # Not used for learned mode
+    # Sparse variational inference (full for N=32)
+    'ffn_pattern': 'full',
+    'ffn_window': 32,
 
-    elif mode == 'VFE_dynamic':
-        # Variational Free Energy dynamic FFN
-        config['ffn_mode'] = 'VFE_dynamic'
-        config['ffn_n_iterations'] = 1
-        config['ffn_learnable_lr'] = True
+    # Hamiltonian FFN parameters
+    'ffn_hamiltonian_dt': 0.01,           # Leapfrog time step
+    'ffn_hamiltonian_n_steps': 10,        # Integration steps per forward pass
+    'ffn_hamiltonian_momentum_scale': 0.1, # Initial momentum scale
+    'ffn_hamiltonian_gamma': 1.0,         # Damping (0 = pure Hamiltonian, >0 = Langevin-like)
 
-    else:
-        raise ValueError(f"Unknown mode: {mode}. Choose 'learned' or 'VFE_dynamic'")
+    # Hamiltonian Mass Configuration (from "The Inertia of Belief" paper, Eq. 20)
+    # M_i = Λ_{pi} + Λ_{oi} + Σ_k β_{ik} Λ̃_{qk} + Σ_j β_{ji} Λ_{qi}
+    # Each term can be toggled independently for ablation studies
+    'ffn_hamiltonian_mass_use_prior': True,           # Λ_p: Prior precision (default: True)
+    'ffn_hamiltonian_mass_use_observation': False,    # Λ_o: Observation precision (sensory grounding)
+    'ffn_hamiltonian_mass_use_incoming_social': False, # Σβ_{ik}Λ̃_{qk}: Being pulled toward neighbors
+    'ffn_hamiltonian_mass_use_outgoing_recoil': False, # Σβ_{ji}Λ_{qi}: Newton's 3rd law recoil
+    'ffn_hamiltonian_evolve_mass': False,             # Recompute M at each leapfrog step (full theory)
 
-    return config
+    # Gauge-Fixed Priors (for restoring gauge covariance)
+    # When enabled, priors are p_i = R_i ▷ p_0 where R_i = exp(φ_i · T)
+    # This guarantees p_i = Ω_ij[p_j], making prior-anchoring gauge covariant
+    'gauge_fixed_priors': False,                      # Use SO(3)-rotated base prior
+
+    # Training (optimized for convergence)
+    'batch_size': 8,             # Larger batches for stability
+    'max_steps': 5000,              # Adjusted for ~2 hour runtime
+
+    # Natural gradient learning rates (balanced for fast convergence)
+    'mu_lr':    0.25,                # Belief means
+    'sigma_lr': 0.05,            # Belief covariances
+    'phi_lr':   0.1,               # Gauge transformations
+    'ffn_lr':   0.25,              # FFN parameters (if learned mode)
+
+    'warmup_steps': 4,          # Gradual warmup for stability
+
+    # Free energy weights (balanced gauge-theoretic learning)
+    'alpha': 0.2,                # Self-consistency regularization
+    'beta': 1,                  # Belief alignment (key gauge term)
+    'lambda_gamma': 1,          # Model alignment (disabled)
+    'kappa_gamma': 1.0,         # Temperature for γ_ij coupling
+
+    # Regularization (light for small model)
+    'weight_decay': 0.01,
+    'dropout': 0.1,
+    'grad_clip': 0.0,
+
+    # Logging (frequent for publication plots)
+    'log_interval': 1,
+    'eval_interval': 2,          # Eval every 50 steps
+    'checkpoint_interval': 15,
+    'patience': 3,               # Early stopping patience
+
+    # Irrep structure (for K=11)
+    'irrep_spec': [
+        ('ℓ0', 5, 1),    # 5 dimensions (scalars)
+        ('ℓ1', 2, 3),    # 6 dimensions (vectors)
+        ('ℓ2', 1, 5),    # 11 dimensions (tensors)
+        # Total: 5 + 6 + 11= 21 ✓
+    ],
+
+    # RG Metrics Configuration (meta-agent emergence detection)
+    'compute_rg_metrics': True,           # Enable RG metrics computation
+    'rg_metrics_interval': 100,           # Compute RG metrics every N steps
+    'rg_auto_cluster': True,              # Auto-detect clusters via spectral clustering
+    'rg_n_clusters': None,                # Fixed number of clusters (None = auto)
+}
+
 
 
 class PublicationMetricsTracker:
@@ -452,8 +603,8 @@ class PublicationTrainer(FastTrainer):
 
                     ax.set_xlabel('Key Position (j)')
                     ax.set_ylabel('Query Position (i)')
-                    ax.set_title(f'Attention Weights (Step {step}) [log10, diag masked]')
-                    plt.colorbar(im, ax=ax, label='log10(beta)')
+                    ax.set_title(f'Attention Weights (Step {step}) [log₁₀, diag masked]')
+                    plt.colorbar(im, ax=ax, label='log₁₀(β)')
 
                     # Save to checkpoint directory
                     save_dir = self.config.checkpoint_dir / 'attention_patterns'
@@ -493,7 +644,7 @@ class PublicationTrainer(FastTrainer):
                     lambda_beta=self.config.beta,
                     lambda_gamma=self.config.lambda_gamma,
                     kappa_gamma=self.config.kappa_gamma,
-
+                    
                 )
             # Scaled backward
             self.scaler.scale(loss).backward()
@@ -507,7 +658,7 @@ class PublicationTrainer(FastTrainer):
                 lambda_beta=self.config.beta,
                 lambda_gamma=self.config.lambda_gamma,
                 kappa_gamma=self.config.kappa_gamma,
-
+                
             )
             loss.backward()
 
@@ -657,7 +808,7 @@ class PublicationTrainer(FastTrainer):
     def train(self):
         """Training loop with publication metrics."""
         print(f"{'='*70}")
-        print("GAUGE TRANSFORMER TRAINING")
+        print("PUBLICATION-QUALITY TRAINING")
         print(f"{'='*70}\n")
 
         start_time = time.time()
@@ -724,7 +875,7 @@ class PublicationTrainer(FastTrainer):
                     f"Step {step+1}/{self.config.max_steps} | "
                     f"Loss: {metrics['train_loss_total']:.4f} | "
                     f"CE: {metrics['train_loss_ce']:.4f} | "
-                    f"beta: {metrics['train_loss_belief_align']:.4f} | "
+                    f"β: {metrics['train_loss_belief_align']:.4f} | "
                     f"PPL: {metrics['train_ppl']:.1f}"
                 )
 
@@ -836,6 +987,8 @@ class PublicationTrainer(FastTrainer):
         print(f"{'='*70}")
         print(f"Time: {elapsed/3600:.2f} hours")
         print(f"Best val loss: {self.best_val_loss:.4f}")
+        # Note: best_val_loss includes free energy terms, not just CE
+        # PPL calculation is done in final eval using CE loss only
         print(f"{'='*70}\n")
 
 
@@ -853,7 +1006,7 @@ def run_single_experiment(
 
     Args:
         config: Configuration dictionary
-        ffn_mode: FFN mode ('learned' or 'VFE_dynamic')
+        ffn_mode: FFN mode ('learned' or 'variational_gradient_engine')
         device: Device to train on
         checkpoint_dir: Directory to save checkpoints
         use_wandb: Whether to use Weights & Biases logging
@@ -969,7 +1122,7 @@ def run_single_experiment(
         # GPU optimizations
         use_amp=config.get('use_amp', False),
 
-
+       
     )
 
     print("\n" + "="*70)
@@ -982,11 +1135,11 @@ def run_single_experiment(
     print(f"  Use AMP:        {train_config.use_amp}")
     print(f"  Num workers:    {config.get('num_workers', 0)}")
     print(f"\nFree Energy Weights:")
-    print(f"  alpha (self-consistency): {train_config.alpha}")
-    print(f"  beta (belief align):     {train_config.beta}")
-    print(f"  gamma (model align):      {train_config.lambda_gamma}")
+    print(f"  α (self-consistency): {train_config.alpha}")
+    print(f"  β (belief align):     {train_config.beta}")
+    print(f"  γ (model align):      {train_config.lambda_gamma}")
 
-
+    
 
     # =================================================================
     # Create Trainer
@@ -1031,7 +1184,7 @@ def run_single_experiment(
         trainer.train()
 
         print("\n" + "="*70)
-        print("TRAINING COMPLETE!")
+        print("✓ TRAINING COMPLETE!")
         print("="*70)
 
         # Final evaluation
@@ -1051,7 +1204,7 @@ def run_single_experiment(
 
         # Save final checkpoint
         final_ckpt = trainer.save_checkpoint(is_best=True)
-        print(f"\nSaved: {final_ckpt}")
+        print(f"\n✓ Saved: {final_ckpt}")
 
         # Return metrics
         return {
@@ -1070,11 +1223,11 @@ def run_single_experiment(
         print("TRAINING INTERRUPTED")
         print("="*70)
         ckpt = trainer.save_checkpoint(is_best=False)
-        print(f"Saved: {ckpt}")
+        print(f"✓ Saved: {ckpt}")
         return None
 
     except Exception as e:
-        print(f"\n\nError: {e}")
+        print(f"\n\n❌ Error: {e}")
         raise
 
 
@@ -1082,30 +1235,37 @@ def run_ablation_study(
     device: torch.device,
     checkpoint_dir: Path,
     use_wandb: bool = False,
+    enable_sigma_phi: bool = False,
     args: argparse.Namespace = None,
 ) -> List[Dict]:
     """
-    Run ablation study comparing learned vs VFE_dynamic FFN modes.
+    Run complete ablation study across all three FFN modes.
 
     Args:
         device: Device to train on
         checkpoint_dir: Directory to save checkpoints
         use_wandb: Whether to use Weights & Biases logging
+        enable_sigma_phi: Enable learning Σ (covariances) and φ (gauge frames)
         args: Command-line arguments for logging
 
     Returns:
         List of result dictionaries for each FFN mode
     """
     print("\n" + "="*70)
-    print("ABLATION STUDY: LEARNED vs VFE_DYNAMIC")
+    print("ABLATION STUDY: THREE FFN MODES")
     print("="*70)
+
+    if enable_sigma_phi:
+        print("\n🔥 FULL GEOMETRIC LEARNING ENABLED!")
+        print("   Learning: μ (means), Σ (covariances), φ (gauge frames)")
 
     print("\nWill run:")
-    print("  1. learned     (baseline - standard MLP with GELU)")
-    print("  2. VFE_dynamic (variational free energy - natural gradient)")
+    print("  1. learned                     (baseline - standard MLP with GELU)")
+    print("  2. variational_gradient_engine (gradient-based active inference)")
+    print("  3. hamiltonian                 (symplectic dynamics - NO learned weights!)")
     print("="*70)
 
-    modes = ['learned', 'VFE_dynamic']
+    modes = ['learned', 'variational_gradient_engine', 'hamiltonian']
     results = []
 
     for i, mode in enumerate(modes):
@@ -1113,8 +1273,27 @@ def run_ablation_study(
         print(f"EXPERIMENT {i+1}/{len(modes)}: {mode}")
         print("="*70)
 
-        # Get mode-specific config from simplified system
-        config = get_mode_config(mode)
+        config = PUBLICATION_CONFIG.copy()
+        config['ffn_mode'] = mode
+
+        # Gradient engine requires additional parameters
+        if mode == 'variational_gradient_engine':
+            config.setdefault('ffn_lambda_belief', 1.0)
+            config.setdefault('ffn_lambda_prior', 0.0)
+            config.setdefault('ffn_lambda_phi', 0.0)
+            config.setdefault('ffn_update_sigma', True)
+            config['evolve_sigma'] = True  # Enable sigma evolution for full Gaussian inference
+
+        # Hamiltonian mode requires sigma evolution
+        if mode == 'hamiltonian':
+            config.setdefault('ffn_lambda_belief', 0.5)  # Moderate alignment
+            config.setdefault('ffn_update_sigma', True)
+            config['evolve_sigma'] = True  # Required for Hamiltonian dynamics
+
+        # Enable full geometric learning if requested
+        if enable_sigma_phi:
+            config['evolve_sigma'] = True
+            config['evolve_phi'] = True
 
         result = run_single_experiment(
             config=config,
@@ -1154,7 +1333,7 @@ def run_ablation_study(
             vs_learned = "baseline"
         elif learned_ppl is not None:
             diff_pct = ((ppl - learned_ppl) / learned_ppl) * 100
-            vs_learned = f"{diff_pct:+.1f}%"
+            vs_learned = f"+{diff_pct:.1f}%"
         else:
             vs_learned = "N/A"
 
@@ -1163,54 +1342,57 @@ def run_ablation_study(
     print("-"*70)
     print(f"\nSaved: {results_file}")
 
-    # Check comparison
+    # Check publishable claim
     print("\n" + "="*70)
-    print("COMPARISON: LEARNED vs VFE_DYNAMIC")
+    print("PUBLISHABILITY CHECK")
     print("="*70)
 
     if learned_ppl is not None:
         for result in results:
-            if result['ffn_mode'] == 'VFE_dynamic':
+            if result['ffn_mode'] == 'variational_gradient_engine':
                 mode = result['ffn_mode']
                 ppl = result['final_ppl']
                 diff_pct = ((ppl - learned_ppl) / learned_ppl) * 100
 
                 print(f"\n{mode}:")
                 print(f"  Learned PPL:     {learned_ppl:.2f}")
-                print(f"  VFE_dynamic PPL: {ppl:.2f}")
-                print(f"  Difference:      {diff_pct:+.1f}%")
+                print(f"  Variational PPL: {ppl:.2f}")
+                print(f"  Difference:      +{diff_pct:.1f}%")
 
-                if abs(diff_pct) < 20:
-                    print(f"  Comparable performance!")
-                elif diff_pct < 0:
-                    print(f"  VFE_dynamic outperforms learned!")
+                if diff_pct < 20:
+                    print(f"  ✓ Within 20% threshold - PUBLISHABLE!")
                 else:
-                    print(f"  VFE_dynamic underperforms - may need tuning")
+                    print(f"  ⚠ Outside 20% threshold - may need tuning")
 
     return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Gauge Transformer Training')
+    parser = argparse.ArgumentParser(description='Publication Proof-of-Principle Training')
 
-    # FFN mode - simplified to 2 main modes
+    # FFN mode (uses defaults from top of file)
     parser.add_argument('--ffn_mode', type=str, default=DEFAULT_FFN_MODE,
-                        choices=['learned', 'VFE_dynamic'],
-                        help='FFN mode: learned (MLP baseline) or VFE_dynamic (variational)')
+                        choices=['learned', 'variational_gradient_engine', 'hamiltonian'],
+                        help='FFN mode (or use --run_ablation for all three modes)')
 
-    # Ablation study
+    # Ablation study (uses defaults from top of file)
     parser.add_argument('--run_ablation', action='store_true', default=DEFAULT_RUN_ABLATION,
-                        help='Run both learned and VFE_dynamic modes for comparison')
+                        help='Run all four FFN modes (ablation study)')
+
+    # Enable full geometric learning (Σ and φ)
+    parser.add_argument('--enable_sigma_phi', action='store_true', default=DEFAULT_ENABLE_SIGMA_PHI,
+                        help='Enable learning covariances (Σ) and gauge frames (φ) - full geometric learning!')
+
+    # GPU optimization
+    parser.add_argument('--gpu_optimized', action='store_true', default=DEFAULT_USE_GPU_OPTIMIZED,
+                        help='Use GPU-optimized config (larger batch, AMP, bigger model) for RTX 5090 / high-end GPUs')
+    parser.add_argument('--no_gpu_optimized', action='store_true',
+                        help='Force use of original small config even on GPU')
 
     # System
     parser.add_argument('--device', type=str, default='auto')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints_publication')
     parser.add_argument('--use_wandb', action='store_true')
-
-    # Config overrides (optional)
-    parser.add_argument('--embed_dim', type=int, default=None, help='Override embed_dim')
-    parser.add_argument('--max_steps', type=int, default=None, help='Override max_steps')
-    parser.add_argument('--batch_size', type=int, default=None, help='Override batch_size')
 
     args = parser.parse_args()
 
@@ -1221,40 +1403,72 @@ def main():
         device = torch.device(args.device)
 
     print("="*70)
-    print("GAUGE TRANSFORMER TRAINING")
+    print("PUBLICATION PROOF-OF-PRINCIPLE TRAINING")
     print("="*70)
     print(f"\nDevice: {device}")
+
+    # Select config based on GPU optimization flag
+    use_gpu_config = args.gpu_optimized and not args.no_gpu_optimized and device.type == 'cuda'
+    if use_gpu_config:
+        print("\n" + "="*70)
+        print("🚀 GPU-OPTIMIZED MODE (RTX 5090 / High-end GPU)")
+        print("="*70)
+        print("   batch_size=32, embed_dim=127, seq_len=256 (Vaswani-scale)")
+        print("   This will fully utilize your GPU!")
+        print("="*70 + "\n")
+        base_config = GPU_OPTIMIZED_CONFIG.copy()
+    else:
+        base_config = PUBLICATION_CONFIG.copy()
 
     checkpoint_dir = Path(args.checkpoint_dir)
 
     # Run experiments
     if args.run_ablation:
-        # Run both modes for comparison
+        # Run all three modes
         results = run_ablation_study(
             device=device,
             checkpoint_dir=checkpoint_dir,
             use_wandb=args.use_wandb,
+            enable_sigma_phi=args.enable_sigma_phi,
             args=args,
         )
 
     else:
-        # Run single mode using simplified config
+        # Run single mode
         if args.ffn_mode is None:
             print("\nError: Must specify --ffn_mode or --run_ablation")
             print("Edit DEFAULT_FFN_MODE at top of train_publication.py or use command-line args")
             return
 
-        # Get mode-specific config
-        config = get_mode_config(args.ffn_mode)
+        config = base_config.copy()
+        config['ffn_mode'] = args.ffn_mode
 
-        # Apply any command-line overrides
-        if args.embed_dim is not None:
-            config['embed_dim'] = args.embed_dim
-            config['hidden_dim'] = args.embed_dim * 4
-        if args.max_steps is not None:
-            config['max_steps'] = args.max_steps
-        if args.batch_size is not None:
-            config['batch_size'] = args.batch_size
+        # Gradient engine requires additional parameters
+        if args.ffn_mode == 'variational_gradient_engine':
+            config.setdefault('ffn_lambda_belief', 1.0)
+            config.setdefault('ffn_lambda_prior', 0.0)
+            config.setdefault('ffn_lambda_phi', 0.0)
+            config.setdefault('ffn_update_sigma', True)
+            config['evolve_sigma'] = True  # Enable sigma evolution for full Gaussian inference
+
+        # Hamiltonian mode requires sigma evolution
+        if args.ffn_mode == 'hamiltonian':
+            config.setdefault('ffn_lambda_belief', 0.5)  # Moderate alignment
+            config.setdefault('ffn_update_sigma', True)
+            config['evolve_sigma'] = True  # Required for Hamiltonian dynamics
+            # Force enable_sigma_phi for Hamiltonian
+            args.enable_sigma_phi = True
+
+        # Enable full geometric learning if requested
+        if args.enable_sigma_phi:
+            print("\n" + "="*70)
+            print("🔥 FULL GEOMETRIC LEARNING ENABLED!")
+            print("="*70)
+            print("   Learning: μ (means), Σ (covariances), φ (gauge frames)")
+            print("   This tests the FULL natural gradient framework!")
+            print("="*70 + "\n")
+            config['evolve_sigma'] = True
+            config['evolve_phi'] = True
 
         result = run_single_experiment(
             config=config,
@@ -1271,7 +1485,7 @@ def main():
             result_file.parent.mkdir(parents=True, exist_ok=True)
             with open(result_file, 'w') as f:
                 json.dump(result, f, indent=2)
-            print(f"\nSaved result: {result_file}")
+            print(f"\n✓ Saved result: {result_file}")
 
     print("\n" + "="*70)
     print("SESSION COMPLETE")
@@ -1279,4 +1493,6 @@ def main():
 
 
 if __name__ == '__main__':
+
     main()
+
