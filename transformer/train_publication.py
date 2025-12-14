@@ -842,13 +842,13 @@ class PublicationTrainer(FastTrainer):
                     if grad_norms:
                         tqdm.write(f"  [GRAD] total: {grad_norms['total']:.3e} | "
                                    f"mu: {grad_norms['mu']:.3e} | sigma: {grad_norms['sigma']:.3e} | "
-                                   f"phi: {grad_norms['phi']:.3e} | ffn: {grad_norms['ffn']:.3e}")
+                                   f"phi: {grad_norms['phi']:.3e}")
                 else:
                     print(log_msg)
                     if grad_norms:
                         print(f"  [GRAD] total: {grad_norms['total']:.3e} | "
                               f"mu: {grad_norms['mu']:.3e} | sigma: {grad_norms['sigma']:.3e} | "
-                              f"phi: {grad_norms['phi']:.3e} | ffn: {grad_norms['ffn']:.3e}")
+                              f"phi: {grad_norms['phi']:.3e}")
 
             # Validation
             if (step + 1) % self.config.eval_interval == 0:
