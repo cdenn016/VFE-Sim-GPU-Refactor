@@ -32,7 +32,7 @@ from transformer.variational_ffn import (
     VariationalFFNDynamic,  # Dynamic-β VFE with attention-belief co-evolution
     VariationalFFNDynamicStable,  # Stabilized version with temp annealing + gradient balancing
 )
-from transformer.hamiltonian_ffn import HamiltonianFFN, MassConfig
+from transformer.experimental.hamiltonian_ffn import HamiltonianFFN, MassConfig
 
 
 class GaugeFFN(nn.Module):

@@ -143,6 +143,9 @@ class GaugeTransformerLM(nn.Module):
         # Positional embedding added to μ (like standard transformers)
         use_positional_embedding = config.get('use_positional_embedding', False)
 
+        # Position encoding scale (for φ gauge frame encoding)
+        pos_encoding_scale = config.get('pos_encoding_scale', 0.1)
+
         # Store evolve_phi for cross-layer transport caching optimization
         self.evolve_phi = evolve_phi
 
@@ -202,7 +205,7 @@ class GaugeTransformerLM(nn.Module):
         self.pos_encoding = GaugePositionalEncoding(
             max_seq_len=max_seq_len,
             mode=pos_mode,
-            scale=0.1,
+            scale=pos_encoding_scale,
         )
 
         # =================================================================

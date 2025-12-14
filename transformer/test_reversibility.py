@@ -23,7 +23,7 @@ Date: December 2025
 import torch
 import numpy as np
 from typing import Tuple, Dict
-from transformer.hamiltonian_ffn import (
+from transformer.experimental.hamiltonian_ffn import (
     HamiltonianFFN,
     PhaseSpaceState,
     LeapfrogIntegrator,
