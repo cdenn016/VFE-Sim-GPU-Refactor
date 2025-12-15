@@ -903,6 +903,7 @@ class VariationalFFNGradientEngine(nn.Module):
         learnable_lr: bool = True, # Learn step size?
         update_sigma: bool = True,  # Update covariances?
         use_gpu: bool = True,      # Use GPU-accelerated gradients (FAST!)
+        compute_sigma_align_grad: bool = True,  # Compute sigma gradient from alignment term
     ):
         """
         Initialize gradient engine FFN.
@@ -919,6 +920,7 @@ class VariationalFFNGradientEngine(nn.Module):
             learnable_lr: Learn step size as parameter?
             update_sigma: Update covariances? (True = full Gaussian inference)
             use_gpu: If True, use GPU-accelerated gradient computation (default)
+            compute_sigma_align_grad: If True, compute sigma gradient from alignment term
         """
         super().__init__()
 
@@ -927,6 +929,7 @@ class VariationalFFNGradientEngine(nn.Module):
         self.n_iterations = n_iterations
         self.update_sigma = update_sigma
         self.use_gpu = use_gpu
+        self.compute_sigma_align_grad = compute_sigma_align_grad
 
         # Store hyperparameters for GPU path
         self.alpha = alpha
@@ -1066,6 +1069,7 @@ class VariationalFFNGradientEngine(nn.Module):
                     alpha=self.alpha,
                     lambda_belief=self.lambda_belief,
                     kappa=self.kappa_beta,
+                    compute_sigma_align_grad=self.compute_sigma_align_grad,
                 )
 
                 # Add discrete observation gradient if provided
@@ -1305,6 +1309,7 @@ class VariationalFFNDynamic(nn.Module):
         m_step_interval: int = 0,  # M-step every N steps (0 = no M-step)
         m_step_rate: float = 0.01, # Prior update rate toward beliefs
         diagonal_covariance: bool = False,  # Use diagonal Σ for efficiency
+        compute_sigma_align_grad: bool = True,  # Compute sigma gradient from alignment term
     ):
         """
         Initialize dynamic-β VFE FFN.
@@ -1321,6 +1326,7 @@ class VariationalFFNDynamic(nn.Module):
             m_step_interval: Run M-step every N iterations (0 = disabled)
             m_step_rate: How fast priors move toward beliefs in M-step
             diagonal_covariance: Use diagonal Σ for O(K) instead of O(K²)
+            compute_sigma_align_grad: If True, compute sigma gradient from alignment term
         """
         super().__init__()
 
@@ -1329,6 +1335,7 @@ class VariationalFFNDynamic(nn.Module):
         self.n_iterations = n_iterations
         self.update_sigma = update_sigma
         self.diagonal_covariance = diagonal_covariance
+        self.compute_sigma_align_grad = compute_sigma_align_grad
 
         # VFE hyperparameters
         self.alpha = alpha
@@ -1450,6 +1457,7 @@ class VariationalFFNDynamic(nn.Module):
                 lambda_belief=self.lambda_belief,
                 kappa=self.kappa,
                 eps=eps,
+                compute_sigma_align_grad=self.compute_sigma_align_grad,
             )
 
             # Add FRESH observation gradient (recomputed from current beliefs)
@@ -1583,6 +1591,7 @@ class VariationalFFNDynamicStable(nn.Module):
         m_step_interval: int = 0,  # M-step every N steps (0 = disabled)
         m_step_rate: float = 0.01, # Prior update rate
         diagonal_covariance: bool = False,
+        compute_sigma_align_grad: bool = True,  # Compute sigma gradient from alignment term
         # AD-HOC stabilization (all default OFF for first-principles)
         balance_gradients: bool = False,  # AD-HOC: Balance gradient norms
         obs_grad_weight: float = 1.0,     # Relative weight of observation gradient
@@ -1606,6 +1615,7 @@ class VariationalFFNDynamicStable(nn.Module):
             m_step_interval: Run M-step every N iterations (0=off)
             m_step_rate: Prior update rate in M-step
             diagonal_covariance: Use diagonal Σ for efficiency
+            compute_sigma_align_grad: If True, compute sigma gradient from alignment term
             balance_gradients: Auto-balance gradient magnitudes
             obs_grad_weight: Relative importance of observation gradient
             entropy_penalty: Penalty coefficient for uniform β
@@ -1619,6 +1629,7 @@ class VariationalFFNDynamicStable(nn.Module):
         self.n_iterations = n_iterations
         self.update_sigma = update_sigma
         self.diagonal_covariance = diagonal_covariance
+        self.compute_sigma_align_grad = compute_sigma_align_grad
 
         # VFE hyperparameters
         self.alpha = alpha
@@ -1812,6 +1823,7 @@ class VariationalFFNDynamicStable(nn.Module):
                 lambda_belief=self.lambda_belief,
                 kappa=kappa_t,
                 eps=eps,
+                compute_sigma_align_grad=self.compute_sigma_align_grad,
             )
 
             # =================================================================

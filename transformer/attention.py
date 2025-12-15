@@ -324,11 +324,9 @@ def compute_attention_weights(
     # Softmax over keys (dimension 2)
     beta = F.softmax(logits, dim=-1)  # (B, N, N)
 
-    # Add epsilon for numerical stability (prevents exact zeros in log/division)
-    # NOTE: We do NOT renormalize after adding epsilon. Softmax already sums to 1,
-    # and renormalizing would bias toward uniform for near-uniform distributions.
-    # The small epsilon violation of sum=1 is acceptable for numerical stability.
-    beta = beta + epsilon
+    # Clamp for numerical stability (prevents exact zeros in log/division)
+    # Using clamp instead of adding epsilon preserves sum(beta) ≈ 1
+    beta = beta.clamp(min=epsilon)
 
     if return_kl:
         return beta, kl_matrix
@@ -851,9 +849,8 @@ def compute_attention_weights_local(
     logits = -kl_matrix / kappa
     beta = F.softmax(logits, dim=-1)
 
-    # Add epsilon for numerical stability (prevents exact zeros in log/division)
-    # NOTE: We do NOT renormalize - see note in compute_attention_weights()
-    beta = beta + epsilon
+    # Clamp for numerical stability (preserves sum=1, see compute_attention_weights())
+    beta = beta.clamp(min=epsilon)
 
     # CRITICAL: Replace inf with 0 in KL matrix for loss computation
     # This prevents 0 * inf = NaN when computing beta * kl in the loss
@@ -922,8 +919,8 @@ def compute_attention_weights_sparse(
         logits = -kl_matrix / kappa
         logits = logits.masked_fill(mask == 0, float('-inf'))
         beta = F.softmax(logits, dim=-1)
-        # Add epsilon for stability (no renormalization - see compute_attention_weights())
-        beta = beta + epsilon
+        # Clamp for numerical stability (preserves sum=1)
+        beta = beta.clamp(min=epsilon)
         return beta, kl_matrix
 
     # Sparse computation: iterate over valid pairs
@@ -1024,8 +1021,8 @@ def compute_attention_weights_sparse(
     # Convert to attention
     logits = -kl_matrix / kappa
     beta = F.softmax(logits, dim=-1)
-    # Add epsilon for stability (no renormalization - see compute_attention_weights())
-    beta = beta + epsilon
+    # Clamp for numerical stability (preserves sum=1)
+    beta = beta.clamp(min=epsilon)
 
     # CRITICAL: Replace inf with 0 in KL matrix for loss computation
     # This prevents 0 * inf = NaN when computing beta * kl in the loss
