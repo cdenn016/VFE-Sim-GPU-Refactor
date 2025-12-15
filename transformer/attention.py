@@ -324,9 +324,11 @@ def compute_attention_weights(
     # Softmax over keys (dimension 2)
     beta = F.softmax(logits, dim=-1)  # (B, N, N)
 
-    # Add epsilon for numerical stability (prevents exact zeros)
+    # Add epsilon for numerical stability (prevents exact zeros in log/division)
+    # NOTE: We do NOT renormalize after adding epsilon. Softmax already sums to 1,
+    # and renormalizing would bias toward uniform for near-uniform distributions.
+    # The small epsilon violation of sum=1 is acceptable for numerical stability.
     beta = beta + epsilon
-    beta = beta / beta.sum(dim=-1, keepdim=True)
 
     if return_kl:
         return beta, kl_matrix
@@ -640,29 +642,40 @@ def _compute_kl_matrix_diagonal(
     mu_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_q)  # (B, N, N, K)
 
     # =========================================================================
-    # Step 3: For diagonal mode, σ stays diagonal (approximation)
-    # This is exact for isotropic σ, approximate for anisotropic
+    # Step 3: Compute diagonal of transported covariance
+    # Σ_j_transported = Ω @ diag(σ_j) @ Ω^T
+    # diag(Σ_j_transported)_k = Σ_l Ω_kl² * σ_j[l]
+    # This is more accurate than just using σ_j, especially for non-identity Ω
     # =========================================================================
-    # Expand sigma for pairwise: sigma_j for all (i,j) pairs
-    sigma_j = sigma_q[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
+    # σ_j expanded for all pairs: (B, N, N, K)
+    sigma_j_orig = sigma_q[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
     sigma_i = sigma_q[:, :, None, :].expand(-1, -1, N, -1)  # (B, N, N, K)
+
+    # Compute diagonal of transported covariance: diag(Ω @ diag(σ_j) @ Ω^T)_k = Σ_l Ω_kl² * σ_j[l]
+    # Omega: (B, N, N, K, K), sigma_j_orig: (B, N, N, K)
+    # Result: (B, N, N, K)
+    Omega_sq = Omega ** 2  # (B, N, N, K, K)
+    sigma_j_transported_diag = torch.einsum('bijkl,bijl->bijk', Omega_sq, sigma_j_orig)  # (B, N, N, K)
+
+    # Clamp for numerical stability
+    sigma_j_transported_diag = sigma_j_transported_diag.clamp(min=eps)
 
     # =========================================================================
     # Step 4: Diagonal KL divergence (vectorized)
     # KL(q_i || transported q_j) where q_i ~ N(μ_i, diag(σ_i))
-    # transported q_j ~ N(μ_j^{→i}, diag(σ_j))
+    # transported q_j ~ N(μ_j^{→i}, diag(σ_j_transported))
     # =========================================================================
     mu_i = mu_q[:, :, None, :].expand(-1, -1, N, -1)  # (B, N, N, K)
 
-    # Trace term: sum(σ_i / σ_j)
-    trace_term = (sigma_i / sigma_j).sum(dim=-1)  # (B, N, N)
+    # Trace term: sum(σ_i / σ_j_transported)
+    trace_term = (sigma_i / sigma_j_transported_diag).sum(dim=-1)  # (B, N, N)
 
-    # Mahalanobis term: sum((μ_j^{→i} - μ_i)² / σ_j)
+    # Mahalanobis term: sum((μ_j^{→i} - μ_i)² / σ_j_transported)
     delta_mu = mu_transported - mu_i  # (B, N, N, K)
-    mahal_term = ((delta_mu ** 2) / sigma_j).sum(dim=-1)  # (B, N, N)
+    mahal_term = ((delta_mu ** 2) / sigma_j_transported_diag).sum(dim=-1)  # (B, N, N)
 
-    # Log determinant term: sum(log(σ_j) - log(σ_i))
-    logdet_term = (torch.log(sigma_j) - torch.log(sigma_i)).sum(dim=-1)  # (B, N, N)
+    # Log determinant term: sum(log(σ_j_transported) - log(σ_i))
+    logdet_term = (torch.log(sigma_j_transported_diag) - torch.log(sigma_i)).sum(dim=-1)  # (B, N, N)
 
     # Full KL
     kl_all = 0.5 * (trace_term + mahal_term - K + logdet_term)
@@ -838,9 +851,9 @@ def compute_attention_weights_local(
     logits = -kl_matrix / kappa
     beta = F.softmax(logits, dim=-1)
 
-    # Add epsilon for stability
+    # Add epsilon for numerical stability (prevents exact zeros in log/division)
+    # NOTE: We do NOT renormalize - see note in compute_attention_weights()
     beta = beta + epsilon
-    beta = beta / beta.sum(dim=-1, keepdim=True)
 
     # CRITICAL: Replace inf with 0 in KL matrix for loss computation
     # This prevents 0 * inf = NaN when computing beta * kl in the loss
@@ -909,8 +922,8 @@ def compute_attention_weights_sparse(
         logits = -kl_matrix / kappa
         logits = logits.masked_fill(mask == 0, float('-inf'))
         beta = F.softmax(logits, dim=-1)
+        # Add epsilon for stability (no renormalization - see compute_attention_weights())
         beta = beta + epsilon
-        beta = beta / beta.sum(dim=-1, keepdim=True)
         return beta, kl_matrix
 
     # Sparse computation: iterate over valid pairs
@@ -1011,8 +1024,8 @@ def compute_attention_weights_sparse(
     # Convert to attention
     logits = -kl_matrix / kappa
     beta = F.softmax(logits, dim=-1)
+    # Add epsilon for stability (no renormalization - see compute_attention_weights())
     beta = beta + epsilon
-    beta = beta / beta.sum(dim=-1, keepdim=True)
 
     # CRITICAL: Replace inf with 0 in KL matrix for loss computation
     # This prevents 0 * inf = NaN when computing beta * kl in the loss
@@ -1182,6 +1195,8 @@ class IrrepMultiHeadAttention(nn.Module):
         diagonal_covariance: bool = False,
         attention_pattern: str = 'full',
         attention_window: int = 64,
+        use_fast_exp: bool = False,
+        exp_order: int = 4,
     ):
         """
         Initialize irrep-structured multi-head attention.
@@ -1199,6 +1214,10 @@ class IrrepMultiHeadAttention(nn.Module):
                 - 'local': O(N×W) efficient local window attention
                 - 'sparse': Use sparse computation with provided mask
             attention_window: Window size for 'local' pattern
+            use_fast_exp: If True, use Taylor series approximation for matrix exp.
+                         Faster but only accurate for small angles (|φ| < 0.5).
+            exp_order: Order of Taylor expansion when use_fast_exp=True.
+                      Higher = more accurate but slower. Default 4 is good for |φ| < 0.3.
         """
         super().__init__()
         self.diagonal_covariance = diagonal_covariance
@@ -1209,6 +1228,8 @@ class IrrepMultiHeadAttention(nn.Module):
         self.aggregate_mode = aggregate_mode
         self.attention_pattern = attention_pattern
         self.attention_window = attention_window
+        self.use_fast_exp = use_fast_exp
+        self.exp_order = exp_order
 
         # Build irrep block structure
         self.irrep_dims = []
@@ -1353,7 +1374,11 @@ class IrrepMultiHeadAttention(nn.Module):
                 head_cached_transport = cached_head_transports[head_idx]
             else:
                 # Within-layer cache: compute once, reuse for KL and aggregation
-                head_cached_transport = compute_transport_operators(phi, gen_head)
+                head_cached_transport = compute_transport_operators(
+                    phi, gen_head,
+                    use_fast_exp=self.use_fast_exp,
+                    exp_order=self.exp_order,
+                )
 
             # Compute attention for this head (with optional KL matrices)
             # Use efficient sparse attention if pattern is 'local'
@@ -1544,7 +1569,11 @@ class IrrepMultiHeadAttention(nn.Module):
         cached_transports = []
         for head_idx in range(self.n_heads):
             gen_head = self.head_generators[head_idx].gen.to(device=device, dtype=dtype)
-            cached_transports.append(compute_transport_operators(phi, gen_head))
+            cached_transports.append(compute_transport_operators(
+                phi, gen_head,
+                use_fast_exp=self.use_fast_exp,
+                exp_order=self.exp_order,
+            ))
         return cached_transports
 
     def extra_repr(self) -> str:
