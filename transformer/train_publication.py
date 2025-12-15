@@ -232,7 +232,24 @@ GPU_OPTIMIZED_CONFIG = {
     # =========================================================================
     'diagonal_covariance': False,
     'use_positional_embedding': True,
-    
+
+    # =========================================================================
+    # SIGMA GRADIENT FROM ALIGNMENT (theoretical correctness vs legacy)
+    # True (default): Compute ∂KL/∂Σ = 0.5*(Σ_transported^{-1} - Σ^{-1})
+    # False: Legacy behavior - zero sigma gradient from alignment term
+    # Setting True enables proper uncertainty propagation through gauge transport.
+    # =========================================================================
+    'compute_sigma_align_grad': True,
+
+    # =========================================================================
+    # FAST MATRIX EXPONENTIAL (speed optimization)
+    # True:  Use Taylor series approximation for exp(φ·G) - faster but approximate
+    # False: Use torch.matrix_exp - accurate but slower
+    # Taylor is accurate for small angles |φ| < 0.5, use with phi_scale < 0.3
+    # =========================================================================
+    'use_fast_exp': False,
+    'exp_order': 4,  # Taylor series order when use_fast_exp=True
+
     # Variational FFN parameters
     'ffn_mode': 'VFE_dynamic',
     'ffn_alpha': 1,
@@ -328,6 +345,13 @@ PUBLICATION_CONFIG = {
     'attention_pattern': 'full',
     'attention_window': 32,
     'attention_global_tokens': 0,
+
+    # Sigma gradient from alignment (theoretical correctness)
+    'compute_sigma_align_grad': True,  # Enables proper uncertainty propagation
+
+    # Fast matrix exponential (speed optimization - off by default for accuracy)
+    'use_fast_exp': False,
+    'exp_order': 4,
 
     # Variational FFN parameters (will be varied in ablation study)
     'ffn_mode': 'variational_gradient_engine',        # Default: will be overridden in ablation

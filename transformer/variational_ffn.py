@@ -88,6 +88,7 @@ def compute_vfe_gradients_gpu(
     kappa: float = 1.0,        # Temperature (for normalization)
     eps: float = 1e-6,
     cached_transport: Optional[dict] = None,  # Precomputed transport operators
+    compute_sigma_align_grad: bool = True,  # Compute sigma gradient from alignment term
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute VFE gradients entirely on GPU using PyTorch.
@@ -113,6 +114,10 @@ def compute_vfe_gradients_gpu(
         eps: Numerical stability
         cached_transport: Optional dict with precomputed 'Omega' from compute_transport_operators().
                          When provided, avoids redundant matrix exponential computations.
+        compute_sigma_align_grad: If True (default), compute sigma gradient from belief alignment term.
+                                  This is the theoretically correct gradient:
+                                    ∂KL/∂Σ_q = 0.5 * (Σ_transported^{-1} - Σ_q^{-1})
+                                  Set to False for legacy behavior (zero sigma alignment gradient).
 
     Returns:
         grad_mu: Gradient w.r.t. μ_q, shape (B, N, K)
@@ -266,8 +271,28 @@ def compute_vfe_gradients_gpu(
         # Total alignment gradient (direct + softmax coupling)
         grad_mu_align = grad_mu_direct + grad_mu_softmax
 
-        # Sigma gradient from alignment (simplified for diagonal)
-        grad_sigma_align = torch.zeros_like(sigma_q)
+        # =================================================================
+        # Sigma gradient from alignment term
+        # ∂KL/∂Σ_i = 0.5 * (Σ_j_transported^{-1} - Σ_i^{-1})
+        # For diagonal mode, we take the diagonal of the transported inverse
+        # Weighted by attention: Σ_j β_ij * ∂KL_ij/∂Σ_i
+        # =================================================================
+        if compute_sigma_align_grad:
+            # Diagonal of inverse of transported covariance: diag(Σ_j_transported^{-1})
+            sigma_j_inv_diag = torch.diagonal(sigma_j_inv, dim1=-2, dim2=-1)  # (B, N, N, K)
+
+            # Inverse of diagonal Σ_i: 1/σ_i expanded for all pairs
+            sigma_i_inv = 1.0 / sigma_q.clamp(min=eps)  # (B, N, K)
+            sigma_i_inv_expanded = sigma_i_inv[:, :, None, :].expand(-1, -1, N, -1)  # (B, N, N, K)
+
+            # Gradient per pair: 0.5 * (Σ_j_transported^{-1}_kk - 1/σ_i[k])
+            grad_sigma_per_pair = 0.5 * (sigma_j_inv_diag - sigma_i_inv_expanded)  # (B, N, N, K)
+
+            # Weight by attention and sum: Σ_j β_ij * ∂KL_ij/∂σ_i
+            grad_sigma_align = lambda_belief * torch.einsum('bij,bijk->bik', beta, grad_sigma_per_pair)  # (B, N, K)
+        else:
+            # Simplified: no sigma gradient from alignment (legacy behavior)
+            grad_sigma_align = torch.zeros_like(sigma_q)
     else:
         # Full covariance belief alignment
         # Get transport operators (use cached if available)
@@ -337,7 +362,24 @@ def compute_vfe_gradients_gpu(
         grad_mu_softmax = lambda_belief * torch.einsum('bij,bijk->bik', kl_values, d_beta_d_mu)
 
         grad_mu_align = grad_mu_direct + grad_mu_softmax
-        grad_sigma_align = torch.zeros_like(sigma_q)
+
+        # =================================================================
+        # Sigma gradient from alignment term (full covariance case)
+        # ∂KL/∂Σ_i = 0.5 * (Σ_j_transported^{-1} - Σ_i^{-1})
+        # Weighted by attention: Σ_j β_ij * ∂KL_ij/∂Σ_i
+        # =================================================================
+        if compute_sigma_align_grad:
+            # Use Σ_i^{-1} computed earlier in self-coupling section (sigma_q_inv)
+            sigma_i_inv_expanded = sigma_q_inv[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
+
+            # Gradient per pair: 0.5 * (Σ_j_transported^{-1} - Σ_i^{-1})
+            grad_sigma_per_pair = 0.5 * (sigma_j_inv - sigma_i_inv_expanded)  # (B, N, N, K, K)
+
+            # Weight by attention and sum: Σ_j β_ij * ∂KL_ij/∂Σ_i
+            grad_sigma_align = lambda_belief * torch.einsum('bij,bijkl->bikl', beta, grad_sigma_per_pair)  # (B, N, K, K)
+        else:
+            # Simplified: no sigma gradient from alignment (legacy behavior)
+            grad_sigma_align = torch.zeros_like(sigma_q)
 
     # =================================================================
     # 3. Combine Gradients
@@ -1164,9 +1206,25 @@ class VariationalFFNGradientEngine(nn.Module):
 
             # Covariance update: Use validated SPD retraction
             # Σ_new = retract_spd(Σ, τ·ΔΣ)
-            # NOTE: Skip sigma update for diagonal covariance mode - gradient engine
-            # computes full covariance gradients which aren't compatible with diagonal mode
-            if self.update_sigma and not is_diagonal_cov:
+            if self.update_sigma and is_diagonal_cov:
+                # Diagonal mode: gradient_engine computes full K×K gradients
+                # We extract the diagonal and apply diagonal retraction
+                for b in range(batch_size):
+                    for i, nat_grads in enumerate(batch_gradients[b]):
+                        if nat_grads.delta_Sigma_q is not None:
+                            # Extract diagonal from full gradient
+                            delta_sigma_diag = np.diag(nat_grads.delta_Sigma_q)
+                            sigma_diag = sigma_current[b, i].detach().cpu().numpy()
+
+                            # Diagonal exponential retraction: σ_new = σ * exp(τ * δσ / σ)
+                            lr_scalar = self.lr.item() if isinstance(self.lr, torch.Tensor) else float(self.lr)
+                            relative_update = lr_scalar * delta_sigma_diag / np.clip(sigma_diag, 1e-6, None)
+                            relative_update = np.clip(relative_update, -0.2, 0.2)  # Trust region
+                            sigma_new_diag = sigma_diag * np.exp(relative_update)
+                            sigma_new_diag = np.clip(sigma_new_diag, 1e-6, 1e6)  # Clamp for stability
+
+                            sigma_current[b, i] = torch.from_numpy(sigma_new_diag).to(device)
+            elif self.update_sigma and not is_diagonal_cov:
                 # Convert learning rate to float (may be torch tensor)
                 lr_scalar = self.lr.item() if isinstance(self.lr, torch.Tensor) else float(self.lr)
 
@@ -1193,11 +1251,11 @@ class VariationalFFNGradientEngine(nn.Module):
         # Return updated parameters
         # CRITICAL: Detach from computation graph!
         # The natural gradients are already correct - don't let PyTorch backprop fight them
-        if self.update_sigma and not is_diagonal_cov:
+        if self.update_sigma:
             return mu_current.detach(), sigma_current.detach()
         else:
-            # Return original sigma for diagonal mode (no update) or if update_sigma=False
-            return mu_current.detach(), sigma.detach() if is_diagonal_cov else None
+            # Return original sigma if update_sigma=False
+            return mu_current.detach(), sigma.detach()
 
 
 # =============================================================================
