@@ -85,6 +85,7 @@ class GaugeFFN(nn.Module):
         lambda_prior: float = 0.0,
         lambda_phi: float = 0.0,
         update_sigma: bool = True,
+        compute_sigma_align_grad: bool = True,  # Sigma gradient from alignment term
         # Hamiltonian specific
         hamiltonian_dt: float = 0.01,
         hamiltonian_n_steps: int = 10,
@@ -203,6 +204,7 @@ class GaugeFFN(nn.Module):
                     m_step_interval=vfe_dynamic_m_step_interval,
                     m_step_rate=vfe_dynamic_m_step_rate,
                     diagonal_covariance=diagonal_covariance,
+                    compute_sigma_align_grad=compute_sigma_align_grad,
                 )
             elif mode == 'VFE_dynamic_stable':
                 # Stabilized dynamic-β VFE with temperature annealing (RECOMMENDED!)
@@ -219,6 +221,7 @@ class GaugeFFN(nn.Module):
                     m_step_interval=vfe_dynamic_m_step_interval,
                     m_step_rate=vfe_dynamic_m_step_rate,
                     diagonal_covariance=diagonal_covariance,
+                    compute_sigma_align_grad=compute_sigma_align_grad,
                     # Stabilization parameters
                     balance_gradients=vfe_balance_gradients,
                     obs_grad_weight=vfe_obs_grad_weight,
@@ -238,6 +241,7 @@ class GaugeFFN(nn.Module):
                     n_iterations=n_iterations,
                     learnable_lr=learnable_lr,
                     update_sigma=update_sigma,
+                    compute_sigma_align_grad=compute_sigma_align_grad,
                 )
 
         # =================================================================
