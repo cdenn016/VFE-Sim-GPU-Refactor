@@ -8,28 +8,51 @@ WITHOUT backpropagation or external optimizers (Adam, SGD, etc.).
 
 Key Principles:
 ---------------
-1. BELIEF UPDATE (fast timescale - perception):
+1. FULL VARIATIONAL FREE ENERGY:
+
+   F = α·Σ_i KL(q_i||p_i)                       [Self-coupling: belief-to-prior]
+     + λ_β·Σ_i Σ_j β_ij·KL(q_i||Ω_ij·q_j)     [Belief alignment: social inference]
+     + Σ_i E_{q_i}[-log p(y_i|z_i)]            [Observation likelihood]
+     + λ_γ·Σ_i Σ_j KL(p_i||Ω_ij·p_j)          [Prior coupling: world model coherence]
+     + Σ_i Σ_d decay^d·KL(p_i||h_i^d)         [Ouroboros Tower: non-Markovian memory]
+
+   Where i,j index positions (tokens), d indexes ancestor depth in the hierarchy.
+
+   The first three terms are always active. Prior coupling (λ_γ) encourages
+   priors to form a coherent world model. Ouroboros Tower adds hyperpriors
+   from ALL ancestors (grandparent, great-grandparent, ...) for long-range memory.
+
+2. BELIEF UPDATE (fast timescale - perception):
    μ_q ← μ_q - η_μ · Σ_q · ∂F/∂μ_q    (natural gradient descent)
 
-   Where F = α·KL(q||p) + λ·Σ_ij β_ij·KL(q_i||Ω_ij·q_j) + E_q[-log p(y|z)]
-             ↑ self        ↑ belief alignment (social)     ↑ observation
-
-2. PRIOR BANK (unified embedding & output):
+3. PRIOR BANK (unified embedding & output):
    Each token v has a prior belief: π_v = N(μ_v, Σ_v)
    - ENCODING: Initialize belief from token prior: q ← π_{y_t}
    - DECODING: p(y=v|q) ∝ exp(-KL(q||π_v)/τ)    [KL to token priors!]
 
    This creates beautiful symmetry - the same prior bank serves both purposes.
 
-3. POSITION VIA GAUGE FRAMES:
+4. POSITION VIA GAUGE FRAMES:
    Position is encoded in the gauge frame φ_i ∈ so(3), NOT in μ!
    - Transport Ω_ij = exp(φ_i)·exp(-φ_j) encodes RELATIVE position
    - Same tokens at different positions have different φ, same μ_prior
    - This gives shift-invariant attention with position awareness
 
-4. TWO-TIMESCALE DYNAMICS:
+5. TWO-TIMESCALE DYNAMICS:
    - Fast: VFE gradient descent on beliefs (perception)
    - Slow: Prior evolution (learning)
+
+6. GAUGE-EQUIVARIANT COVARIANCE TRANSPORT:
+   When computing KL(q_i || Ω_ij·q_j), covariance must also be transported:
+   - Full transport: Σ_transported = Ω @ Σ @ Ω^T
+   - Efficient diagonal transport: (Ω @ diag(σ) @ Ω^T)_kk = Σ_l Ω_kl² · σ[l]
+
+   The efficient diagonal formula computes the correct diagonal of the
+   transported covariance without materializing full (B,N,N,K,K) tensors.
+   This maintains gauge equivariance while being memory efficient.
+
+   Note: Simply cloning untransported covariance (isotropic assumption)
+   breaks gauge equivariance unless covariance is truly scalar (σ·I).
 
 Theory:
 -------
