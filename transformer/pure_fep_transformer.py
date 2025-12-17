@@ -31,6 +31,18 @@ Key Principles:
    - Fast: VFE gradient descent on beliefs (perception)
    - Slow: Prior evolution (learning)
 
+5. GAUGE-EQUIVARIANT COVARIANCE TRANSPORT:
+   When computing KL(q_i || Ω_ij·q_j), covariance must also be transported:
+   - Full transport: Σ_transported = Ω @ Σ @ Ω^T
+   - Efficient diagonal transport: (Ω @ diag(σ) @ Ω^T)_kk = Σ_l Ω_kl² · σ[l]
+
+   The efficient diagonal formula computes the correct diagonal of the
+   transported covariance without materializing full (B,N,N,K,K) tensors.
+   This maintains gauge equivariance while being memory efficient.
+
+   Note: Simply cloning untransported covariance (isotropic assumption)
+   breaks gauge equivariance unless covariance is truly scalar (σ·I).
+
 Theory:
 -------
 This implements "predictive coding" in the FEP sense:
