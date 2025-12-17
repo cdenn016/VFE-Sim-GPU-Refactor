@@ -1158,9 +1158,12 @@ class PureFEPLayer(nn.Module):
                     'bnij,bnjk,bnlk->bnil', Omega, parent_sigma_q, Omega
                 )
         else:
-            # APPROXIMATE: Assume covariance is isotropic (doesn't change under rotation)
-            # This is faster but not gauge-equivariant
-            parent_sigma_transported = parent_sigma_q.clone()
+            # EFFICIENT DIAGONAL TRANSPORT: compute diagonal of Ω @ diag(σ) @ Ω^T
+            # Formula: (Ω @ diag(σ) @ Ω^T)_kk = Σ_l Ω_kl² * σ[l]
+            # This maintains gauge equivariance for diagonal elements without
+            # materializing the full (B, N, K, K) covariance tensor.
+            Omega_sq = Omega ** 2  # (B, N, K, K)
+            parent_sigma_transported = torch.einsum('bnkl,bnl->bnk', Omega_sq, parent_sigma_q)
 
         # Soft update: blend old prior with new (for stability)
         blend_factor = self.config.prior_lr
@@ -1211,9 +1214,10 @@ class PureFEPLayer(nn.Module):
 
         sigma_p_safe = sigma_p.clamp(min=self.config.eps)
 
-        # Transport covariance if exact mode enabled
+        # Transport covariance - compute diagonal of Ω @ diag(σ_j) @ Ω^T
+        # Even in approximate mode, we should transport covariance for gauge consistency
         if self.config.exact_covariance_transport:
-            # EXACT: Σ_transported = Ω @ diag(σ_j) @ Ω^T
+            # EXACT: Full Σ_transported = Ω @ diag(σ_j) @ Ω^T, then extract diagonal
             if self.config.diagonal_covariance:
                 # Expand sigma to (B, N, K, K) diagonal matrices
                 sigma_j_diag = torch.diag_embed(sigma_p_safe)  # (B, N, K, K)
@@ -1231,8 +1235,16 @@ class PureFEPLayer(nn.Module):
                     'bnmij,bmjk,bnmlk->bnmil', Omega, sigma_p_safe, Omega
                 )
         else:
-            # APPROXIMATE: Covariance unchanged under transport (isotropic assumption)
-            sigma_j_transported = sigma_p_safe.unsqueeze(1).expand(-1, N, -1, -1)  # (B, N, N, K)
+            # EFFICIENT DIAGONAL TRANSPORT: compute diagonal of Ω @ diag(σ_j) @ Ω^T
+            # Formula: (Ω @ diag(σ) @ Ω^T)_kk = Σ_l Ω_kl² * σ[l]
+            # This avoids materializing the full (B, N, N, K, K) covariance tensor
+            # while maintaining gauge equivariance for the diagonal elements.
+            #
+            # sigma_j_expanded[b, i, j, l] = sigma_p_safe[b, j, l] (j-th position's variance)
+            sigma_j_expanded = sigma_p_safe[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
+            Omega_sq = Omega ** 2  # (B, N, N, K, K)
+            # result[b,i,j,k] = Σ_l Omega_sq[b,i,j,k,l] * sigma_j_expanded[b,i,j,l]
+            sigma_j_transported = torch.einsum('bijkl,bijl->bijk', Omega_sq, sigma_j_expanded)  # (B, N, N, K)
 
         # KL divergence: KL(p_i || Ω_ij·p_j)
         # For diagonal Gaussians: KL = 0.5 * (σ_i/σ_j_t + (μ_i-μ_j_t)²/σ_j_t - 1 + log(σ_j_t/σ_i))
@@ -1294,9 +1306,10 @@ class PureFEPLayer(nn.Module):
         # Transport all priors: Ω_ij @ μ_p[j]
         mu_p_transported = torch.einsum('bnmij,bmj->bnmi', Omega, mu_p_batch)  # (1, N, N, K)
 
-        # Transport covariance if exact mode enabled
+        # Transport covariance - compute diagonal of Ω @ diag(σ_j) @ Ω^T
         sigma_p_safe = sigma_p_batch.clamp(min=self.config.eps)
         if self.config.exact_covariance_transport:
+            # EXACT: Full transport then extract diagonal
             sigma_j_diag = torch.diag_embed(sigma_p_safe)  # (1, N, K, K)
             sigma_j_transported_full = torch.einsum(
                 'bnmij,bmjk,bnmlk->bnmil', Omega, sigma_j_diag, Omega
@@ -1305,7 +1318,11 @@ class PureFEPLayer(nn.Module):
                 sigma_j_transported_full, dim1=-2, dim2=-1
             )  # (1, N, N, K)
         else:
-            sigma_j_transported = sigma_p_safe.unsqueeze(2).expand(-1, -1, N, -1)  # (1, N, N, K)
+            # EFFICIENT DIAGONAL TRANSPORT: compute diagonal of Ω @ diag(σ_j) @ Ω^T
+            # Formula: (Ω @ diag(σ) @ Ω^T)_kk = Σ_l Ω_kl² * σ[l]
+            sigma_j_expanded = sigma_p_safe[:, None, :, :].expand(-1, N, -1, -1)  # (1, N, N, K)
+            Omega_sq = Omega ** 2  # (1, N, N, K, K)
+            sigma_j_transported = torch.einsum('bijkl,bijl->bijk', Omega_sq, sigma_j_expanded)  # (1, N, N, K)
 
         # Difference: μ_p[i] - Ω_ij @ μ_p[j]
         mu_i = mu_p_batch.unsqueeze(2)  # (1, N, 1, K)
@@ -1394,8 +1411,10 @@ class PureFEPLayer(nn.Module):
                         'bnij,bnjk,bnlk->bnil', Omega, ancestor_sigma_q, Omega
                     )
             else:
-                # Approximate: covariance unchanged under rotation
-                sigma_h = ancestor_sigma_q.clone()
+                # EFFICIENT DIAGONAL TRANSPORT: compute diagonal of Ω @ diag(σ) @ Ω^T
+                # Formula: (Ω @ diag(σ) @ Ω^T)_kk = Σ_l Ω_kl² * σ[l]
+                Omega_sq = Omega ** 2  # (B, N, K, K)
+                sigma_h = torch.einsum('bnkl,bnl->bnk', Omega_sq, ancestor_sigma_q)
 
             # Average across batch and store as hyperprior
             # Store as (N, K) position-dependent hyperprior
