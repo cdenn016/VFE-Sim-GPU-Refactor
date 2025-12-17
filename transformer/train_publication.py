@@ -200,7 +200,7 @@ GPU_OPTIMIZED_CONFIG = {
     # Model architecture (realistic for 32GB VRAM)
     # Can't match Vaswani d=512 due to K² memory cost!
     
-    'vocab_size': 50000,        # Full byte-level vocab
+    'vocab_size': 50000,        # BPE vocab (top K of GPT-2's 50257 tokens)
     'embed_dim': 67,          # K=63 (ODD for SO(3)) - realistic for memory
     'n_layers': 1,            # Fewer layers to save memory
     'hidden_dim': 508,        # 4×embed_dim Only for 'learned'
@@ -946,9 +946,12 @@ class PublicationTrainer(FastTrainer):
                     print(f"      KL within: {metrics['rg/kl_within_mean']:.4f} (lower = tighter)")
                     print(f"      KL between: {metrics['rg/kl_between_mean']:.4f}")
 
-                # Generate sample text to verify learning
+                # Generate sample text to verify learning (varied prompts for diversity)
                 try:
-                    sample = self.sample_text(prompt="The", max_new_tokens=30, temperature=0.8)
+                    import random
+                    prompts = ["The", "In", "A", "It", "This", "As", "One", "When", "For"]
+                    prompt = random.choice(prompts)
+                    sample = self.sample_text(prompt=prompt, max_new_tokens=30, temperature=0.8)
                     print(f"    Sample: {sample[:100]}...")
                 except Exception as e:
                     import traceback
@@ -1396,8 +1399,8 @@ def main():
 
     # FFN mode (uses defaults from top of file)
     parser.add_argument('--ffn_mode', type=str, default=DEFAULT_FFN_MODE,
-                        choices=['learned', 'variational_gradient_engine', 'hamiltonian'],
-                        help='FFN mode (or use --run_ablation for all three modes)')
+                        choices=['learned', 'variational_gradient_engine', 'VFE_dynamic', 'VFE_dynamic_stable', 'hamiltonian'],
+                        help='FFN mode (or use --run_ablation for all modes)')
 
     # Ablation study (uses defaults from top of file)
     parser.add_argument('--run_ablation', action='store_true', default=DEFAULT_RUN_ABLATION,
@@ -1417,8 +1420,21 @@ def main():
     parser.add_argument('--device', type=str, default='auto')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints_publication')
     parser.add_argument('--use_wandb', action='store_true')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for reproducibility (default: None = random)')
 
     args = parser.parse_args()
+
+    # Set random seed if specified
+    if args.seed is not None:
+        import random
+        import numpy as np
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        print(f"Random seed set to: {args.seed}")
 
     # Device
     if args.device == 'auto':
