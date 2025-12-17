@@ -285,6 +285,15 @@ class WikiText2Dataset(Dataset):
             wikitext_data = _download_wikitext2_fallback(cache_dir)
             full_text = wikitext_data[split]
 
+        # Clean up any <unk> tokens from processed WikiText versions
+        # The fallback URL may download the processed version which has <unk>
+        import re
+        unk_count = full_text.count('<unk>')
+        if unk_count > 0:
+            print(f"  Warning: Removing {unk_count} <unk> tokens from data (processed WikiText artifact)")
+            full_text = re.sub(r'\s*<unk>\s*', ' ', full_text)
+            full_text = re.sub(r'\s+', ' ', full_text)  # Normalize multiple spaces
+
         print(f"  Total characters: {len(full_text):,}")
 
         # Tokenize
@@ -352,8 +361,9 @@ class WikiText2Dataset(Dataset):
 
         self._vocab_mapping = token_to_id
         self._restricted_vocab_size = len(token_to_id)
+        self._unk_id = token_to_id[unk_token_id]  # UNK is last (index K-1)
 
-        return [token_to_id.get(tok, token_to_id[unk_token_id]) for tok in restricted_tokens]
+        return [token_to_id.get(tok, self._unk_id) for tok in restricted_tokens]
 
     def _apply_vocab_mapping(self, tokens: List[int], vocab_mapping: Dict[int, int]) -> List[int]:
         """
@@ -366,9 +376,9 @@ class WikiText2Dataset(Dataset):
         self._restricted_vocab_size = len(vocab_mapping)
 
         # UNK is the highest ID in the mapping
-        unk_id = max(vocab_mapping.values())
+        self._unk_id = max(vocab_mapping.values())
 
-        return [vocab_mapping.get(tok, unk_id) for tok in tokens]
+        return [vocab_mapping.get(tok, self._unk_id) for tok in tokens]
 
     def get_vocab_mapping(self) -> Optional[Dict[int, int]]:
         """Return the vocabulary mapping if vocab restriction was applied."""
@@ -497,6 +507,15 @@ class WikiText2TiktokenDataset(Dataset):
             print("  (Using direct download fallback)")
             wikitext_data = _download_wikitext2_fallback(cache_dir)
             full_text = wikitext_data[split]
+
+        # Clean up any <unk> tokens from processed WikiText versions
+        # The fallback URL may download the processed version which has <unk>
+        import re
+        unk_count = full_text.count('<unk>')
+        if unk_count > 0:
+            print(f"  Warning: Removing {unk_count} <unk> tokens from data (processed WikiText artifact)")
+            full_text = re.sub(r'\s*<unk>\s*', ' ', full_text)
+            full_text = re.sub(r'\s+', ' ', full_text)  # Normalize multiple spaces
 
         print(f"  Total characters: {len(full_text):,}")
 
@@ -670,6 +689,15 @@ class WikiText2CharDataset(Dataset):
             print("  (Using direct download fallback - datasets package not available)")
             wikitext_data = _download_wikitext2_fallback(cache_dir)
             full_text = wikitext_data[split]
+
+        # Clean up any <unk> tokens from processed WikiText versions
+        # The fallback URL may download the processed version which has <unk>
+        import re
+        unk_count = full_text.count('<unk>')
+        if unk_count > 0:
+            print(f"  Warning: Removing {unk_count} <unk> tokens from data (processed WikiText artifact)")
+            full_text = re.sub(r'\s*<unk>\s*', ' ', full_text)
+            full_text = re.sub(r'\s+', ' ', full_text)  # Normalize multiple spaces
 
         print(f"  Total characters: {len(full_text):,}")
 
