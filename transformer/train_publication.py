@@ -1064,8 +1064,9 @@ def run_single_experiment(
     # Data Loading (BPE tokenization using GPT-2 tokenizer)
     # =================================================================
 
+    dataset_name = config.get('dataset', 'wikitext-2')
     print("\n" + "="*70)
-    print("LOADING WIKITEXT-2 DATA")
+    print(f"LOADING {dataset_name.upper()} DATA")
     print("="*70)
 
     # Tokenizer selection: 'char', 'bpe', or 'auto' (default)
@@ -1090,6 +1091,7 @@ def run_single_experiment(
             batch_size=config['batch_size'],
             vocab_size=config['vocab_size'],  # Top K BPE tokens
             num_workers=config.get('num_workers', 0),
+            dataset=dataset_name,
         )
 
     config['vocab_size'] = actual_vocab_size
@@ -1315,6 +1317,8 @@ def run_ablation_study(
 
         config = PUBLICATION_CONFIG.copy()
         config['ffn_mode'] = mode
+        if args is not None and hasattr(args, 'dataset'):
+            config['dataset'] = args.dataset
 
         # Gradient engine requires additional parameters
         if mode == 'variational_gradient_engine':
@@ -1435,6 +1439,9 @@ def main():
     parser.add_argument('--use_wandb', action='store_true')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for reproducibility (default: None = random)')
+    parser.add_argument('--dataset', type=str, default='wikitext-2',
+                        choices=['wikitext-2', 'wikitext-103'],
+                        help='Dataset to use: wikitext-2 (~2M tokens) or wikitext-103 (~103M tokens)')
 
     args = parser.parse_args()
 
@@ -1495,6 +1502,7 @@ def main():
 
         config = base_config.copy()
         config['ffn_mode'] = args.ffn_mode
+        config['dataset'] = args.dataset
 
         # Gradient engine requires additional parameters
         if args.ffn_mode == 'variational_gradient_engine':
