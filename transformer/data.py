@@ -93,8 +93,11 @@ WIKITEXT2_RAW_FILES = {
 }
 
 # WikiText-103: ~50x larger than WikiText-2 (~103M tokens vs ~2M)
-# Official download from Salesforce Research
-WIKITEXT103_URL = "https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-raw-v1.zip"
+# Multiple download sources for reliability
+WIKITEXT103_URLS = [
+    "https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-raw-v1.zip",
+    "https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/wikitext-103-raw-v1.zip",
+]
 
 # Dataset configurations for HuggingFace datasets library
 DATASET_CONFIGS = {
@@ -256,13 +259,18 @@ def _download_wikitext103_fallback(cache_dir: Optional[str] = None) -> dict:
         # Download and extract
         if not zip_path.exists():
             print(f"  Downloading WikiText-103 (~180MB)...")
-            print(f"    URL: {WIKITEXT103_URL}")
-            if not _download_file(WIKITEXT103_URL, zip_path):
+            downloaded = False
+            for url in WIKITEXT103_URLS:
+                print(f"    Trying: {url[:60]}...")
+                if _download_file(url, zip_path):
+                    print(f"    Download complete!")
+                    downloaded = True
+                    break
+            if not downloaded:
                 raise RuntimeError(
-                    f"Failed to download WikiText-103 from {WIKITEXT103_URL}\n"
+                    f"Failed to download WikiText-103 from all sources.\n"
                     "Please install the 'datasets' package: pip install datasets"
                 )
-            print(f"    Download complete!")
 
         # Extract
         print(f"  Extracting WikiText-103...")
