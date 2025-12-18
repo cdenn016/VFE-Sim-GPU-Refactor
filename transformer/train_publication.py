@@ -212,10 +212,7 @@ GPU_OPTIMIZED_CONFIG = {
     'num_workers': 4,         # Parallel data loading
 
     # Gauge transformer parameters
-    # NOTE: kappa_beta should scale with K to maintain consistent attention sharpness
-    # With K-dimensional Gaussians, KL divergence can scale with K, so we use kappa_beta ∝ K
-    'kappa_beta': 0.5,  # Will be auto-scaled: kappa_beta * (K / 64) in model init
-    'kappa_beta_scale_with_k': True,  # Enable automatic scaling
+    'kappa_beta': 0.5,
     'epsilon': 1e-8,
     'pos_encoding_mode': 'learned',   #'learned' or 'sinusoidal'
     'evolve_sigma': True,     # Full geometric learning
