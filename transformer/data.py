@@ -285,14 +285,20 @@ class WikiText2Dataset(Dataset):
             wikitext_data = _download_wikitext2_fallback(cache_dir)
             full_text = wikitext_data[split]
 
-        # Clean up any <unk> tokens from processed WikiText versions
-        # The fallback URL may download the processed version which has <unk>
+        # Clean up processed WikiText artifacts (fallback URL has processed version)
         import re
         unk_count = full_text.count('<unk>')
         if unk_count > 0:
             print(f"  Warning: Removing {unk_count} <unk> tokens from data (processed WikiText artifact)")
-            full_text = re.sub(r'\s*<unk>\s*', ' ', full_text)
-            full_text = re.sub(r'\s+', ' ', full_text)  # Normalize multiple spaces
+            # Replace <unk> with single space, preserve newlines
+            full_text = re.sub(r'<unk>', '', full_text)
+            # Only normalize multiple spaces (NOT newlines) - preserve paragraph structure!
+            full_text = re.sub(r'[ \t]+', ' ', full_text)
+
+        # Also fix @-@ (hyphen) and @,@ (comma) artifacts from processed WikiText
+        full_text = full_text.replace(' @-@ ', '-')
+        full_text = full_text.replace(' @,@ ', ',')
+        full_text = full_text.replace(' @.@ ', '.')
 
         print(f"  Total characters: {len(full_text):,}")
 
@@ -508,14 +514,20 @@ class WikiText2TiktokenDataset(Dataset):
             wikitext_data = _download_wikitext2_fallback(cache_dir)
             full_text = wikitext_data[split]
 
-        # Clean up any <unk> tokens from processed WikiText versions
-        # The fallback URL may download the processed version which has <unk>
+        # Clean up processed WikiText artifacts (fallback URL has processed version)
         import re
         unk_count = full_text.count('<unk>')
         if unk_count > 0:
             print(f"  Warning: Removing {unk_count} <unk> tokens from data (processed WikiText artifact)")
-            full_text = re.sub(r'\s*<unk>\s*', ' ', full_text)
-            full_text = re.sub(r'\s+', ' ', full_text)  # Normalize multiple spaces
+            # Replace <unk> with single space, preserve newlines
+            full_text = re.sub(r'<unk>', '', full_text)
+            # Only normalize multiple spaces (NOT newlines) - preserve paragraph structure!
+            full_text = re.sub(r'[ \t]+', ' ', full_text)
+
+        # Also fix @-@ (hyphen) and @,@ (comma) artifacts from processed WikiText
+        full_text = full_text.replace(' @-@ ', '-')
+        full_text = full_text.replace(' @,@ ', ',')
+        full_text = full_text.replace(' @.@ ', '.')
 
         print(f"  Total characters: {len(full_text):,}")
 
@@ -690,14 +702,20 @@ class WikiText2CharDataset(Dataset):
             wikitext_data = _download_wikitext2_fallback(cache_dir)
             full_text = wikitext_data[split]
 
-        # Clean up any <unk> tokens from processed WikiText versions
-        # The fallback URL may download the processed version which has <unk>
+        # Clean up processed WikiText artifacts (fallback URL has processed version)
         import re
         unk_count = full_text.count('<unk>')
         if unk_count > 0:
             print(f"  Warning: Removing {unk_count} <unk> tokens from data (processed WikiText artifact)")
-            full_text = re.sub(r'\s*<unk>\s*', ' ', full_text)
-            full_text = re.sub(r'\s+', ' ', full_text)  # Normalize multiple spaces
+            # Replace <unk> with single space, preserve newlines
+            full_text = re.sub(r'<unk>', '', full_text)
+            # Only normalize multiple spaces (NOT newlines) - preserve paragraph structure!
+            full_text = re.sub(r'[ \t]+', ' ', full_text)
+
+        # Also fix @-@ (hyphen) and @,@ (comma) artifacts from processed WikiText
+        full_text = full_text.replace(' @-@ ', '-')
+        full_text = full_text.replace(' @,@ ', ',')
+        full_text = full_text.replace(' @.@ ', '.')
 
         print(f"  Total characters: {len(full_text):,}")
 

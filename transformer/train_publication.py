@@ -949,9 +949,11 @@ class PublicationTrainer(FastTrainer):
                 # Generate sample text to verify learning (varied prompts for diversity)
                 try:
                     import random
-                    prompts = ["The", "In", "A", "It", "This", "As", "One", "When", "For"]
+                    prompts = ["The", "In", "A", "It", "This", "As", "One", "When", "For",
+                               "After", "Before", "During", "While", "Although", "However"]
                     prompt = random.choice(prompts)
-                    sample = self.sample_text(prompt=prompt, max_new_tokens=30, temperature=0.8)
+                    # Use temperature 0.9 and lower top_k for more diversity
+                    sample = self.sample_text(prompt=prompt, max_new_tokens=30, temperature=0.9, top_k=30)
                     print(f"    Sample: {sample[:100]}...")
                 except Exception as e:
                     import traceback
@@ -1104,6 +1106,17 @@ def run_single_experiment(
     print(f"  K (embed): {config['embed_dim']}")
     print(f"  Layers: {config['n_layers']}")
     print(f"  Vocab: {actual_vocab_size} ({'char' if use_char else 'BPE'})")
+
+    # Scale kappa_beta with K to maintain consistent attention sharpness
+    # KL divergence can scale with K, so we scale temperature proportionally
+    if config.get('kappa_beta_scale_with_k', False):
+        K = config['embed_dim']
+        K_ref = 64  # Reference dimension (roughly GPT-2 heads)
+        original_kappa = config['kappa_beta']
+        config['kappa_beta'] = original_kappa * (K / K_ref)
+        print(f"  kappa_beta: {original_kappa} → {config['kappa_beta']:.4f} (scaled for K={K})")
+    else:
+        print(f"  kappa_beta: {config['kappa_beta']}")
 
     model = GaugeTransformerLM(config)
     model = model.to(device)
