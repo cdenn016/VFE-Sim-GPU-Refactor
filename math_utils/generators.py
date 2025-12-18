@@ -326,6 +326,167 @@ def _validate_so3_generators(
 
 
 # =============================================================================
+# Multi-Irrep Block-Diagonal Generators
+# =============================================================================
+
+def generate_multi_irrep_generators(
+    irrep_spec: list,
+    *,
+    validate: bool = True,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """
+    Generate block-diagonal SO(3) generators from a multi-irrep specification.
+
+    This creates generators that act on a direct sum of irreducible representations:
+        V = ⊕_ℓ (V_ℓ)^{n_ℓ}
+
+    where V_ℓ is the spin-ℓ irrep (dimension 2ℓ+1) with multiplicity n_ℓ.
+
+    Args:
+        irrep_spec: List of (label, multiplicity, dim) tuples.
+            Example: [('ℓ0', 32, 1), ('ℓ1', 15, 3), ('ℓ2', 10, 5)]
+            - label: String identifier (e.g., 'ℓ0', 'ℓ1', 'scalar', 'vector')
+            - multiplicity: How many copies of this irrep
+            - dim: Dimension of irrep (must be odd: 1, 3, 5, 7, ...)
+        validate: If True, verify the resulting generators
+        eps: Tolerance for validation
+
+    Returns:
+        G: Block-diagonal generators, shape (3, K, K), where K = Σ mult × dim
+           Each G[a] has blocks corresponding to each irrep copy
+
+    Example:
+        >>> # K = 32×1 + 15×3 + 10×5 = 32 + 45 + 50 = 127
+        >>> spec = [('ℓ0', 32, 1), ('ℓ1', 15, 3), ('ℓ2', 10, 5)]
+        >>> G = generate_multi_irrep_generators(spec)
+        >>> G.shape
+        (3, 127, 127)
+
+        >>> # Structure: block diagonal with scalar 0-blocks, then spin-1 blocks, then spin-2
+        >>> # First 32 dimensions: all zeros (scalars don't rotate)
+        >>> np.allclose(G[:, :32, :32], 0)
+        True
+
+    Raises:
+        ValueError: If any irrep dimension is even
+    """
+    # Validate irrep dimensions
+    for label, mult, dim in irrep_spec:
+        if dim % 2 == 0:
+            raise ValueError(
+                f"Irrep '{label}' has even dimension {dim}. "
+                f"SO(3) irreps must have odd dimension (2ℓ+1)."
+            )
+        if mult < 0:
+            raise ValueError(f"Irrep '{label}' has negative multiplicity {mult}.")
+
+    # Compute total dimension
+    K = sum(mult * dim for _, mult, dim in irrep_spec)
+
+    # Initialize block-diagonal generators
+    G = np.zeros((3, K, K), dtype=np.float32)
+
+    # Fill in blocks
+    idx = 0
+    for label, mult, dim in irrep_spec:
+        if dim == 1:
+            # Scalars (ℓ=0): generator is zero
+            # Skip mult×1 dimensions
+            idx += mult * dim
+        else:
+            # Higher spin: get generators for this irrep
+            G_irrep = generate_so3_generators(dim, cache=True, validate=False)
+
+            # Place mult copies on the diagonal
+            for _ in range(mult):
+                G[:, idx:idx+dim, idx:idx+dim] = G_irrep
+                idx += dim
+
+    # Validate if requested
+    if validate and K > 1:
+        _validate_block_diagonal_generators(G, irrep_spec, eps=eps)
+
+    return G
+
+
+def _validate_block_diagonal_generators(
+    G: np.ndarray,
+    irrep_spec: list,
+    *,
+    eps: float = 1e-6,
+) -> None:
+    """
+    Validate block-diagonal multi-irrep generators.
+
+    Checks:
+    1. Skew-symmetry: G[a]ᵀ = -G[a]
+    2. Commutation: [G_x, G_y] = G_z (cyclic)
+    3. Block structure: off-diagonal blocks are zero
+
+    Args:
+        G: (3, K, K) generators
+        irrep_spec: The irrep specification used to create G
+        eps: Tolerance for checks
+    """
+    K = G.shape[1]
+
+    # Check skew-symmetry
+    for a in range(3):
+        skew_error = np.linalg.norm(G[a] + G[a].T, ord='fro')
+        if skew_error > eps:
+            raise RuntimeError(
+                f"Block-diagonal generator G[{a}] not skew-symmetric: "
+                f"||G + Gᵀ|| = {skew_error:.3e}"
+            )
+
+    # Check commutation relations
+    G_x, G_y, G_z = G[0], G[1], G[2]
+
+    comm_xy = G_x @ G_y - G_y @ G_x
+    error_xy = np.linalg.norm(comm_xy - G_z, ord='fro')
+
+    comm_yz = G_y @ G_z - G_z @ G_y
+    error_yz = np.linalg.norm(comm_yz - G_x, ord='fro')
+
+    comm_zx = G_z @ G_x - G_x @ G_z
+    error_zx = np.linalg.norm(comm_zx - G_y, ord='fro')
+
+    max_error = max(error_xy, error_yz, error_zx)
+    scale = max(np.linalg.norm(G[a], ord='fro') for a in range(3))
+    threshold = eps * max(scale, 1.0)
+
+    if max_error > threshold:
+        raise RuntimeError(
+            f"Block-diagonal SO(3) commutation violated:\n"
+            f"  [G_x, G_y] - G_z: {error_xy:.3e}\n"
+            f"  [G_y, G_z] - G_x: {error_yz:.3e}\n"
+            f"  [G_z, G_x] - G_y: {error_zx:.3e}"
+        )
+
+    # Check block structure (off-diagonal blocks should be zero)
+    idx = 0
+    block_starts = []
+    for _, mult, dim in irrep_spec:
+        for _ in range(mult):
+            block_starts.append((idx, dim))
+            idx += dim
+
+    for i, (start_i, dim_i) in enumerate(block_starts):
+        for j, (start_j, dim_j) in enumerate(block_starts):
+            if i != j:
+                # Check off-diagonal block is zero
+                for a in range(3):
+                    block = G[a, start_i:start_i+dim_i, start_j:start_j+dim_j]
+                    block_norm = np.linalg.norm(block, ord='fro')
+                    if block_norm > eps:
+                        raise RuntimeError(
+                            f"Off-diagonal block ({i},{j}) is non-zero: "
+                            f"||block|| = {block_norm:.3e}"
+                        )
+
+
+# =============================================================================
 # Cache
 # =============================================================================
 

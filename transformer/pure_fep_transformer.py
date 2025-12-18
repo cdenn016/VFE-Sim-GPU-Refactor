@@ -97,7 +97,7 @@ from transformer.embeddings import (
     GaugePositionalEncoding,
     so3_compose_bch,
 )
-from math_utils.generators import generate_so3_generators
+from math_utils.generators import generate_so3_generators, generate_multi_irrep_generators
 
 
 # =============================================================================
@@ -246,8 +246,10 @@ class PriorBank(nn.Module):
         # Compute KL(q || π_v) for all v
         # For diagonal Gaussians:
         # KL = 0.5 * (Σ_q/Σ_p + (μ_q-μ_p)²/Σ_p - 1 + log(Σ_p/Σ_q))
-        sigma_q_safe = sigma_q_exp.clamp(min=self.eps)
-        sigma_p_safe = sigma_p_exp.clamp(min=self.eps)
+        # Use larger floor (1e-4) to prevent numerical issues in KL division
+        variance_floor = max(self.eps, 1e-4)
+        sigma_q_safe = sigma_q_exp.clamp(min=variance_floor)
+        sigma_p_safe = sigma_p_exp.clamp(min=variance_floor)
 
         kl_per_dim = 0.5 * (
             sigma_q_safe / sigma_p_safe
@@ -480,7 +482,8 @@ class PureFEPConfig:
     use_multi_irrep: bool = False
 
     # Numerical stability
-    eps: float = 1e-6
+    eps: float = 1e-6             # General numerical stability floor
+    variance_floor: float = 1e-4  # Minimum variance for KL computation (larger to prevent NaN)
     grad_clip: float = 1.0
 
     # PURE FEP MODE: No backprop, all learning via prior evolution
@@ -559,15 +562,26 @@ class PureFEPConfig:
 
     def __post_init__(self):
         """Validate configuration."""
-        if self.embed_dim % 2 == 0:
-            raise ValueError(
-                f"embed_dim must be ODD for SO(3) irreps (got {self.embed_dim}). "
-                f"Try {self.embed_dim - 1} or {self.embed_dim + 1}."
-            )
-
         # Auto-generate irrep_spec if not provided
         if self.irrep_spec is None:
+            # Single-irrep mode: embed_dim must be odd
+            if self.embed_dim % 2 == 0:
+                raise ValueError(
+                    f"embed_dim must be ODD for single SO(3) irrep (got {self.embed_dim}). "
+                    f"Either use {self.embed_dim - 1} or {self.embed_dim + 1}, "
+                    f"OR provide an irrep_spec for multi-irrep mode."
+                )
             self.irrep_spec = self._generate_irrep_spec(self.embed_dim)
+        else:
+            # Multi-irrep mode: validate each irrep dimension is odd
+            for label, mult, dim in self.irrep_spec:
+                if dim % 2 == 0:
+                    raise ValueError(
+                        f"Irrep '{label}' has even dimension {dim}. "
+                        f"Each SO(3) irrep must have odd dimension (2ℓ+1)."
+                    )
+                if mult < 0:
+                    raise ValueError(f"Irrep '{label}' has negative multiplicity {mult}.")
 
         # Validate irrep_spec sums to embed_dim
         total_dim = sum(mult * dim for _, mult, dim in self.irrep_spec)
@@ -672,14 +686,13 @@ class PureFEPLayer(nn.Module):
                 attention_pattern='local' if config.use_local_attention else 'full',
                 attention_window=config.attention_window,
             )
-            # Get generators from the attention module (block-diagonal structure)
-            # IrrepMultiHeadAttention stores per-head generators, we need full block-diag
-            # For now, register single-irrep as fallback for VFE gradients
-            # (IrrepMultiHeadAttention handles its own per-head generators internally)
-            gen_np = generate_so3_generators(embed_dim)
+            # Generate proper block-diagonal generators from irrep_spec
+            # These are used for VFE gradient computation and transport operators
+            gen_np = generate_multi_irrep_generators(config.irrep_spec, validate=True)
             self.register_buffer('generators', torch.from_numpy(gen_np).float())
         else:
             # SINGLE IRREP MODE: Use single spin-ℓ representation
+            # (requires embed_dim to be odd)
             self.irrep_attention = None
             gen_np = generate_so3_generators(embed_dim)
             self.register_buffer('generators', torch.from_numpy(gen_np).float())
@@ -890,8 +903,10 @@ class PureFEPLayer(nn.Module):
         # This is the TRUE variational free energy!
 
         # Self-coupling: α·KL(q||p)
-        sigma_q_safe = sigma_q.clamp(min=self.config.eps)
-        sigma_p_safe = sigma_p.clamp(min=self.config.eps)
+        # Use variance_floor (larger than eps) to prevent numerical issues in KL division
+        variance_floor = getattr(self.config, 'variance_floor', 1e-4)
+        sigma_q_safe = sigma_q.clamp(min=variance_floor)
+        sigma_p_safe = sigma_p.clamp(min=variance_floor)
         kl_self = 0.5 * (
             sigma_q_safe / sigma_p_safe
             + (mu_q - mu_p)**2 / sigma_p_safe
@@ -1235,7 +1250,9 @@ class PureFEPLayer(nn.Module):
         # Transported prior mean: Ω_ij · μ_j
         mu_p_transported = torch.einsum('bnmij,bmj->bnmi', Omega, mu_p)  # (B, N, N, K)
 
-        sigma_p_safe = sigma_p.clamp(min=self.config.eps)
+        # Use variance_floor for numerical stability in KL computation
+        variance_floor = getattr(self.config, 'variance_floor', 1e-4)
+        sigma_p_safe = sigma_p.clamp(min=variance_floor)
 
         # Transport covariance - compute diagonal of Ω @ diag(σ_j) @ Ω^T
         # Even in approximate mode, we should transport covariance for gauge consistency
@@ -1273,12 +1290,13 @@ class PureFEPLayer(nn.Module):
         # For diagonal Gaussians: KL = 0.5 * (σ_i/σ_j_t + (μ_i-μ_j_t)²/σ_j_t - 1 + log(σ_j_t/σ_i))
         mu_i = mu_p.unsqueeze(2)  # (B, N, 1, K)
         sigma_i = sigma_p_safe.unsqueeze(2)  # (B, N, 1, K)
+        sigma_j_t_safe = sigma_j_transported.clamp(min=variance_floor)
 
         kl_prior = 0.5 * (
-            sigma_i / sigma_j_transported.clamp(min=self.config.eps)
-            + (mu_i - mu_p_transported)**2 / sigma_j_transported.clamp(min=self.config.eps)
+            sigma_i / sigma_j_t_safe
+            + (mu_i - mu_p_transported)**2 / sigma_j_t_safe
             - 1.0
-            + torch.log(sigma_j_transported.clamp(min=self.config.eps) / sigma_i)
+            + torch.log(sigma_j_t_safe / sigma_i)
         ).sum(dim=-1)  # (B, N, N)
 
         # Apply causal mask if provided
@@ -1330,7 +1348,9 @@ class PureFEPLayer(nn.Module):
         mu_p_transported = torch.einsum('bnmij,bmj->bnmi', Omega, mu_p_batch)  # (1, N, N, K)
 
         # Transport covariance - compute diagonal of Ω @ diag(σ_j) @ Ω^T
-        sigma_p_safe = sigma_p_batch.clamp(min=self.config.eps)
+        # Use variance_floor for numerical stability
+        variance_floor = getattr(self.config, 'variance_floor', 1e-4)
+        sigma_p_safe = sigma_p_batch.clamp(min=variance_floor)
         if self.config.exact_covariance_transport:
             # EXACT: Full transport then extract diagonal
             sigma_j_diag = torch.diag_embed(sigma_p_safe)  # (1, N, K, K)
@@ -1352,7 +1372,7 @@ class PureFEPLayer(nn.Module):
         delta_mu = mu_i - mu_p_transported  # (1, N, N, K)
 
         # Gradient per pair: Σ_j^{-1} @ δμ (for diagonal: δμ / σ_j)
-        grad_per_pair = delta_mu / sigma_j_transported.clamp(min=self.config.eps)  # (1, N, N, K)
+        grad_per_pair = delta_mu / sigma_j_transported.clamp(min=variance_floor)  # (1, N, N, K)
 
         # Sum over j (all positions contribute to gradient at i)
         # Weight by attention-like factor (uniform for priors)
@@ -1470,12 +1490,13 @@ class PureFEPLayer(nn.Module):
 
         total_kl = torch.tensor(0.0, device=mu_p.device)
         decay = self.config.tower_decay
+        variance_floor = getattr(self.config, 'variance_floor', 1e-4)
 
         for depth, (mu_h, sigma_h) in enumerate(zip(self.hyperprior_mus, self.hyperprior_sigmas)):
             # KL(p || h^d) for diagonal Gaussians
             # = 0.5 * (σ_p/σ_h + (μ_p - μ_h)²/σ_h - 1 + log(σ_h/σ_p))
-            sigma_p_safe = sigma_p.clamp(min=self.config.eps)
-            sigma_h_safe = sigma_h.clamp(min=self.config.eps)
+            sigma_p_safe = sigma_p.clamp(min=variance_floor)
+            sigma_h_safe = sigma_h.clamp(min=variance_floor)
 
             kl = 0.5 * (
                 sigma_p_safe / sigma_h_safe
@@ -1513,9 +1534,10 @@ class PureFEPLayer(nn.Module):
 
         grad = torch.zeros_like(mu_p)
         decay = self.config.tower_decay
+        variance_floor = getattr(self.config, 'variance_floor', 1e-4)
 
         for depth, (mu_h, sigma_h) in enumerate(zip(self.hyperprior_mus, self.hyperprior_sigmas)):
-            sigma_h_safe = sigma_h.clamp(min=self.config.eps)
+            sigma_h_safe = sigma_h.clamp(min=variance_floor)
 
             # ∂KL/∂μ_p = (μ_p - μ_h) / σ_h
             grad_d = (mu_p - mu_h) / sigma_h_safe

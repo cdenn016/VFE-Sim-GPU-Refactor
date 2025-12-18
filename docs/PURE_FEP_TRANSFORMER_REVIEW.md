@@ -2,6 +2,7 @@
 
 **Reviewer:** Claude (Opus 4.5)
 **Date:** December 2025
+**Last Updated:** December 2025 (post-fixes)
 **Files Reviewed:**
 - `transformer/pure_fep_transformer.py`
 - `transformer/train_pure_fep.py`
@@ -14,80 +15,58 @@
 
 ## Executive Summary
 
-The Pure FEP Transformer is an ambitious implementation of a transformer architecture that learns entirely through Variational Free Energy (VFE) minimization, embodying the Free Energy Principle. The theoretical foundation is sound and the code is well-documented. However, several critical runtime bugs must be fixed before the code can run successfully in all modes.
+The Pure FEP Transformer is an ambitious implementation of a transformer architecture that learns entirely through Variational Free Energy (VFE) minimization, embodying the Free Energy Principle. The theoretical foundation is sound and the code is well-documented.
+
+**Update (Dec 2025):** Most issues from the original review have been fixed:
+- ✅ Multi-irrep generators now properly implemented via `generate_multi_irrep_generators()`
+- ✅ Dimension constraint relaxed (even dims allowed with explicit `irrep_spec`)
+- ✅ Numerical stability improved with `variance_floor` parameter (default 1e-4)
+- ✅ Function parameter mismatch fixed (was already resolved in attention.py)
+- ✅ AttributeError guards added for None checks
 
 ---
 
 ## Critical Bugs (Will Cause Runtime Errors)
 
-### 1. Invalid Function Call Arguments
+### 1. ~~Invalid Function Call Arguments~~ ✅ FIXED
 
-**Location:** `pure_fep_transformer.py:1291-1295`
+**Location:** `pure_fep_transformer.py:1714-1718`
 
-```python
-cached_transport = compute_transport_operators(
-    phi, self.generators,
-    use_fast_exp=self.config.use_fast_matrix_exp,  # NOT A VALID PARAMETER!
-    exp_order=self.config.matrix_exp_order,         # NOT A VALID PARAMETER!
-)
-```
-
-**Issue:** The function `compute_transport_operators` in `attention.py:129-132` only accepts `phi` and `generators`:
+**Status:** FIXED - The `compute_transport_operators` function in `attention.py:129-134` now accepts `use_fast_exp` and `exp_order` parameters:
 
 ```python
 def compute_transport_operators(
     phi: torch.Tensor,
     generators: torch.Tensor,
+    use_fast_exp: bool = False,
+    exp_order: int = 4,
 ) -> dict:
 ```
 
-**Impact:** `TypeError: compute_transport_operators() got an unexpected keyword argument 'use_fast_exp'`
-
-**Fix:** Either:
-1. Remove the invalid keyword arguments, or
-2. Update `compute_transport_operators` to accept these parameters and implement fast matrix exponential
-
 ---
 
-### 2. AttributeError in Hybrid Mode (Embedding)
+### 2. ~~AttributeError in Hybrid Mode (Embedding)~~ ✅ FIXED
 
-**Location:** `pure_fep_transformer.py:1787`
+**Location:** `pure_fep_transformer.py:2259-2277`
 
-```python
-for param in [self.embedding.weight, self.output_proj.weight]:
-```
-
-**Issue:** When `embedding_mode='prior_bank'`, `self.embedding` is set to `None` (line 1381).
-
-**Impact:** `AttributeError: 'NoneType' object has no attribute 'weight'`
-
-**Fix:** Check for None before accessing:
+**Status:** FIXED - The code now properly checks for None before accessing:
 
 ```python
-params = []
+params_to_update = []
 if self.embedding is not None:
-    params.append(self.embedding.weight)
+    params_to_update.append(self.embedding.weight)
 if self.output_proj is not None:
-    params.append(self.output_proj.weight)
-for param in params:
-    ...
+    params_to_update.append(self.output_proj.weight)
+# ... etc
 ```
 
 ---
 
-### 3. AttributeError in Hybrid Mode (Layer Output Projection)
+### 3. ~~AttributeError in Hybrid Mode (Layer Output Projection)~~ ✅ FIXED
 
-**Location:** `pure_fep_transformer.py:1796`
+**Location:** `pure_fep_transformer.py:2279-2285`
 
-```python
-if layer.output_proj.weight.grad is not None:
-```
-
-**Issue:** When `output_mode='kl_to_prior'`, `layer.output_proj` is `None` (line 608).
-
-**Impact:** `AttributeError: 'NoneType' object has no attribute 'weight'`
-
-**Fix:** Add None check:
+**Status:** FIXED - The code now checks for None:
 
 ```python
 for layer in self.layers:
@@ -99,44 +78,46 @@ for layer in self.layers:
 
 ## Mathematical/Theoretical Issues
 
-### 4. Unused `irrep_spec` Configuration
+### 4. ~~Unused `irrep_spec` Configuration~~ ✅ FIXED
 
-**Location:** `PureFEPConfig` class
+**Location:** `PureFEPConfig` class and `math_utils/generators.py`
 
-**Issue:** The `irrep_spec` parameter allows specifying a multi-irrep decomposition like:
+**Status:** FIXED - Multi-irrep support now fully implemented:
+
+1. New `generate_multi_irrep_generators()` function in `math_utils/generators.py`
+2. `PureFEPLayer` uses `generate_multi_irrep_generators(config.irrep_spec)` when `use_multi_irrep=True`
+3. Properly creates block-diagonal generators with correct per-irrep structure
+
 ```python
-irrep_spec = [
-    ('ℓ0', 32, 1),  # 32 scalars
-    ('ℓ1', 15, 3),  # 45 dims (vectors)
-    ('ℓ2', 10, 5),  # 50 dims (rank-2 tensors)
-]
+# Now works correctly:
+config = PureFEPConfig(
+    embed_dim=127,
+    irrep_spec=[('ℓ0', 32, 1), ('ℓ1', 15, 3), ('ℓ2', 10, 5)],
+    use_multi_irrep=True,
+)
 ```
-
-However, this is only used for validation and printing. The actual generator construction always uses:
-```python
-gen_np = generate_so3_generators(embed_dim)  # Single irrep!
-```
-
-**Impact:** Misleading documentation; users may expect block-diagonal structure that doesn't exist.
-
-**Recommendation:** Either:
-1. Implement proper multi-irrep block-diagonal generators, or
-2. Remove `irrep_spec` and clarify that only single irreps are supported
 
 ---
 
-### 5. Overly Restrictive Dimension Constraint
+### 5. ~~Overly Restrictive Dimension Constraint~~ ✅ FIXED
 
 **Location:** `PureFEPConfig.__post_init__`
 
+**Status:** FIXED - The constraint now only applies when no `irrep_spec` is provided:
+
 ```python
-if self.embed_dim % 2 == 0:
-    raise ValueError("embed_dim must be ODD for SO(3) irreps...")
+if self.irrep_spec is None:
+    # Single-irrep mode: embed_dim must be odd
+    if self.embed_dim % 2 == 0:
+        raise ValueError(...)
+else:
+    # Multi-irrep mode: each irrep dim must be odd, but total can be even
+    for label, mult, dim in self.irrep_spec:
+        if dim % 2 == 0:
+            raise ValueError(f"Irrep '{label}' has even dimension...")
 ```
 
-**Issue:** This is only true for *single* SO(3) irreps. A sum of irreps can have any dimension (e.g., 1+3=4, which is even).
-
-**Impact:** Unnecessarily restricts valid configurations if multi-irrep support were added.
+Even dimensions are now allowed with explicit multi-irrep specification (e.g., `embed_dim=96` with `irrep_spec=[('ℓ0',12,1),('ℓ1',7,3),('ℓ2',5,5),('ℓ3',2,7)]`).
 
 ---
 
@@ -173,17 +154,15 @@ The method transports means but uses untransported variance for KL computation, 
 
 ## Numerical Stability Issues
 
-### 8. Potential Overflow in Perplexity Calculation
+### 8. ~~Potential Overflow in Perplexity Calculation~~ ✅ FIXED
 
-**Location:** `train_pure_fep.py:247`
+**Location:** `train_pure_fep.py:254`
+
+**Status:** FIXED - Now uses `min(avg_loss, 20)`:
 
 ```python
-ppl = math.exp(min(avg_loss, 100))  # Clamp to avoid overflow
+ppl = math.exp(min(avg_loss, 20))  # Clamp to avoid overflow (exp(20) ≈ 485M)
 ```
-
-**Issue:** `exp(100) ≈ 2.69 × 10^43` which is still astronomically large and meaningless as a metric.
-
-**Recommendation:** Use `min(avg_loss, 20)` or report log-perplexity directly.
 
 ---
 
@@ -210,17 +189,23 @@ except RuntimeError:
 
 ---
 
-### 10. Division by Very Small Numbers
+### 10. ~~Division by Very Small Numbers~~ ✅ FIXED
 
-**Location:** `pure_fep_transformer.py:1224`
+**Location:** Multiple KL computation sites
+
+**Status:** FIXED - A new `variance_floor` config parameter (default 1e-4) is used for all KL divisions:
 
 ```python
-grad_mu_p = (self.prior_mu - mu_p_new) / self.prior_sigma.clamp(min=self.config.eps)**2
+# In PureFEPConfig:
+variance_floor: float = 1e-4  # Minimum variance for KL computation (larger to prevent NaN)
+
+# In all KL computations:
+variance_floor = getattr(self.config, 'variance_floor', 1e-4)
+sigma_q_safe = sigma_q.clamp(min=variance_floor)
+sigma_p_safe = sigma_p.clamp(min=variance_floor)
 ```
 
-**Issue:** `eps = 1e-6`, so `eps² = 1e-12`. Dividing by this creates huge gradients.
-
-**Recommendation:** Use larger minimum: `.clamp(min=1e-4)**2` or `.clamp(min=1e-8)` after squaring.
+This prevents numerical instability from division by very small variances.
 
 ---
 
