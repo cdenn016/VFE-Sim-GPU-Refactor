@@ -212,7 +212,10 @@ GPU_OPTIMIZED_CONFIG = {
     'num_workers': 4,         # Parallel data loading
 
     # Gauge transformer parameters
-    'kappa_beta': 0.5,
+    # NOTE: kappa_beta should scale with K to maintain consistent attention sharpness
+    # With K-dimensional Gaussians, KL divergence can scale with K, so we use kappa_beta ∝ K
+    'kappa_beta': 0.5,  # Will be auto-scaled: kappa_beta * (K / 64) in model init
+    'kappa_beta_scale_with_k': True,  # Enable automatic scaling
     'epsilon': 1e-8,
     'pos_encoding_mode': 'learned',   #'learned' or 'sinusoidal'
     'evolve_sigma': True,     # Full geometric learning
@@ -1106,6 +1109,17 @@ def run_single_experiment(
     print(f"  K (embed): {config['embed_dim']}")
     print(f"  Layers: {config['n_layers']}")
     print(f"  Vocab: {actual_vocab_size} ({'char' if use_char else 'BPE'})")
+
+    # Scale kappa_beta with K to maintain consistent attention sharpness
+    # KL divergence can scale with K, so we scale temperature proportionally
+    if config.get('kappa_beta_scale_with_k', False):
+        K = config['embed_dim']
+        K_ref = 64  # Reference dimension (roughly GPT-2 heads)
+        original_kappa = config['kappa_beta']
+        config['kappa_beta'] = original_kappa * (K / K_ref)
+        print(f"  kappa_beta: {original_kappa} → {config['kappa_beta']:.4f} (scaled for K={K})")
+    else:
+        print(f"  kappa_beta: {config['kappa_beta']}")
 
     model = GaugeTransformerLM(config)
     model = model.to(device)
