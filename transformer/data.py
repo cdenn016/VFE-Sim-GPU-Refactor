@@ -73,7 +73,7 @@ BPE_AVAILABLE = TIKTOKEN_AVAILABLE or TRANSFORMERS_AVAILABLE
 
 
 # =============================================================================
-# Fallback: Download WikiText-2 directly (no datasets package needed)
+# Fallback: Download WikiText directly (no datasets package needed)
 # =============================================================================
 # WikiText-2 raw files from multiple sources (fallback chain)
 # Using plain text sources that don't require special parsing
@@ -90,6 +90,16 @@ WIKITEXT2_RAW_FILES = {
     'test': [
         "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/test.txt",
     ],
+}
+
+# WikiText-103: ~50x larger than WikiText-2 (~103M tokens vs ~2M)
+# Official download from Salesforce Research
+WIKITEXT103_URL = "https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-raw-v1.zip"
+
+# Dataset configurations for HuggingFace datasets library
+DATASET_CONFIGS = {
+    'wikitext-2': 'wikitext-2-raw-v1',
+    'wikitext-103': 'wikitext-103-raw-v1',
 }
 
 # Embedded minimal dataset as ultimate fallback
@@ -213,6 +223,68 @@ def _download_wikitext2_fallback(cache_dir: Optional[str] = None) -> dict:
                 f.write(sample)
 
     print(f"WikiText-2 loaded from: {data_dir}")
+    return result
+
+
+def _download_wikitext103_fallback(cache_dir: Optional[str] = None) -> dict:
+    """
+    Download WikiText-103 directly from source (fallback when datasets unavailable).
+
+    WikiText-103 is ~50x larger than WikiText-2 (~103M tokens vs ~2M tokens).
+
+    Returns dict with 'train', 'validation', 'test' text.
+    """
+    if cache_dir is None:
+        cache_dir = Path.home() / ".cache" / "wikitext103"
+    else:
+        cache_dir = Path(cache_dir)
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = cache_dir / "wikitext-103-raw"
+    zip_path = cache_dir / "wikitext-103-raw-v1.zip"
+
+    files_map = {
+        'train': 'wiki.train.raw',
+        'validation': 'wiki.valid.raw',
+        'test': 'wiki.test.raw'
+    }
+
+    # Check if already extracted
+    all_exist = all((data_dir / fname).exists() for fname in files_map.values())
+
+    if not all_exist:
+        # Download and extract
+        if not zip_path.exists():
+            print(f"  Downloading WikiText-103 (~180MB)...")
+            print(f"    URL: {WIKITEXT103_URL}")
+            if not _download_file(WIKITEXT103_URL, zip_path):
+                raise RuntimeError(
+                    f"Failed to download WikiText-103 from {WIKITEXT103_URL}\n"
+                    "Please install the 'datasets' package: pip install datasets"
+                )
+            print(f"    Download complete!")
+
+        # Extract
+        print(f"  Extracting WikiText-103...")
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(cache_dir)
+
+        # The zip extracts to wikitext-103-raw-v1/, rename to wikitext-103-raw
+        extracted_dir = cache_dir / "wikitext-103-raw-v1"
+        if extracted_dir.exists() and not data_dir.exists():
+            extracted_dir.rename(data_dir)
+
+    # Read files
+    result = {}
+    for split, filename in files_map.items():
+        filepath = data_dir / filename
+        if filepath.exists():
+            with open(filepath, 'r', encoding='utf-8') as f:
+                result[split] = f.read()
+        else:
+            raise RuntimeError(f"WikiText-103 file not found: {filepath}")
+
+    print(f"WikiText-103 loaded from: {data_dir}")
     return result
 
 
@@ -461,8 +533,9 @@ class WikiText2Dataset(Dataset):
 
 class WikiText2TiktokenDataset(Dataset):
     """
-    WikiText-2 dataset using tiktoken (OpenAI's fast BPE tokenizer).
+    WikiText dataset using tiktoken (OpenAI's fast BPE tokenizer).
 
+    Supports WikiText-2 (~2M tokens) and WikiText-103 (~103M tokens).
     Lighter weight than transformers - no sklearn/pyarrow dependencies.
     Uses GPT-2's tokenizer by default (50257 vocab).
     """
@@ -474,9 +547,10 @@ class WikiText2TiktokenDataset(Dataset):
         vocab_size: Optional[int] = None,
         cache_dir: Optional[str] = None,
         vocab_mapping: Optional[Dict[int, int]] = None,
+        dataset: str = 'wikitext-2',
     ):
         """
-        Initialize WikiText-2 dataset with tiktoken.
+        Initialize WikiText dataset with tiktoken.
 
         Args:
             split: 'train', 'validation', or 'test'
@@ -487,12 +561,15 @@ class WikiText2TiktokenDataset(Dataset):
                           If provided, uses this mapping instead of building from
                           this split's frequencies. Essential for ensuring train/val
                           consistency when vocab restriction is used.
+            dataset: 'wikitext-2' (~2M tokens) or 'wikitext-103' (~103M tokens)
         """
         assert TIKTOKEN_AVAILABLE, "tiktoken required! pip install tiktoken"
+        assert dataset in DATASET_CONFIGS, f"Unknown dataset: {dataset}. Use 'wikitext-2' or 'wikitext-103'"
 
         self.split = split
         self.max_seq_len = max_seq_len
         self.vocab_size_limit = vocab_size
+        self.dataset_name = dataset
 
         # Load GPT-2 tokenizer via tiktoken
         self.tokenizer = tiktoken.get_encoding("gpt2")
@@ -503,15 +580,19 @@ class WikiText2TiktokenDataset(Dataset):
         self.eos_token_id = 50256  # GPT-2's <|endoftext|>
 
         # Load dataset
-        print(f"Loading WikiText-2 ({split}) for BPE tokenization (tiktoken)...")
+        hf_config = DATASET_CONFIGS[dataset]
+        print(f"Loading {dataset.upper()} ({split}) for BPE tokenization (tiktoken)...")
 
         if DATASETS_AVAILABLE:
-            dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split=split, cache_dir=cache_dir)
-            texts = [item['text'] for item in dataset if len(item['text'].strip()) > 0]
+            dataset_obj = load_dataset('wikitext', hf_config, split=split, cache_dir=cache_dir)
+            texts = [item['text'] for item in dataset_obj if len(item['text'].strip()) > 0]
             full_text = '\n\n'.join(texts)
         else:
             print("  (Using direct download fallback)")
-            wikitext_data = _download_wikitext2_fallback(cache_dir)
+            if dataset == 'wikitext-103':
+                wikitext_data = _download_wikitext103_fallback(cache_dir)
+            else:
+                wikitext_data = _download_wikitext2_fallback(cache_dir)
             full_text = wikitext_data[split]
 
         # Clean up processed WikiText artifacts (fallback URL has processed version)
@@ -1146,9 +1227,10 @@ def create_dataloaders(
     num_workers: int = 0,
     cache_dir: Optional[str] = None,
     tokenizer_name: str = 'gpt2',
+    dataset: str = 'wikitext-2',
 ) -> Tuple[DataLoader, DataLoader, int]:
     """
-    Create train and validation dataloaders for WikiText-2.
+    Create train and validation dataloaders for WikiText.
 
     Uses tiktoken (OpenAI's fast tokenizer) if available, falls back to
     transformers if not. Tiktoken is preferred as it has no heavy dependencies.
@@ -1160,6 +1242,7 @@ def create_dataloaders(
         num_workers: Number of data loading workers
         cache_dir: Optional cache directory
         tokenizer_name: HuggingFace tokenizer name (only used if tiktoken unavailable)
+        dataset: 'wikitext-2' (~2M tokens) or 'wikitext-103' (~103M tokens)
 
     Returns:
         train_loader: Training dataloader
@@ -1171,6 +1254,7 @@ def create_dataloaders(
         ...     max_seq_len=128,
         ...     batch_size=8,
         ...     vocab_size=5000,
+        ...     dataset='wikitext-103',  # Use larger dataset
         ... )
         >>> for batch_idx, (input_ids, target_ids) in enumerate(train_loader):
         ...     # input_ids: (B, T), target_ids: (B, T)
@@ -1185,11 +1269,12 @@ def create_dataloaders(
             "  pip install transformers  (alternative - heavier)"
         )
 
+    dataset_upper = dataset.upper()
     print("="*70)
     if TIKTOKEN_AVAILABLE:
-        print("CREATING WIKITEXT-2 DATALOADERS (BPE via tiktoken)")
+        print(f"CREATING {dataset_upper} DATALOADERS (BPE via tiktoken)")
     else:
-        print("CREATING WIKITEXT-2 DATALOADERS (BPE via transformers)")
+        print(f"CREATING {dataset_upper} DATALOADERS (BPE via transformers)")
     print("="*70)
     if not DATASETS_AVAILABLE:
         print("(Using direct download fallback - datasets package not available)")
@@ -1203,6 +1288,7 @@ def create_dataloaders(
             max_seq_len=max_seq_len,
             vocab_size=vocab_size,
             cache_dir=cache_dir,
+            dataset=dataset,
         )
 
         # Get vocab mapping from train to ensure consistency
@@ -1214,6 +1300,7 @@ def create_dataloaders(
             vocab_size=vocab_size,
             cache_dir=cache_dir,
             vocab_mapping=train_vocab_mapping,  # Use train's mapping!
+            dataset=dataset,
         )
     else:
         train_dataset = WikiText2Dataset(
