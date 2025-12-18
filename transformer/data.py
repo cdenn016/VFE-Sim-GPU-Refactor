@@ -44,7 +44,8 @@ try:
 except ImportError:
     DATASETS_AVAILABLE = False
     load_dataset = None  # Will use fallback
-except Exception:
+except Exception as e:
+    print(f"Warning: datasets import failed with: {e}")
     DATASETS_AVAILABLE = False
     load_dataset = None
 
@@ -590,6 +591,7 @@ class WikiText2TiktokenDataset(Dataset):
         # Load dataset
         hf_config = DATASET_CONFIGS[dataset]
         print(f"Loading {dataset.upper()} ({split}) for BPE tokenization (tiktoken)...")
+        print(f"  DATASETS_AVAILABLE={DATASETS_AVAILABLE}")
 
         if DATASETS_AVAILABLE:
             dataset_obj = load_dataset('wikitext', hf_config, split=split, cache_dir=cache_dir)
