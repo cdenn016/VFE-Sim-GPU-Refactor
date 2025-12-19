@@ -928,7 +928,7 @@ def run_single_experiment(
 
     Args:
         config: Configuration dictionary
-        ffn_mode: FFN mode ('learned' or 'variational_gradient_engine')
+        ffn_mode: FFN mode ('VFE_dynamic')
         device: Device to train on
         checkpoint_dir: Directory to save checkpoints
         use_wandb: Whether to use Weights & Biases logging
