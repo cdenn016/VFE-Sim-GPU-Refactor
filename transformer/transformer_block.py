@@ -113,6 +113,8 @@ class GaugeTransformerBlock(nn.Module):
         # Sparse attention
         attention_pattern: str = 'full',
         attention_window: int = 64,
+        # Gauge frame dimension
+        phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
     ):
         """
         Initialize gauge transformer block.
@@ -225,12 +227,13 @@ class GaugeTransformerBlock(nn.Module):
         # =====================================================================
         # Optional: Gauge Frame Evolution
         # =====================================================================
+        self.phi_dim = phi_dim
         if evolve_phi:
-            # Small FFN for φ evolution (3-dim output in so(3))
+            # Small FFN for φ evolution (phi_dim output in so(n))
             self.phi_ffn = nn.Sequential(
                 nn.Linear(embed_dim, 16),
                 nn.Tanh(),
-                nn.Linear(16, 3),
+                nn.Linear(16, phi_dim),
             )
             # Initialize to near-zero to start with identity frames
             nn.init.zeros_(self.phi_ffn[2].weight)
@@ -519,6 +522,8 @@ class GaugeTransformerStack(nn.Module):
         # Sparse attention
         attention_pattern: str = 'full',
         attention_window: int = 64,
+        # Gauge frame dimension
+        phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
     ):
         """
         Initialize stack of transformer blocks.
@@ -532,7 +537,8 @@ class GaugeTransformerStack(nn.Module):
             dropout: Dropout probability
             evolve_sigma: If True, covariances evolve through layers
             evolve_phi: If True, gauge frames evolve through layers
-            generators: SO(3) generators (for variational/hamiltonian FFN)
+            generators: Lie algebra generators (for variational/hamiltonian FFN)
+            phi_dim: Dimension of gauge frame (3 for SO(3), N(N-1)/2 for SO(N))
             ffn_mode: 'learned'/'standard', 'VFE'/'variational_gradient_engine', 'VFE_dynamic', 'hamiltonian'
             ffn_alpha: Prior weight (variational/hamiltonian)
             ffn_tau_eff: Temperature (variational)
@@ -608,6 +614,8 @@ class GaugeTransformerStack(nn.Module):
                 # Sparse attention
                 attention_pattern=attention_pattern,
                 attention_window=attention_window,
+                # Gauge frame dimension
+                phi_dim=phi_dim,
             )
             for _ in range(n_layers)
         ])

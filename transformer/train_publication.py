@@ -277,12 +277,145 @@ GPU_OPTIMIZED_CONFIG = {
         ('ℓ2', 5, 5),   # 90 dimensions (rank-2 tensors)
     ],
 
+    # =================================================================
+    # GAUGE GROUP SELECTION
+    # =================================================================
+    # SO3: Standard SO(3) gauge group with 3 generators
+    #      Requires embed_dim = sum(mult * dim) for irrep_spec or odd embed_dim
+    # SON: SO(N) gauge group with N(N-1)/2 generators
+    #      More flexible - can use N-dimensional fundamental representation
+    #      embed_dim = mult * N for direct sums of fundamental
+    # =================================================================
+    'gauge_group': 'SO3',  # 'SO3' or 'SON'
+    'gauge_dim': 3,        # N for SO(N) - only used when gauge_group='SON'
+    'use_multi_irrep': True,  # Use block-diagonal generators from irrep_spec
+
     # RG Metrics Configuration (meta-agent emergence detection)
     'compute_rg_metrics': False,           # Enable RG metrics computation
     'rg_metrics_interval': 25,            # Compute RG metrics every N steps
     'rg_auto_cluster': True,              # Auto-detect clusters via spectral clustering
     'rg_n_clusters': None,                # Fixed number of clusters (None = auto)
 }
+
+# =============================================================================
+# ORIGINAL PUBLICATION CONFIG (CPU/low-end GPU)
+# =============================================================================
+PUBLICATION_CONFIG = {
+    # Model architecture (minimal but meaningful)
+    'vocab_size': 200,        # Byte-level vocab (up to 256). Set 100-256 for experiments.
+    'embed_dim': 21,          # K=21 (ODD - required for SO(3) irreps!)
+    'n_layers': 3,            # Depth for non-trivial learning
+    'hidden_dim': 84,         # 4×embed_dim
+    'max_seq_len': 32,        # N=32 (key: enough for patterns!)
+
+    # Gauge transformer parameters
+    'kappa_beta': 1,
+    'epsilon': 1e-8,
+    'pos_encoding_mode': 'learned',
+    'evolve_sigma': False,  # Auto-enabled for variational_gradient_engine mode
+    'evolve_phi': False,    # Keep simple for publication
+    'tie_embeddings': True,
+
+    # Attention pattern (full for small N=32)
+    'attention_pattern': 'full',
+    'attention_window': 32,
+    'attention_global_tokens': 0,
+
+    # Sigma gradient from alignment (theoretical correctness)
+    'compute_sigma_align_grad': True,  # Enables proper uncertainty propagation
+
+    # Fast matrix exponential (speed optimization - off by default for accuracy)
+    'use_fast_exp': False,
+    'exp_order': 4,
+
+    # Variational FFN parameters (will be varied in ablation study)
+    'ffn_mode': 'variational_gradient_engine',        # Default: will be overridden in ablation
+    'ffn_alpha': 0.2,             # Prior weight (balanced)
+    'ffn_tau_eff': 1.0,           # Temperature
+    'ffn_kappa': 1.0,             # Softmax temperature
+    'ffn_n_iterations': 1,        # Single inference step per forward pass
+    'ffn_learnable_lr': True,     # Learn step size for variational descent
+
+    # Sparse variational inference (full for N=32)
+    'ffn_pattern': 'full',
+    'ffn_window': 32,
+
+    # Hamiltonian FFN parameters
+    'ffn_hamiltonian_dt': 0.01,           # Leapfrog time step
+    'ffn_hamiltonian_n_steps': 10,        # Integration steps per forward pass
+    'ffn_hamiltonian_momentum_scale': 0.1, # Initial momentum scale
+    'ffn_hamiltonian_gamma': 1.0,         # Damping (0 = pure Hamiltonian, >0 = Langevin-like)
+
+    # Hamiltonian Mass Configuration (from "The Inertia of Belief" paper, Eq. 20)
+    # M_i = Λ_{pi} + Λ_{oi} + Σ_k β_{ik} Λ̃_{qk} + Σ_j β_{ji} Λ_{qi}
+    # Each term can be toggled independently for ablation studies
+    'ffn_hamiltonian_mass_use_prior': True,           # Λ_p: Prior precision (default: True)
+    'ffn_hamiltonian_mass_use_observation': False,    # Λ_o: Observation precision (sensory grounding)
+    'ffn_hamiltonian_mass_use_incoming_social': False, # Σβ_{ik}Λ̃_{qk}: Being pulled toward neighbors
+    'ffn_hamiltonian_mass_use_outgoing_recoil': False, # Σβ_{ji}Λ_{qi}: Newton's 3rd law recoil
+    'ffn_hamiltonian_evolve_mass': False,             # Recompute M at each leapfrog step (full theory)
+
+    # Gauge-Fixed Priors (for restoring gauge covariance)
+    # When enabled, priors are p_i = R_i ▷ p_0 where R_i = exp(φ_i · T)
+    # This guarantees p_i = Ω_ij[p_j], making prior-anchoring gauge covariant
+    'gauge_fixed_priors': False,                      # Use SO(3)-rotated base prior
+
+    # Training (optimized for convergence)
+    'batch_size': 8,             # Larger batches for stability
+    'max_steps': 5000,              # Adjusted for ~2 hour runtime
+
+    # Natural gradient learning rates (balanced for fast convergence)
+    'mu_lr':    0.25,                # Belief means
+    'sigma_lr': 0.05,            # Belief covariances
+    'phi_lr':   0.1,               # Gauge transformations
+    'ffn_lr':   0.25,              # FFN parameters (if learned mode)
+
+    'warmup_steps': 4,          # Gradual warmup for stability
+
+    # Free energy weights (balanced gauge-theoretic learning)
+    'alpha': 0.2,                # Self-consistency regularization
+    'beta': 1,                  # Belief alignment (key gauge term)
+    'lambda_gamma': 1,          # Model alignment (disabled)
+    'kappa_gamma': 1.0,         # Temperature for γ_ij coupling
+
+    # Regularization (light for small model)
+    'weight_decay': 0.01,
+    'dropout': 0.1,
+    'grad_clip': 0.0,
+
+    # Logging (frequent for publication plots)
+    'log_interval': 1,
+    'eval_interval': 2,          # Eval every 50 steps
+    'checkpoint_interval': 15,
+    'patience': 3,               # Early stopping patience
+
+    # Irrep structure (for K=21)
+    'irrep_spec': [
+        ('ℓ0', 5, 1),    # 5 dimensions (scalars)
+        ('ℓ1', 2, 3),    # 6 dimensions (vectors)
+        ('ℓ2', 2, 5),    # 10 dimensions (tensors)
+        # Total: 5 + 6 + 10 = 21 ✓
+    ],
+
+    # =================================================================
+    # GAUGE GROUP SELECTION
+    # =================================================================
+    # SO3: Standard SO(3) gauge group with 3 generators
+    #      Requires embed_dim = sum(mult * dim) for irrep_spec or odd embed_dim
+    # SON: SO(N) gauge group with N(N-1)/2 generators
+    #      More flexible - can use N-dimensional fundamental representation
+    # =================================================================
+    'gauge_group': 'SO3',  # 'SO3' or 'SON'
+    'gauge_dim': 3,        # N for SO(N) - only used when gauge_group='SON'
+    'use_multi_irrep': True,  # Use block-diagonal generators from irrep_spec
+
+    # RG Metrics Configuration (meta-agent emergence detection)
+    'compute_rg_metrics': True,           # Enable RG metrics computation
+    'rg_metrics_interval': 100,           # Compute RG metrics every N steps
+    'rg_auto_cluster': True,              # Auto-detect clusters via spectral clustering
+    'rg_n_clusters': None,                # Fixed number of clusters (None = auto)
+}
+
 
 class PublicationMetricsTracker:
     """Track ALL metrics needed for publication."""

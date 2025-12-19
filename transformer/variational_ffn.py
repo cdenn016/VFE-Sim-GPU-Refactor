@@ -81,8 +81,8 @@ def compute_vfe_gradients_gpu(
     mu_p: torch.Tensor,        # (B, N, K) prior means
     sigma_p: torch.Tensor,     # (B, N, K) diagonal or (B, N, K, K) full
     beta: torch.Tensor,        # (B, N, N) attention weights
-    phi: torch.Tensor,         # (B, N, 3) gauge frames
-    generators: torch.Tensor,  # (3, K, K) SO(3) generators
+    phi: torch.Tensor,         # (B, N, n_gen) gauge frames where n_gen is # of generators
+    generators: torch.Tensor,  # (n_gen, K, K) Lie algebra generators (SO(3) or SO(N))
     alpha: float = 0.01,       # Self-coupling weight (KL(q||p))
     lambda_belief: float = 1.0,  # Belief alignment weight
     kappa: float = 1.0,        # Temperature (for normalization)
@@ -96,6 +96,9 @@ def compute_vfe_gradients_gpu(
     This is the FAST version that replaces the NumPy-based gradient_engine.
     Fully vectorized - no loops over batch or agents!
 
+    Supports both SO(3) and SO(N) gauge groups. The number of generators
+    determines the gauge group: 3 for SO(3), N(N-1)/2 for SO(N).
+
     Gradients computed:
     1. Self-coupling: ∂/∂μ_q [α · KL(q||p)]
     2. Belief alignment: ∂/∂μ_q [λ · Σ_j β_ij · KL(q_i || Ω_ij q_j)]
@@ -106,8 +109,8 @@ def compute_vfe_gradients_gpu(
         mu_p: Prior means (B, N, K)
         sigma_p: Prior variances - diagonal (B, N, K) or full (B, N, K, K)
         beta: Attention weights (B, N, N), already normalized
-        phi: Gauge frames (B, N, 3)
-        generators: SO(3) generators (3, K, K)
+        phi: Gauge frames (B, N, n_gen) where n_gen is # of generators
+        generators: Lie algebra generators (n_gen, K, K) - SO(3) has 3, SO(N) has N(N-1)/2
         alpha: Weight for KL(q||p) self-coupling term
         lambda_belief: Weight for belief alignment term
         kappa: Temperature parameter

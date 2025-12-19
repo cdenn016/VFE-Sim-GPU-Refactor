@@ -61,6 +61,7 @@ class GaugeTokenEmbedding(nn.Module):
         diagonal_covariance: bool = False,
         max_seq_len: int = 2048,
         use_positional_embedding: bool = False,
+        phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
     ):
         """
         Initialize gauge token embedding.
@@ -68,22 +69,23 @@ class GaugeTokenEmbedding(nn.Module):
         Args:
             vocab_size: Number of tokens in vocabulary
             embed_dim: Embedding dimension K (fiber dimension)
-            irrep_spec: List of (label, multiplicity, dim) for SO(3) irreps
+            irrep_spec: List of (label, multiplicity, dim) for SO(3)/SO(N) irreps
             init_std: Std dev for initializing mean embeddings
             init_sigma_scale: Initial scale for covariance (σ in σ²I)
             learnable_sigma: If True, Σ evolves during training
             learnable_phi: If True, φ evolves during training
-            gauge_fixed_priors: If True, priors are defined as SO(3) rotations of a
+            gauge_fixed_priors: If True, priors are defined as SO(N) rotations of a
                                single base prior: p_i = R_i ▷ p_0. This guarantees
                                gauge covariance: p_i = Ω_ij[p_j] where Ω_ij = R_i R_j^{-1}.
                                Requires generators for computing rotations.
-            generators: SO(3) generators (3, K, K), required if gauge_fixed_priors=True
+            generators: Lie algebra generators (n_gen, K, K), required if gauge_fixed_priors=True
             diagonal_covariance: If True, output sigma as (B,N,K) diagonal variances
                                 instead of (B,N,K,K) full matrices. Saves O(K) memory.
             max_seq_len: Maximum sequence length for positional embeddings
             use_positional_embedding: If True, add learnable positional embeddings to μ
                                      (like standard transformers). This provides position
                                      info in the content while keeping gauge transport Ω_ij.
+            phi_dim: Dimension of gauge frame φ. 3 for SO(3), N(N-1)/2 for SO(N).
         """
         super().__init__()
         self.vocab_size = vocab_size
@@ -114,6 +116,7 @@ class GaugeTokenEmbedding(nn.Module):
             diagonal_covariance = False
 
         self.diagonal_covariance = diagonal_covariance
+        self.phi_dim = phi_dim
 
         if gauge_fixed_priors and generators is None:
             raise ValueError("gauge_fixed_priors=True requires generators to be provided")
@@ -158,7 +161,7 @@ class GaugeTokenEmbedding(nn.Module):
             )
 
         # =================================================================
-        # Gauge Frame Embeddings φ_i ∈ so(3)
+        # Gauge Frame Embeddings φ_i ∈ so(n)
         # =================================================================
         # Initialize at zero (identity frame exp(0) = I)
         # When gauge_fixed_priors=True, these define both the gauge frame
@@ -166,11 +169,11 @@ class GaugeTokenEmbedding(nn.Module):
 
         if learnable_phi or gauge_fixed_priors:
             # Per-token gauge frame (required for gauge_fixed_priors)
-            self.phi_embed = nn.Embedding(vocab_size, 3)  # so(3) is 3D
+            self.phi_embed = nn.Embedding(vocab_size, phi_dim)  # so(n) has phi_dim components
             nn.init.zeros_(self.phi_embed.weight)
         else:
             # All tokens start at identity frame
-            self.register_buffer('phi_base', torch.zeros(3))
+            self.register_buffer('phi_base', torch.zeros(phi_dim))
 
         # =================================================================
         # Positional Embeddings (optional, like standard transformers)
@@ -197,7 +200,8 @@ class GaugeTokenEmbedding(nn.Module):
             mu: (batch, num_agents, K) mean beliefs (one per agent, NOT per spatial point)
             sigma: (batch, num_agents, K, K) covariances if diagonal_covariance=False
                    (batch, num_agents, K) diagonal variances if diagonal_covariance=True
-            phi: (batch, num_agents, 3) gauge frames (one per agent)
+            phi: (batch, num_agents, phi_dim) gauge frames (one per agent)
+                 phi_dim = 3 for SO(3), N(N-1)/2 for SO(N)
 
         NOTE: seq_len = number of agents at the single point c*
               This is NOT a spatial dimension!
@@ -380,11 +384,14 @@ class GaugePositionalEncoding(nn.Module):
 
     Composition modes:
         - 'add': φ_combined = φ_base + φ_pos (valid for small angles)
-        - 'bch1': φ_combined = φ_base + φ_pos + ½[φ_base, φ_pos] (BCH order 1)
-        - 'bch2': Higher-order BCH correction
-        - 'exact': Full SO(3) composition via exp → multiply → log
+        - 'bch1': φ_combined = φ_base + φ_pos + ½[φ_base, φ_pos] (BCH order 1) [SO(3) only]
+        - 'bch2': Higher-order BCH correction [SO(3) only]
+        - 'exact': Full SO(3) composition via exp → multiply → log [SO(3) only]
 
-    This is analogous to standard positional encoding, but in so(3) instead of ℝ^K.
+    For SO(N) with N > 3, only 'add' composition is supported since the BCH formula
+    requires Lie bracket computation which differs for so(N).
+
+    This is analogous to standard positional encoding, but in so(n) instead of ℝ^K.
     """
 
     def __init__(
@@ -393,6 +400,7 @@ class GaugePositionalEncoding(nn.Module):
         mode: str = 'learned',
         scale: float = 0.1,
         composition: str = 'bch1',
+        phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
     ):
         """
         Initialize positional encoding in gauge space.
@@ -403,54 +411,64 @@ class GaugePositionalEncoding(nn.Module):
             scale: Scaling factor for positional encodings
             composition: How to combine token φ with positional φ:
                 - 'add': Simple addition (φ_base + φ_pos) - fast but only valid for small angles
-                - 'bch1': BCH order 1 correction (φ_base + φ_pos + ½[φ_base, φ_pos])
-                - 'bch2': BCH order 2 correction (more accurate for larger angles)
-                - 'exact': Full SO(3) composition via exp → multiply → log
+                - 'bch1': BCH order 1 correction (SO(3) only)
+                - 'bch2': BCH order 2 correction (SO(3) only)
+                - 'exact': Full SO(3) composition (SO(3) only)
+            phi_dim: Dimension of gauge frame φ. 3 for SO(3), N(N-1)/2 for SO(N).
         """
         super().__init__()
         self.max_seq_len = max_seq_len
         self.mode = mode
         self.scale = scale
+        self.phi_dim = phi_dim
+
+        # For SO(N) with N > 3, only 'add' composition is supported
+        if phi_dim != 3 and composition not in ['add']:
+            print(f"[WARNING] Composition '{composition}' only supported for SO(3) (phi_dim=3). "
+                  f"Falling back to 'add' for phi_dim={phi_dim}.")
+            composition = 'add'
         self.composition = composition
 
         if mode == 'learned':
             # Learnable agent-index-specific gauge biases
-            # Each agent index i gets a unique φ_pos(i) ∈ so(3)
-            self.pos_phi = nn.Parameter(torch.randn(max_seq_len, 3) * scale)
+            # Each agent index i gets a unique φ_pos(i) ∈ so(n)
+            self.pos_phi = nn.Parameter(torch.randn(max_seq_len, phi_dim) * scale)
 
         elif mode == 'sinusoidal':
-            # Sinusoidal encoding projected to so(3)
+            # Sinusoidal encoding projected to so(n)
             # Fixed (not learnable)
-            self.register_buffer('pos_phi', self._make_sinusoidal(max_seq_len, scale))
+            self.register_buffer('pos_phi', self._make_sinusoidal(max_seq_len, scale, phi_dim))
 
         else:
             raise ValueError(f"Unknown mode: {mode}. Use 'learned' or 'sinusoidal'.")
 
-    def _make_sinusoidal(self, max_len: int, scale: float) -> torch.Tensor:
+    def _make_sinusoidal(self, max_len: int, scale: float, phi_dim: int = 3) -> torch.Tensor:
         """
-        Create sinusoidal positional encoding in so(3).
+        Create sinusoidal positional encoding in so(n).
 
         This encodes agent index i, not spatial position!
 
         Formula (adapted from Transformer):
-            φ_pos[i, 0] = scale * sin(i / 10000^(0/3))
-            φ_pos[i, 1] = scale * sin(i / 10000^(1/3))
-            φ_pos[i, 2] = scale * cos(i / 10000^(2/3))
+            For each dimension d in [0, phi_dim):
+            φ_pos[i, d] = scale * sin/cos(i / 10000^(d/phi_dim))
 
         Args:
             max_len: Maximum sequence length
             scale: Scaling factor
+            phi_dim: Dimension of gauge frame (3 for SO(3), N(N-1)/2 for SO(N))
 
         Returns:
-            pos_phi: (max_len, 3) positional gauge frames
+            pos_phi: (max_len, phi_dim) positional gauge frames
         """
         position = torch.arange(max_len, dtype=torch.float32).unsqueeze(1)  # (L, 1)
-        div_term = torch.exp(torch.arange(0, 3, 1, dtype=torch.float32) * -(np.log(10000.0) / 3))
+        div_term = torch.exp(torch.arange(0, phi_dim, 1, dtype=torch.float32) * -(np.log(10000.0) / phi_dim))
 
-        phi = torch.zeros(max_len, 3)
-        phi[:, 0] = torch.sin(position.squeeze() * div_term[0])
-        phi[:, 1] = torch.sin(position.squeeze() * div_term[1])
-        phi[:, 2] = torch.cos(position.squeeze() * div_term[2])
+        phi = torch.zeros(max_len, phi_dim)
+        for d in range(phi_dim):
+            if d % 2 == 0:
+                phi[:, d] = torch.sin(position.squeeze() * div_term[d])
+            else:
+                phi[:, d] = torch.cos(position.squeeze() * div_term[d])
 
         return phi * scale
 
@@ -463,7 +481,7 @@ class GaugePositionalEncoding(nn.Module):
             device: Device to place output on
 
         Returns:
-            pos_phi: (num_agents, 3) agent-index-dependent gauge frames
+            pos_phi: (num_agents, phi_dim) agent-index-dependent gauge frames
 
         NOTE: This is NOT a spatial field! Just one φ per agent index.
         """
@@ -473,7 +491,7 @@ class GaugePositionalEncoding(nn.Module):
                 f"Increase max_seq_len in config."
             )
 
-        pos_phi = self.pos_phi[:num_agents]  # (N, 3)
+        pos_phi = self.pos_phi[:num_agents]  # (N, phi_dim)
 
         if device is not None:
             pos_phi = pos_phi.to(device)
@@ -487,27 +505,30 @@ class GaugePositionalEncoding(nn.Module):
         device: Optional[torch.device] = None
     ) -> torch.Tensor:
         """
-        Compose token gauge frames with positional gauge frames using proper SO(3) composition.
+        Compose token gauge frames with positional gauge frames using proper Lie group composition.
 
-        Instead of φ_combined = φ + φ_pos (which violates group structure),
-        this method uses the BCH formula or exact SO(3) composition.
+        For SO(3): Uses BCH formula or exact composition.
+        For SO(N) with N > 3: Uses simple addition (valid for small angles).
 
         Args:
-            phi: Token gauge frames, shape (B, N, 3)
+            phi: Token gauge frames, shape (B, N, phi_dim)
             num_agents: Number of agents (sequence length)
             device: Device to place output on
 
         Returns:
-            phi_combined: Composed gauge frames, shape (B, N, 3)
+            phi_combined: Composed gauge frames, shape (B, N, phi_dim)
 
         Mathematical background:
             In SO(3), the correct composition is R_combined = exp(φ) · exp(φ_pos)
             In so(3), this is NOT simply φ + φ_pos. The BCH formula gives:
             log(exp(X)·exp(Y)) = X + Y + ½[X,Y] + (1/12)[X,[X,Y]] - (1/12)[Y,[X,Y]] + ...
             For so(3), the Lie bracket is the cross product: [X,Y] = X × Y
+
+            For SO(N) with N > 3, the Lie bracket is [X,Y] = XY - YX, which is more
+            complex. We use simple addition for these cases (valid for small angles).
         """
-        pos_phi = self.forward(num_agents, device)  # (N, 3)
-        pos_phi = pos_phi.unsqueeze(0).expand(phi.shape[0], -1, -1)  # (B, N, 3)
+        pos_phi = self.forward(num_agents, device)  # (N, phi_dim)
+        pos_phi = pos_phi.unsqueeze(0).expand(phi.shape[0], -1, -1)  # (B, N, phi_dim)
 
         if self.composition == 'add':
             # Simple addition (original behavior, valid for small angles only)
