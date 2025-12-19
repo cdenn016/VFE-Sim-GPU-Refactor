@@ -230,6 +230,7 @@ def compute_attention_weights(
     return_kl: bool = False,   # Return KL matrix for loss computation
     diagonal_covariance: bool = False,  # Use diagonal sigma (B,N,K) instead of full (B,N,K,K)
     cached_transport: Optional[dict] = None,  # Precomputed transport operators (from compute_transport_operators)
+    self_attention_penalty: float = 1.0,  # Penalty for self-attention (prevents diagonal dominance)
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Compute attention weights from KL divergences (0D version).
@@ -323,6 +324,21 @@ def compute_attention_weights(
 
     # Attention logits: -KL / κ (more similar = less KL = higher attention)
     logits = -kl_matrix / kappa  # (B, N, N)
+
+    # ==========================================================================
+    # SELF-ATTENTION PENALTY: Prevent diagonal from dominating
+    # Self-attention always has KL=0 (since KL(q_i||q_i)=0), which makes the
+    # diagonal dominate when kappa is small. For high-dimensional irreps (K>10),
+    # this can cause attention to collapse to pure self-attention.
+    # Adding a penalty to the diagonal encourages attending to other tokens.
+    # ==========================================================================
+    if self_attention_penalty > 0:
+        # Add penalty to diagonal (makes self-attention less attractive)
+        # Penalty is in logit units: -penalty means self-attention logit = -penalty
+        # instead of 0, equivalent to having KL = penalty * kappa for self-attention
+        B, N, _ = logits.shape
+        diag_idx = torch.arange(N, device=logits.device)
+        logits[:, diag_idx, diag_idx] = logits[:, diag_idx, diag_idx] - self_attention_penalty
 
     # Apply causal mask if provided
     if mask is not None:
@@ -1205,6 +1221,7 @@ class IrrepMultiHeadAttention(nn.Module):
         gauge_group: str = 'SO3',  # 'SO3' or 'SON'
         gauge_dim: int = 3,        # N for SO(N) - only used when gauge_group='SON'
         global_generators: Optional[torch.Tensor] = None,  # (n_gen, K, K) for SO(N) mode
+        self_attention_penalty: float = 1.0,  # Penalty for self-attention (prevents diagonal dominance)
     ):
         """
         Initialize irrep-structured multi-head attention.
@@ -1242,6 +1259,7 @@ class IrrepMultiHeadAttention(nn.Module):
         self.attention_window = attention_window
         self.use_fast_exp = use_fast_exp
         self.exp_order = exp_order
+        self.self_attention_penalty = self_attention_penalty
 
         # Build irrep block structure
         self.irrep_dims = []
@@ -1466,6 +1484,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     return_kl=True,
                     diagonal_covariance=self.diagonal_covariance,
                     cached_transport=head_cached_transport,
+                    self_attention_penalty=self.self_attention_penalty,
                 )  # (B, N, N), (B, N, N)
                 all_attention_weights.append(beta_head)
                 all_kl_matrices.append(kl_head)
@@ -1482,6 +1501,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     return_kl=False,
                     diagonal_covariance=self.diagonal_covariance,
                     cached_transport=head_cached_transport,
+                    self_attention_penalty=self.self_attention_penalty,
                 )  # (B, N, N)
                 kl_head = None  # Not computed
 
