@@ -6,26 +6,15 @@ Created on Thu Dec 11 19:24:37 2025
 """
 
 """
-Publication Proof-of-Principle Training Script
-===============================================
+Publication Training Script
+============================
 
-Language modeling on WikiText-2 with byte-level encoding for minimal publishable claim.
+Language modeling on WikiText-2/103 with BPE encoding.
 
 Demonstrates:
-1. Variational FFN works - inference comparable to learned MLP
+1. VFE_dynamic FFN - dynamic attention-belief co-evolution
 2. Architecture is trainable - converges to reasonable performance
 3. Theoretical framework is sound - gauge-invariant inference holds
-4. Hamiltonian dynamics - energy-conserving symplectic integration (NEW!)
-
-Five FFN Modes for Ablation Study:
-    - learned: Standard MLP baseline (GELU activation)
-    - variational_approx: First-order active inference (O(N²K), legacy)
-    - variational_full: Complete gauge-invariant with second-order terms (O(N³K), legacy)
-    - variational_gradient_engine: Full active inference via gradient_engine.py
-    - hamiltonian: Symplectic Hamiltonian dynamics on belief space (NEW!)
-      * Energy-conserving leapfrog integration
-      * Full faithful SPD geometry with curvature corrections
-      * NO learned weights - pure physics!
 
 Comprehensive Metrics Tracking:
     - Free energy components (α, β, γ terms)
@@ -34,21 +23,15 @@ Comprehensive Metrics Tracking:
     - Bits-per-character (BPC)
     - Attention statistics (β_mean, KL_mean)
     - Performance (step time, tokens/sec)
-    - Hamiltonian diagnostics (H_init, H_final, ΔH) for hamiltonian mode
 
 Output Files:
     - checkpoints_publication/ffn_{mode}/metrics.csv - comprehensive training metrics
     - checkpoints_publication/ffn_{mode}/best_model.pt - best model checkpoint
-    - checkpoints_publication/result_{mode}.json - final summary (if single mode)
-    - checkpoints_publication/ablation_results.json - comparison (if --run_ablation)
+    - checkpoints_publication/result_{mode}.json - final summary
 
 Usage:
-    # Just click Run (edit defaults below)
     python transformer/train_publication.py
-
-    # Or use command-line args:
-    python transformer/train_publication.py --ffn_mode learned
-    python transformer/train_publication.py --ffn_mode hamiltonian
+    python transformer/train_publication.py --ffn_mode VFE_dynamic
 
 Author: Designed for minimal publishable claim
 Date: December 2025
@@ -71,7 +54,7 @@ from transformer.model import GaugeTransformerLM
 from transformer.data import create_dataloaders, create_char_dataloaders
 from transformer.train import compute_free_energy_loss, compute_rg_metrics_from_attention
 from transformer.train_fast import FastTrainer, FastTrainingConfig
-from transformer.publication_metrics import PublicationMetrics, AblationConfig, AblationResult
+from transformer.publication_metrics import PublicationMetrics
 
 
 def get_git_info() -> Dict[str, str]:
@@ -173,9 +156,8 @@ def save_experiment_config(
 # ============================================================================
 # EDIT THESE DEFAULTS TO RUN WITHOUT COMMAND-LINE ARGS
 # ============================================================================
-DEFAULT_FFN_MODE = 'VFE_dynamic'  # 'learned', 'VFE_dynamic', 'variational_gradient_engine', 'hamiltonian', or None
-DEFAULT_RUN_ABLATION = False  # Set True to run all three modes
-DEFAULT_ENABLE_SIGMA_PHI = True   # Set True to enable learning Σ and φ (required for hamiltonian!)
+DEFAULT_FFN_MODE = 'VFE_dynamic'  # VFE_dynamic is the recommended mode
+DEFAULT_ENABLE_SIGMA_PHI = True   # Set True to enable learning Σ and φ
 DEFAULT_USE_GPU_OPTIMIZED = True  # Set True for RTX 5090 / high-end GPU settings
 # ============================================================================
 
@@ -259,26 +241,6 @@ GPU_OPTIMIZED_CONFIG = {
     'ffn_learnable_lr': True,
     'ffn_pattern': 'full',
     'ffn_window': 64,
-
-    # Hamiltonian FFN parameters
-    # =========================================================================
-    # SPEED vs PHYSICS FIDELITY TRADEOFF:
-    #   n_steps=2  → Fast (~0.1-0.3s/step), good for development
-    #   n_steps=10 → Moderate (~1-2s/step), reasonable physics
-    #   n_steps=25 → Slow (~3-5s/step), high physics fidelity
-    # The leapfrog loop is sequential - GPU can't parallelize it!
-    # For full GPU utilization: use ffn_mode='learned' instead
-    # =========================================================================
-    'ffn_hamiltonian_dt': 0.01,           # Larger dt works with fewer steps
-    'ffn_hamiltonian_n_steps': 5,         # TOGGLE THIS for speed vs physics!
-    'ffn_hamiltonian_momentum_scale': 0.01,
-    'ffn_hamiltonian_gamma': 0.0,
-    'ffn_hamiltonian_mass_use_prior': True,
-    'ffn_hamiltonian_mass_use_observation': True,
-    'ffn_hamiltonian_mass_use_incoming_social': True,
-    'ffn_hamiltonian_mass_use_outgoing_recoil': True,
-    'ffn_hamiltonian_evolve_mass': True,
-    'gauge_fixed_priors': True,
 
     # Training (scaled for GPU)
     'max_steps': 5000 ,         # More steps for convergence
@@ -453,7 +415,6 @@ PUBLICATION_CONFIG = {
     'rg_auto_cluster': True,              # Auto-detect clusters via spectral clustering
     'rg_n_clusters': None,                # Fixed number of clusters (None = auto)
 }
-
 
 
 class PublicationMetricsTracker:
@@ -1298,155 +1259,13 @@ def run_single_experiment(
         raise
 
 
-def run_ablation_study(
-    device: torch.device,
-    checkpoint_dir: Path,
-    use_wandb: bool = False,
-    enable_sigma_phi: bool = False,
-    args: argparse.Namespace = None,
-) -> List[Dict]:
-    """
-    Run complete ablation study across all three FFN modes.
-
-    Args:
-        device: Device to train on
-        checkpoint_dir: Directory to save checkpoints
-        use_wandb: Whether to use Weights & Biases logging
-        enable_sigma_phi: Enable learning Σ (covariances) and φ (gauge frames)
-        args: Command-line arguments for logging
-
-    Returns:
-        List of result dictionaries for each FFN mode
-    """
-    print("\n" + "="*70)
-    print("ABLATION STUDY: THREE FFN MODES")
-    print("="*70)
-
-    if enable_sigma_phi:
-        print("\n🔥 FULL GEOMETRIC LEARNING ENABLED!")
-        print("   Learning: μ (means), Σ (covariances), φ (gauge frames)")
-
-    print("\nWill run:")
-    print("  1. learned                     (baseline - standard MLP with GELU)")
-    print("  2. variational_gradient_engine (gradient-based active inference)")
-    print("  3. hamiltonian                 (symplectic dynamics - NO learned weights!)")
-    print("="*70)
-
-    modes = ['learned', 'variational_gradient_engine', 'hamiltonian']
-    results = []
-
-    for i, mode in enumerate(modes):
-        print(f"\n\n{'='*70}")
-        print(f"EXPERIMENT {i+1}/{len(modes)}: {mode}")
-        print("="*70)
-
-        config = PUBLICATION_CONFIG.copy()
-        config['ffn_mode'] = mode
-        if args is not None and hasattr(args, 'dataset'):
-            config['dataset'] = args.dataset
-
-        # Gradient engine requires additional parameters
-        if mode == 'variational_gradient_engine':
-            config.setdefault('ffn_lambda_belief', 1.0)
-            config.setdefault('ffn_lambda_prior', 0.0)
-            config.setdefault('ffn_lambda_phi', 0.0)
-            config.setdefault('ffn_update_sigma', True)
-            config['evolve_sigma'] = True  # Enable sigma evolution for full Gaussian inference
-
-        # Hamiltonian mode requires sigma evolution
-        if mode == 'hamiltonian':
-            config.setdefault('ffn_lambda_belief', 0.5)  # Moderate alignment
-            config.setdefault('ffn_update_sigma', True)
-            config['evolve_sigma'] = True  # Required for Hamiltonian dynamics
-
-        # Enable full geometric learning if requested
-        if enable_sigma_phi:
-            config['evolve_sigma'] = True
-            config['evolve_phi'] = True
-
-        result = run_single_experiment(
-            config=config,
-            ffn_mode=mode,
-            device=device,
-            checkpoint_dir=checkpoint_dir,
-            use_wandb=use_wandb,
-            args=args,
-        )
-
-        if result is not None:
-            results.append(result)
-
-    # Save combined results
-    results_file = checkpoint_dir / "ablation_results.json"
-    with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
-
-    print("\n" + "="*70)
-    print("ABLATION STUDY COMPLETE")
-    print("="*70)
-
-    # Print comparison
-    print("\nResults Comparison:")
-    print("-"*70)
-    print(f"{'Mode':<20} {'PPL':>10} {'vs Random':>12} {'vs Learned':>12}")
-    print("-"*70)
-
-    learned_ppl = None
-    for result in results:
-        mode = result['ffn_mode']
-        ppl = result['final_ppl']
-        improvement = result['improvement']
-
-        if mode == 'learned':
-            learned_ppl = ppl
-            vs_learned = "baseline"
-        elif learned_ppl is not None:
-            diff_pct = ((ppl - learned_ppl) / learned_ppl) * 100
-            vs_learned = f"+{diff_pct:.1f}%"
-        else:
-            vs_learned = "N/A"
-
-        print(f"{mode:<20} {ppl:>10.2f} {improvement:>11.1f}x {vs_learned:>12}")
-
-    print("-"*70)
-    print(f"\nSaved: {results_file}")
-
-    # Check publishable claim
-    print("\n" + "="*70)
-    print("PUBLISHABILITY CHECK")
-    print("="*70)
-
-    if learned_ppl is not None:
-        for result in results:
-            if result['ffn_mode'] == 'variational_gradient_engine':
-                mode = result['ffn_mode']
-                ppl = result['final_ppl']
-                diff_pct = ((ppl - learned_ppl) / learned_ppl) * 100
-
-                print(f"\n{mode}:")
-                print(f"  Learned PPL:     {learned_ppl:.2f}")
-                print(f"  Variational PPL: {ppl:.2f}")
-                print(f"  Difference:      +{diff_pct:.1f}%")
-
-                if diff_pct < 20:
-                    print(f"  ✓ Within 20% threshold - PUBLISHABLE!")
-                else:
-                    print(f"  ⚠ Outside 20% threshold - may need tuning")
-
-    return results
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Publication Proof-of-Principle Training')
+    parser = argparse.ArgumentParser(description='Publication Training Script')
 
     # FFN mode (uses defaults from top of file)
     parser.add_argument('--ffn_mode', type=str, default=DEFAULT_FFN_MODE,
-                        choices=['learned', 'variational_gradient_engine', 'VFE_dynamic', 'VFE_dynamic_stable', 'hamiltonian'],
-                        help='FFN mode (or use --run_ablation for all modes)')
-
-    # Ablation study (uses defaults from top of file)
-    parser.add_argument('--run_ablation', action='store_true', default=DEFAULT_RUN_ABLATION,
-                        help='Run all four FFN modes (ablation study)')
+                        choices=['VFE_dynamic'],
+                        help='FFN mode (VFE_dynamic is the recommended mode)')
 
     # Enable full geometric learning (Σ and φ)
     parser.add_argument('--enable_sigma_phi', action='store_true', default=DEFAULT_ENABLE_SIGMA_PHI,
@@ -1454,9 +1273,9 @@ def main():
 
     # GPU optimization
     parser.add_argument('--gpu_optimized', action='store_true', default=DEFAULT_USE_GPU_OPTIMIZED,
-                        help='Use GPU-optimized config (larger batch, AMP, bigger model) for RTX 5090 / high-end GPUs')
+                        help='Use GPU-optimized config for high-end GPUs')
     parser.add_argument('--no_gpu_optimized', action='store_true',
-                        help='Force use of original small config even on GPU')
+                        help='Force use of smaller config even on GPU')
 
     # System
     parser.add_argument('--device', type=str, default='auto')
@@ -1492,86 +1311,48 @@ def main():
     print("="*70)
     print(f"\nDevice: {device}")
 
-    # Select config based on GPU optimization flag
-    use_gpu_config = args.gpu_optimized and not args.no_gpu_optimized and device.type == 'cuda'
-    if use_gpu_config:
-        print("\n" + "="*70)
-        print("🚀 GPU-OPTIMIZED MODE (RTX 5090 / High-end GPU)")
-        print("="*70)
-        print("   batch_size=32, embed_dim=127, seq_len=256 (Vaswani-scale)")
-        print("   This will fully utilize your GPU!")
-        print("="*70 + "\n")
-        base_config = GPU_OPTIMIZED_CONFIG.copy()
-    else:
-        base_config = PUBLICATION_CONFIG.copy()
+    # Use GPU_OPTIMIZED_CONFIG as the base config
+    base_config = GPU_OPTIMIZED_CONFIG.copy()
 
     checkpoint_dir = Path(args.checkpoint_dir)
 
-    # Run experiments
-    if args.run_ablation:
-        # Run all three modes
-        results = run_ablation_study(
-            device=device,
-            checkpoint_dir=checkpoint_dir,
-            use_wandb=args.use_wandb,
-            enable_sigma_phi=args.enable_sigma_phi,
-            args=args,
-        )
+    # Run single mode
+    if args.ffn_mode is None:
+        print("\nError: Must specify --ffn_mode")
+        print("Edit DEFAULT_FFN_MODE at top of train_publication.py or use command-line args")
+        return
 
-    else:
-        # Run single mode
-        if args.ffn_mode is None:
-            print("\nError: Must specify --ffn_mode or --run_ablation")
-            print("Edit DEFAULT_FFN_MODE at top of train_publication.py or use command-line args")
-            return
+    config = base_config.copy()
+    config['ffn_mode'] = args.ffn_mode
+    config['dataset'] = args.dataset
 
-        config = base_config.copy()
-        config['ffn_mode'] = args.ffn_mode
-        config['dataset'] = args.dataset
+    # Enable full geometric learning if requested
+    if args.enable_sigma_phi:
+        print("\n" + "="*70)
+        print("FULL GEOMETRIC LEARNING ENABLED")
+        print("="*70)
+        print("   Learning: μ (means), Σ (covariances), φ (gauge frames)")
+        print("   This tests the FULL natural gradient framework!")
+        print("="*70 + "\n")
+        config['evolve_sigma'] = True
+        config['evolve_phi'] = True
 
-        # Gradient engine requires additional parameters
-        if args.ffn_mode == 'variational_gradient_engine':
-            config.setdefault('ffn_lambda_belief', 1.0)
-            config.setdefault('ffn_lambda_prior', 0.0)
-            config.setdefault('ffn_lambda_phi', 0.0)
-            config.setdefault('ffn_update_sigma', True)
-            config['evolve_sigma'] = True  # Enable sigma evolution for full Gaussian inference
+    result = run_single_experiment(
+        config=config,
+        ffn_mode=args.ffn_mode,
+        device=device,
+        checkpoint_dir=checkpoint_dir,
+        use_wandb=args.use_wandb,
+        args=args,
+    )
 
-        # Hamiltonian mode requires sigma evolution
-        if args.ffn_mode == 'hamiltonian':
-            config.setdefault('ffn_lambda_belief', 0.5)  # Moderate alignment
-            config.setdefault('ffn_update_sigma', True)
-            config['evolve_sigma'] = True  # Required for Hamiltonian dynamics
-            # Force enable_sigma_phi for Hamiltonian
-            args.enable_sigma_phi = True
-
-        # Enable full geometric learning if requested
-        if args.enable_sigma_phi:
-            print("\n" + "="*70)
-            print("🔥 FULL GEOMETRIC LEARNING ENABLED!")
-            print("="*70)
-            print("   Learning: μ (means), Σ (covariances), φ (gauge frames)")
-            print("   This tests the FULL natural gradient framework!")
-            print("="*70 + "\n")
-            config['evolve_sigma'] = True
-            config['evolve_phi'] = True
-
-        result = run_single_experiment(
-            config=config,
-            ffn_mode=args.ffn_mode,
-            device=device,
-            checkpoint_dir=checkpoint_dir,
-            use_wandb=args.use_wandb,
-            args=args,
-        )
-
-        if result is not None:
-            # Save result
-            result_file = checkpoint_dir / f"result_{args.ffn_mode}.json"
-            result_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(result_file, 'w') as f:
-                json.dump(result, f, indent=2)
-            print(f"\n✓ Saved result: {result_file}")
+    if result is not None:
+        # Save result
+        result_file = checkpoint_dir / f"result_{args.ffn_mode}.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(result_file, 'w') as f:
+            json.dump(result, f, indent=2)
+        print(f"\nSaved result: {result_file}")
 
     print("\n" + "="*70)
     print("SESSION COMPLETE")

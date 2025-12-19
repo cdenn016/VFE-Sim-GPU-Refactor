@@ -268,9 +268,16 @@ def _download_wikitext103_fallback(cache_dir: Optional[str] = None) -> dict:
                     downloaded = True
                     break
             if not downloaded:
+                # Provide manual download instructions
+                manual_path = cache_dir / "wikitext-103-raw-v1.zip"
                 raise RuntimeError(
-                    f"Failed to download WikiText-103 from all sources.\n"
-                    "Please install the 'datasets' package: pip install datasets"
+                    f"Failed to download WikiText-103 from all sources.\n\n"
+                    f"MANUAL DOWNLOAD OPTION:\n"
+                    f"1. Go to: https://huggingface.co/datasets/iohadrubin/wikitext-103-raw-v1/tree/main\n"
+                    f"2. Download the parquet files OR fix your datasets installation:\n"
+                    f"   pip uninstall pyarrow datasets\n"
+                    f"   pip install pyarrow==15.0.0 datasets\n\n"
+                    f"OR use WikiText-2 instead (smaller but works): --dataset wikitext-2"
                 )
 
         # Extract
