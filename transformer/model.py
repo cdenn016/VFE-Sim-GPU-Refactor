@@ -45,7 +45,12 @@ except ImportError:
 
 # Try to import generators (fallback to random if unavailable)
 try:
-    from math_utils.generators import generate_so3_generators
+    from math_utils.generators import (
+        generate_so3_generators,
+        generate_soN_generators,
+        generate_multi_irrep_generators,
+        generate_multi_irrep_soN_generators,
+    )
     GENERATORS_AVAILABLE = True
 except ImportError:
     GENERATORS_AVAILABLE = False
@@ -156,13 +161,41 @@ class GaugeTransformerLM(nn.Module):
         self.ffn_window = config.get('ffn_window', 64)
 
         # =================================================================
-        # SO(3) Generators
+        # Gauge Group Generators (SO(3) or SO(N))
         # =================================================================
+        gauge_group = config.get('gauge_group', 'SO3')
+        gauge_dim = config.get('gauge_dim', 3)  # N for SO(N)
+        use_multi_irrep = config.get('use_multi_irrep', False)
+
+        # Store gauge group info for position encoding and other components
+        self.gauge_group = gauge_group
+        self.gauge_dim = gauge_dim
+
+        # Compute phi dimension (number of generators)
+        if gauge_group == 'SO3':
+            self.phi_dim = 3  # SO(3) has 3 generators
+        else:  # SO(N)
+            self.phi_dim = gauge_dim * (gauge_dim - 1) // 2  # SO(N) has N(N-1)/2 generators
+
         if GENERATORS_AVAILABLE:
-            generators = generate_so3_generators(embed_dim)
+            if gauge_group == 'SO3':
+                if use_multi_irrep and irrep_spec is not None:
+                    generators = generate_multi_irrep_generators(irrep_spec)
+                else:
+                    generators = generate_so3_generators(embed_dim)
+            else:  # SO(N)
+                if use_multi_irrep and irrep_spec is not None:
+                    generators = generate_multi_irrep_soN_generators(irrep_spec, gauge_dim)
+                else:
+                    generators = generate_soN_generators(gauge_dim)
+                    # For single-irrep SO(N), embed_dim should equal gauge_dim
+                    if embed_dim != gauge_dim:
+                        print(f"[WARNING] SO(N) with N={gauge_dim} but embed_dim={embed_dim}. "
+                              f"Consider using multi-irrep mode for embed_dim != N.")
         else:
             # Fallback: random skew-symmetric matrices
-            generators = np.random.randn(3, embed_dim, embed_dim)
+            n_generators = self.phi_dim
+            generators = np.random.randn(n_generators, embed_dim, embed_dim)
             generators = 0.5 * (generators - generators.transpose(0, 2, 1))
 
         self.register_buffer(
@@ -186,6 +219,7 @@ class GaugeTransformerLM(nn.Module):
             diagonal_covariance=diagonal_covariance,
             max_seq_len=max_seq_len,
             use_positional_embedding=use_positional_embedding,
+            phi_dim=self.phi_dim,  # SO(3): 3, SO(N): N(N-1)/2
         )
 
         # =================================================================
@@ -206,6 +240,7 @@ class GaugeTransformerLM(nn.Module):
             max_seq_len=max_seq_len,
             mode=pos_mode,
             scale=pos_encoding_scale,
+            phi_dim=self.phi_dim,  # SO(3): 3, SO(N): N(N-1)/2
         )
 
         # =================================================================
@@ -248,6 +283,8 @@ class GaugeTransformerLM(nn.Module):
             # Sparse attention
             attention_pattern=self.attention_pattern,
             attention_window=self.attention_window,
+            # Gauge frame dimension
+            phi_dim=self.phi_dim,
         )
 
         # =================================================================

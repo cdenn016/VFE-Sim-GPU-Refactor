@@ -315,6 +315,19 @@ GPU_OPTIMIZED_CONFIG = {
         ('ℓ2', 5, 5),   # 90 dimensions (rank-2 tensors)
     ],
 
+    # =================================================================
+    # GAUGE GROUP SELECTION
+    # =================================================================
+    # SO3: Standard SO(3) gauge group with 3 generators
+    #      Requires embed_dim = sum(mult * dim) for irrep_spec or odd embed_dim
+    # SON: SO(N) gauge group with N(N-1)/2 generators
+    #      More flexible - can use N-dimensional fundamental representation
+    #      embed_dim = mult * N for direct sums of fundamental
+    # =================================================================
+    'gauge_group': 'SO3',  # 'SO3' or 'SON'
+    'gauge_dim': 3,        # N for SO(N) - only used when gauge_group='SON'
+    'use_multi_irrep': True,  # Use block-diagonal generators from irrep_spec
+
     # RG Metrics Configuration (meta-agent emergence detection)
     'compute_rg_metrics': False,           # Enable RG metrics computation
     'rg_metrics_interval': 25,            # Compute RG metrics every N steps
@@ -414,13 +427,25 @@ PUBLICATION_CONFIG = {
     'checkpoint_interval': 15,
     'patience': 3,               # Early stopping patience
 
-    # Irrep structure (for K=11)
+    # Irrep structure (for K=21)
     'irrep_spec': [
         ('ℓ0', 5, 1),    # 5 dimensions (scalars)
         ('ℓ1', 2, 3),    # 6 dimensions (vectors)
-        ('ℓ2', 1, 5),    # 11 dimensions (tensors)
-        # Total: 5 + 6 + 11= 21 ✓
+        ('ℓ2', 2, 5),    # 10 dimensions (tensors)
+        # Total: 5 + 6 + 10 = 21 ✓
     ],
+
+    # =================================================================
+    # GAUGE GROUP SELECTION
+    # =================================================================
+    # SO3: Standard SO(3) gauge group with 3 generators
+    #      Requires embed_dim = sum(mult * dim) for irrep_spec or odd embed_dim
+    # SON: SO(N) gauge group with N(N-1)/2 generators
+    #      More flexible - can use N-dimensional fundamental representation
+    # =================================================================
+    'gauge_group': 'SO3',  # 'SO3' or 'SON'
+    'gauge_dim': 3,        # N for SO(N) - only used when gauge_group='SON'
+    'use_multi_irrep': True,  # Use block-diagonal generators from irrep_spec
 
     # RG Metrics Configuration (meta-agent emergence detection)
     'compute_rg_metrics': True,           # Enable RG metrics computation
