@@ -31,16 +31,31 @@ from transformer.pure_fep_transformer import PureFEPConfig, PureFEPTransformer
 # =============================================================================
 
 CONFIG = {
-    # Architecture (embed_dim MUST be ODD for SO(3) irreps!)
+    # Architecture
     'embed_dim': 127,             # K - embedding dimension
     'num_layers': 2,              # Hierarchical scales
     'seq_length': 24,            # Max sequence length
     'vocab_size': 5000,          # Will be overwritten if using dataset
 
+    # =========================================================================
+    # GAUGE GROUP: Choose the symmetry structure
+    # =========================================================================
+    # 'SO3': Standard SO(3) with 3 generators, φ ∈ ℝ³
+    #        - embed_dim MUST be ODD for single irrep
+    #        - Irrep dims must be 1, 3, 5, 7, ... (2ℓ+1)
+    # 'SON': General SO(N) with N(N-1)/2 generators, φ ∈ ℝ^{N(N-1)/2}
+    #        - Uses N-dim fundamental representation
+    #        - More generators = richer gauge structure
+    'gauge_group': 'SO3',         # 'SO3' or 'SON'
+    'gauge_dim': 8,               # N for SO(N) - only used when gauge_group='SON'
+
     # Irrep structure for SO(3) decomposition
     # Each tuple: (label, multiplicity, dim) where dim is 1,3,5,7,...
     # Total must equal embed_dim. Set None for auto-generation.
     # Example for K=127: 32×1 + 15×3 + 10×5 = 32 + 45 + 50 = 127
+    #
+    # For SO(N), dims must be 1 (scalar) or N (fundamental)
+    # Example for K=128 with SO(8): [('fund', 16, 8)] = 128
     'irrep_spec': [
         ('ℓ0', 32, 1),   # 32 scalars
         ('ℓ1', 15, 3),   # 45 dims (vectors)
@@ -281,12 +296,34 @@ def save_checkpoint(model, config, history, save_dir, name):
 def main():
     config = CONFIG.copy()
 
-    # Validate embed_dim is odd
-    if config['embed_dim'] % 2 == 0:
-        raise ValueError(
-            f"embed_dim must be ODD for SO(3) irreps (got {config['embed_dim']}). "
-            f"Try {config['embed_dim'] - 1} or {config['embed_dim'] + 1}."
-        )
+    # Validate embed_dim based on gauge group
+    gauge_group = config.get('gauge_group', 'SO3')
+    gauge_dim = config.get('gauge_dim', 8)
+    irrep_spec = config.get('irrep_spec')
+
+    if gauge_group == 'SO3':
+        # For SO(3) without explicit irrep_spec, embed_dim must be odd
+        if irrep_spec is None and config['embed_dim'] % 2 == 0:
+            raise ValueError(
+                f"embed_dim must be ODD for single SO(3) irrep (got {config['embed_dim']}). "
+                f"Try {config['embed_dim'] - 1} or {config['embed_dim'] + 1}, "
+                f"OR provide an irrep_spec, OR use gauge_group='SON'."
+            )
+    elif gauge_group == 'SON':
+        if gauge_dim < 2:
+            raise ValueError(f"gauge_dim must be >= 2 for SO(N), got {gauge_dim}")
+        # For SO(N), auto-generate irrep_spec if not provided
+        if irrep_spec is None:
+            n_copies = config['embed_dim'] // gauge_dim
+            remainder = config['embed_dim'] % gauge_dim
+            if remainder != 0:
+                config['irrep_spec'] = [
+                    ('scalar', remainder, 1),
+                    ('fund', n_copies, gauge_dim),
+                ]
+            else:
+                config['irrep_spec'] = [('fund', n_copies, gauge_dim)]
+            print(f"  Auto-generated SO({gauge_dim}) irrep_spec: {config['irrep_spec']}")
 
     # Set seed
     torch.manual_seed(config['seed'])
@@ -321,6 +358,9 @@ def main():
         seq_length=config['seq_length'],
         vocab_size=vocab_size,
         irrep_spec=config.get('irrep_spec'),  # None = auto-generate
+        # Gauge group
+        gauge_group=config.get('gauge_group', 'SO3'),
+        gauge_dim=config.get('gauge_dim', 8),
         # VFE parameters
         alpha=config['alpha'],
         lambda_belief=config['lambda_belief'],
@@ -357,6 +397,13 @@ def main():
 
     print(f"\nModel config:")
     print(f"  embed_dim (K): {model_config.embed_dim}")
+    # Show gauge group info
+    if model_config.gauge_group == 'SO3':
+        print(f"  gauge_group: SO(3) - 3 generators, φ ∈ ℝ³")
+    else:
+        N = model_config.gauge_dim
+        n_gen = N * (N - 1) // 2
+        print(f"  gauge_group: SO({N}) - {n_gen} generators, φ ∈ ℝ^{n_gen}")
     print(f"  irrep_spec: {model_config.irrep_spec}")
     print(f"  num_layers: {model_config.num_layers}")
     print(f"  mu_lr: {model_config.mu_lr}")
