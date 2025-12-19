@@ -82,32 +82,11 @@ class GaugeTransformerBlock(nn.Module):
         ffn_vfe_dynamic_m_step_interval: int = 0,  # M-step every N steps (0 = disabled)
         ffn_vfe_dynamic_m_step_rate: float = 0.01,  # Prior update rate
         # AD-HOC stabilization (default OFF for first-principles)
-        ffn_vfe_kappa_start: float = None,       # AD-HOC: Temp annealing (None = no annealing)
-        ffn_vfe_balance_gradients: bool = False, # AD-HOC: Balance gradient norms
-        ffn_vfe_obs_grad_weight: float = 1.0,    # Relative weight of observation gradient
-        ffn_vfe_entropy_penalty: float = 0.0,    # AD-HOC: Penalty for uniform β
-        ffn_vfe_self_attn_damping: float = 0.0,  # AD-HOC: Reduce self-attention (0-1)
-        ffn_vfe_grad_clip: float = 1e3,          # Numerical stability (overflow prevention)
-        ffn_tau_eff: float = 1.0,
         ffn_kappa: float = 1.0,
         ffn_n_iterations: int = 1,
         ffn_learnable_lr: bool = True,
-        # Gradient engine specific
         ffn_lambda_belief: float = 1.0,
-        ffn_lambda_prior: float = 0.0,
-        ffn_lambda_phi: float = 0.0,
         ffn_update_sigma: bool = True,
-        # Hamiltonian specific
-        ffn_hamiltonian_dt: float = 0.01,
-        ffn_hamiltonian_n_steps: int = 10,
-        ffn_hamiltonian_momentum_scale: float = 1.0,
-        ffn_hamiltonian_gamma: float = 0.0,
-        # Hamiltonian mass configuration (from Inertia of Belief paper)
-        ffn_hamiltonian_mass_use_prior: bool = True,
-        ffn_hamiltonian_mass_use_observation: bool = False,
-        ffn_hamiltonian_mass_use_incoming_social: bool = False,
-        ffn_hamiltonian_mass_use_outgoing_recoil: bool = False,
-        ffn_hamiltonian_evolve_mass: bool = False,
         # Diagonal covariance mode
         diagonal_covariance: bool = False,
         # Sparse attention
@@ -129,26 +108,14 @@ class GaugeTransformerBlock(nn.Module):
             evolve_phi: If True, update gauge frames via FFN
             attention_pattern: 'full', 'local', or 'sparse' for efficient attention
             attention_window: Window size for local attention pattern
-            generators: SO(3) generators (required for VFE mode)
+            generators: Lie algebra generators (required for VFE mode)
             ffn_mode: 'VFE_dynamic' (only supported mode)
-            ffn_alpha: Prior weight for variational/hamiltonian FFN
-            ffn_tau_eff: Temperature for variational FFN
-            ffn_kappa: Softmax temperature for variational_full/hamiltonian
-            ffn_n_iterations: Inference iterations for variational FFN
-            ffn_learnable_lr: Learn step size for variational FFN
-            ffn_lambda_belief: Belief alignment weight (gradient_engine/hamiltonian)
-            ffn_lambda_prior: Prior alignment weight (gradient_engine)
-            ffn_lambda_phi: Gauge field weight (gradient_engine)
-            ffn_update_sigma: Update covariances in FFN? (gradient_engine/hamiltonian)
-            ffn_hamiltonian_dt: Leapfrog time step (hamiltonian)
-            ffn_hamiltonian_n_steps: Number of leapfrog steps (hamiltonian)
-            ffn_hamiltonian_momentum_scale: Initial momentum scale (hamiltonian)
-            ffn_hamiltonian_gamma: Damping coefficient (hamiltonian, 0=pure)
-            ffn_hamiltonian_mass_use_prior: Include prior precision in mass (Inertia of Belief)
-            ffn_hamiltonian_mass_use_observation: Include observation precision in mass
-            ffn_hamiltonian_mass_use_incoming_social: Include incoming social precision in mass
-            ffn_hamiltonian_mass_use_outgoing_recoil: Include outgoing recoil precision in mass
-            ffn_hamiltonian_evolve_mass: Recompute mass at each leapfrog step (hamiltonian)
+            ffn_alpha: Prior weight
+            ffn_kappa: Softmax temperature for attention
+            ffn_n_iterations: VFE inference iterations
+            ffn_learnable_lr: Learn step size for variational descent
+            ffn_lambda_belief: Belief alignment weight
+            ffn_update_sigma: Update covariances in FFN
         """
         super().__init__()
         self.embed_dim = embed_dim
@@ -203,39 +170,16 @@ class GaugeTransformerBlock(nn.Module):
             generators=generators,  # Required for VFE mode
             dropout=dropout,
             mode=ffn_mode,
-            # Variational parameters
+            # VFE parameters
             alpha=ffn_alpha,
-            tau_eff=ffn_tau_eff,
             kappa=ffn_kappa,
             n_iterations=ffn_n_iterations,
             learnable_lr=ffn_learnable_lr,
-            # Gradient engine parameters
             lambda_belief=ffn_lambda_belief,
-            lambda_prior=ffn_lambda_prior,
-            lambda_phi=ffn_lambda_phi,
             update_sigma=ffn_update_sigma,
-            # Dynamic VFE parameters (attention-belief co-evolution)
+            # Dynamic VFE parameters
             vfe_dynamic_m_step_interval=ffn_vfe_dynamic_m_step_interval,
             vfe_dynamic_m_step_rate=ffn_vfe_dynamic_m_step_rate,
-            # Stabilized dynamic VFE parameters
-            vfe_kappa_start=ffn_vfe_kappa_start,
-            vfe_balance_gradients=ffn_vfe_balance_gradients,
-            vfe_obs_grad_weight=ffn_vfe_obs_grad_weight,
-            vfe_entropy_penalty=ffn_vfe_entropy_penalty,
-            vfe_self_attn_damping=ffn_vfe_self_attn_damping,
-            vfe_grad_clip=ffn_vfe_grad_clip,
-            # Hamiltonian parameters
-            hamiltonian_dt=ffn_hamiltonian_dt,
-            hamiltonian_n_steps=ffn_hamiltonian_n_steps,
-            hamiltonian_momentum_scale=ffn_hamiltonian_momentum_scale,
-            hamiltonian_gamma=ffn_hamiltonian_gamma,
-            hamiltonian_update_phi=evolve_phi,  # Use evolve_phi setting
-            # Hamiltonian mass configuration (from Inertia of Belief paper)
-            hamiltonian_mass_use_prior=ffn_hamiltonian_mass_use_prior,
-            hamiltonian_mass_use_observation=ffn_hamiltonian_mass_use_observation,
-            hamiltonian_mass_use_incoming_social=ffn_hamiltonian_mass_use_incoming_social,
-            hamiltonian_mass_use_outgoing_recoil=ffn_hamiltonian_mass_use_outgoing_recoil,
-            hamiltonian_evolve_mass=ffn_hamiltonian_evolve_mass,
             # Diagonal covariance mode
             diagonal_covariance=diagonal_covariance,
         )

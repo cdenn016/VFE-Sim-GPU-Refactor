@@ -237,11 +237,10 @@ class GaugeTransformerLM(nn.Module):
             dropout=dropout,
             evolve_sigma=evolve_sigma,
             evolve_phi=evolve_phi,
-            # Variational FFN parameters
+            # VFE FFN parameters
             generators=self.generators,
             ffn_mode=ffn_mode,
             ffn_alpha=ffn_alpha,
-            ffn_tau_eff=ffn_tau_eff,
             ffn_kappa=ffn_kappa,
             ffn_n_iterations=ffn_n_iterations,
             ffn_learnable_lr=ffn_learnable_lr,
