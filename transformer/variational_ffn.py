@@ -1313,6 +1313,10 @@ class VariationalFFNDynamic(nn.Module):
         m_step_rate: float = 0.01, # Prior update rate toward beliefs
         diagonal_covariance: bool = False,  # Use diagonal Σ for efficiency
         compute_sigma_align_grad: bool = True,  # Compute sigma gradient from alignment term
+        # Pure FEP mode: learning via prior evolution (no backprop)
+        max_seq_len: int = 512,    # Max sequence length for persistent priors
+        pure_fep_mode: bool = False,  # Enable backprop-free learning
+        prior_lr: float = 0.01,    # Learning rate for prior updates
     ):
         """
         Initialize dynamic-β VFE FFN.
@@ -1330,6 +1334,9 @@ class VariationalFFNDynamic(nn.Module):
             m_step_rate: How fast priors move toward beliefs in M-step
             diagonal_covariance: Use diagonal Σ for O(K) instead of O(K²)
             compute_sigma_align_grad: If True, compute sigma gradient from alignment term
+            max_seq_len: Maximum sequence length for persistent priors (pure FEP mode)
+            pure_fep_mode: If True, use persistent priors that evolve via prediction error
+            prior_lr: Learning rate for prior updates in pure FEP mode
         """
         super().__init__()
 
@@ -1348,6 +1355,19 @@ class VariationalFFNDynamic(nn.Module):
         # M-step configuration
         self.m_step_interval = m_step_interval
         self.m_step_rate = m_step_rate
+
+        # Pure FEP mode: learning via prior evolution
+        self.pure_fep_mode = pure_fep_mode
+        self.max_seq_len = max_seq_len
+        self.prior_lr = prior_lr
+
+        if pure_fep_mode:
+            # Position-dependent persistent priors (the LEARNING happens here!)
+            # These evolve based on prediction-error-weighted beliefs
+            self.register_buffer('prior_mu', torch.zeros(max_seq_len, embed_dim))
+            self.register_buffer('prior_sigma', torch.ones(max_seq_len, embed_dim))
+            self.register_buffer('prior_update_count', torch.zeros(max_seq_len))
+            self.register_buffer('prior_initialized', torch.tensor(False))
 
         # Learnable step size
         if learnable_lr:
@@ -1407,13 +1427,27 @@ class VariationalFFNDynamic(nn.Module):
 
         is_diagonal = sigma.dim() == 3
 
-        # Initialize sigma_p (prior covariance) - same as sigma for simplicity
-        sigma_p = sigma.clone()
+        # =====================================================================
+        # PURE FEP MODE: Use persistent priors instead of embedding priors
+        # =====================================================================
+        if self.pure_fep_mode:
+            # Initialize persistent priors from embeddings on first call
+            self.initialize_priors_from_embeddings(mu_prior)
+
+            # Get persistent priors (these evolve via prediction-error updates)
+            persistent_mu, persistent_sigma = self.get_persistent_priors(N, B, device)
+
+            # Use persistent priors for VFE dynamics
+            mu_p_current = persistent_mu.clone()
+            sigma_p = persistent_sigma.clone() if persistent_sigma is not None else sigma.clone()
+        else:
+            # Standard mode: use embedding priors
+            mu_p_current = mu_prior.clone()
+            sigma_p = sigma.clone()
 
         # Current state (will evolve)
         mu_current = mu.clone()
         sigma_current = sigma.clone()
-        mu_p_current = mu_prior.clone()
 
         # Track β evolution if requested
         beta_history = [] if return_beta_history else None
@@ -1548,12 +1582,168 @@ class VariationalFFNDynamic(nn.Module):
         else:
             return mu_current, None, beta_history
 
+    # =========================================================================
+    # Pure FEP Mode: Backprop-free Learning via Prior Evolution
+    # =========================================================================
+
+    def initialize_priors_from_embeddings(self, mu_embed: torch.Tensor):
+        """
+        Initialize persistent priors from embedding priors (first batch only).
+
+        In pure FEP mode, priors start at embedding values and then evolve.
+        This provides a warm start for prior learning.
+
+        Args:
+            mu_embed: (B, N, K) embedding means - we use mean across batch
+        """
+        if not self.pure_fep_mode:
+            return
+
+        if self.prior_initialized:
+            return
+
+        B, N, K = mu_embed.shape
+        N_update = min(N, self.max_seq_len)
+
+        # Initialize from mean of embedding priors
+        with torch.no_grad():
+            self.prior_mu[:N_update] = mu_embed[:, :N_update].mean(dim=0)
+            self.prior_initialized.fill_(True)
+
+    def get_persistent_priors(self, seq_len: int, batch_size: int, device: torch.device):
+        """
+        Get persistent priors for the current sequence, expanded across batch.
+
+        Args:
+            seq_len: Current sequence length N
+            batch_size: Batch size B
+            device: Target device
+
+        Returns:
+            mu_prior: (B, N, K) persistent prior means
+            sigma_prior: (B, N, K) persistent prior variances (diagonal)
+        """
+        if not self.pure_fep_mode:
+            return None, None
+
+        N = min(seq_len, self.max_seq_len)
+
+        # Expand priors across batch
+        mu_prior = self.prior_mu[:N].unsqueeze(0).expand(batch_size, -1, -1)
+        sigma_prior = self.prior_sigma[:N].unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Handle sequences longer than max_seq_len (pad with defaults)
+        if seq_len > self.max_seq_len:
+            pad_len = seq_len - self.max_seq_len
+            mu_pad = torch.zeros(batch_size, pad_len, self.embed_dim, device=device)
+            sigma_pad = torch.ones(batch_size, pad_len, self.embed_dim, device=device)
+            mu_prior = torch.cat([mu_prior, mu_pad], dim=1)
+            sigma_prior = torch.cat([sigma_prior, sigma_pad], dim=1)
+
+        return mu_prior, sigma_prior
+
+    def update_priors_from_beliefs(
+        self,
+        mu_beliefs: torch.Tensor,       # (B, N, K) final beliefs after VFE
+        sigma_beliefs: torch.Tensor,    # (B, N, K) belief variances
+        prediction_errors: torch.Tensor,  # (B, N) per-position CE loss
+        lr: Optional[float] = None,
+    ):
+        """
+        Update persistent priors toward beliefs that successfully predicted.
+
+        This is the LEARNING mechanism in pure FEP mode (replaces backprop):
+        - Beliefs with low prediction error are "good" - priors should move toward them
+        - Beliefs with high prediction error are "bad" - priors should ignore them
+        - Weighting by softmax(-error) gives soft EM-like updates
+
+        The key insight: CE is INSIDE the VFE during forward pass, so beliefs
+        have already adjusted to minimize prediction error. We now consolidate
+        successful beliefs into priors for future use.
+
+        Args:
+            mu_beliefs: (B, N, K) evolved belief means
+            sigma_beliefs: (B, N, K) evolved belief variances
+            prediction_errors: (B, N) per-position cross-entropy loss
+            lr: Learning rate (uses self.prior_lr if None)
+        """
+        if not self.pure_fep_mode:
+            return
+
+        lr = lr if lr is not None else self.prior_lr
+        B, N, K = mu_beliefs.shape
+        N_update = min(N, self.max_seq_len)
+        eps = 1e-6
+
+        with torch.no_grad():
+            # Compute position-wise weights from prediction errors
+            # Low error = high weight (successful predictions should update priors)
+            # Use softmax over batch dimension for each position
+            errors_clamped = prediction_errors[:, :N_update].clamp(min=eps, max=20.0)
+            weights = F.softmax(-errors_clamped, dim=0)  # (B, N_update)
+
+            # Weighted mean of beliefs across batch for each position
+            # Shape: (B, N_update, K) * (B, N_update, 1) -> sum over B -> (N_update, K)
+            weighted_mu = (mu_beliefs[:, :N_update] * weights.unsqueeze(-1)).sum(dim=0)
+            weighted_sigma = (sigma_beliefs[:, :N_update] * weights.unsqueeze(-1)).sum(dim=0)
+
+            # Compute confidence: inverse mean error per position
+            # Higher confidence = larger update
+            mean_error = errors_clamped.mean(dim=0)  # (N_update,)
+            confidence = 1.0 / (1.0 + mean_error)  # (N_update,) in [0, 0.5]
+
+            # Adaptive learning rate: scale by confidence
+            effective_lr = lr * confidence.unsqueeze(-1)  # (N_update, 1)
+
+            # EMA update toward weighted beliefs
+            # prior <- (1 - lr) * prior + lr * belief
+            self.prior_mu[:N_update] = (
+                (1.0 - effective_lr) * self.prior_mu[:N_update] +
+                effective_lr * weighted_mu
+            )
+
+            # Update sigma with smaller learning rate (more stable)
+            sigma_lr = effective_lr * 0.1
+            self.prior_sigma[:N_update] = (
+                (1.0 - sigma_lr) * self.prior_sigma[:N_update] +
+                sigma_lr * weighted_sigma
+            ).clamp(min=eps)
+
+            # Track update counts
+            self.prior_update_count[:N_update] += 1
+
+    def get_prior_stats(self) -> Dict[str, float]:
+        """Get statistics about persistent priors for logging."""
+        if not self.pure_fep_mode:
+            return {}
+
+        with torch.no_grad():
+            active_mask = self.prior_update_count > 0
+            n_active = active_mask.sum().item()
+
+            if n_active == 0:
+                return {'prior_active_positions': 0}
+
+            active_mu = self.prior_mu[active_mask]
+            active_sigma = self.prior_sigma[active_mask]
+
+            return {
+                'prior_active_positions': n_active,
+                'prior_mu_mean': active_mu.mean().item(),
+                'prior_mu_std': active_mu.std().item(),
+                'prior_sigma_mean': active_sigma.mean().item(),
+                'prior_update_count_mean': self.prior_update_count[active_mask].mean().item(),
+            }
+
     def extra_repr(self) -> str:
-        return (
+        base = (
             f"embed_dim={self.embed_dim}, n_iterations={self.n_iterations}, "
             f"alpha={self.alpha}, lambda_belief={self.lambda_belief}, kappa={self.kappa}, "
             f"m_step_interval={self.m_step_interval}"
         )
+        if self.pure_fep_mode:
+            base += f", pure_fep_mode=True, prior_lr={self.prior_lr}"
+        return base
 
 
 # =============================================================================

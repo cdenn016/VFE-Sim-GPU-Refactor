@@ -115,6 +115,10 @@ class GaugeTransformerBlock(nn.Module):
         attention_window: int = 64,
         # Gauge frame dimension
         phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
+        # Pure FEP mode: learning via prior evolution (no backprop)
+        ffn_pure_fep_mode: bool = False,
+        ffn_max_seq_len: int = 512,
+        ffn_prior_lr: float = 0.01,
     ):
         """
         Initialize gauge transformer block.
@@ -132,6 +136,9 @@ class GaugeTransformerBlock(nn.Module):
             generators: SO(3) generators (required for variational/hamiltonian modes)
             ffn_mode: 'learned'/'standard', 'VFE'/'variational_gradient_engine', 'hamiltonian'
             ffn_alpha: Prior weight for variational/hamiltonian FFN
+            ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
+            ffn_max_seq_len: Max sequence length for persistent priors (pure FEP mode)
+            ffn_prior_lr: Learning rate for prior updates (pure FEP mode)
             ffn_tau_eff: Temperature for variational FFN
             ffn_kappa: Softmax temperature for variational_full/hamiltonian
             ffn_n_iterations: Inference iterations for variational FFN
@@ -238,6 +245,10 @@ class GaugeTransformerBlock(nn.Module):
             hamiltonian_evolve_mass=ffn_hamiltonian_evolve_mass,
             # Diagonal covariance mode
             diagonal_covariance=diagonal_covariance,
+            # Pure FEP mode parameters
+            pure_fep_mode=ffn_pure_fep_mode,
+            max_seq_len=ffn_max_seq_len,
+            prior_lr=ffn_prior_lr,
         )
 
         self.norm2 = nn.LayerNorm(embed_dim)
@@ -542,6 +553,10 @@ class GaugeTransformerStack(nn.Module):
         attention_window: int = 64,
         # Gauge frame dimension
         phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
+        # Pure FEP mode: learning via prior evolution (no backprop)
+        ffn_pure_fep_mode: bool = False,
+        ffn_max_seq_len: int = 512,
+        ffn_prior_lr: float = 0.01,
     ):
         """
         Initialize stack of transformer blocks.
@@ -580,6 +595,9 @@ class GaugeTransformerStack(nn.Module):
             ffn_hamiltonian_evolve_mass: Recompute mass at each leapfrog step (hamiltonian)
             attention_pattern: 'full', 'local', or 'sparse' for efficient attention
             attention_window: Window size for local attention pattern
+            ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
+            ffn_max_seq_len: Max sequence length for persistent priors (pure FEP mode)
+            ffn_prior_lr: Learning rate for prior updates (pure FEP mode)
         """
         super().__init__()
         self.n_layers = n_layers
@@ -634,6 +652,10 @@ class GaugeTransformerStack(nn.Module):
                 attention_window=attention_window,
                 # Gauge frame dimension
                 phi_dim=phi_dim,
+                # Pure FEP mode
+                ffn_pure_fep_mode=ffn_pure_fep_mode,
+                ffn_max_seq_len=ffn_max_seq_len,
+                ffn_prior_lr=ffn_prior_lr,
             )
             for _ in range(n_layers)
         ])

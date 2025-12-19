@@ -52,6 +52,10 @@ class GaugeFFN(nn.Module):
         compute_sigma_align_grad: bool = True,  # Sigma gradient from alignment term
         # Diagonal covariance mode
         diagonal_covariance: bool = False,
+        # Pure FEP mode: learning via prior evolution (no backprop)
+        pure_fep_mode: bool = False,
+        max_seq_len: int = 512,
+        prior_lr: float = 0.01,
         # Legacy parameters (ignored, kept for API compatibility)
         **kwargs,
     ):
@@ -74,12 +78,16 @@ class GaugeFFN(nn.Module):
             update_sigma: Update covariances during inference
             compute_sigma_align_grad: Compute sigma gradient from alignment term
             diagonal_covariance: Use diagonal covariance for memory efficiency
+            pure_fep_mode: If True, use persistent priors for backprop-free learning
+            max_seq_len: Max sequence length for persistent priors (pure FEP mode)
+            prior_lr: Learning rate for prior updates (pure FEP mode)
         """
         super().__init__()
 
         self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim
         self.mode = 'VFE_dynamic'
+        self.pure_fep_mode = pure_fep_mode
 
         if generators is None:
             raise ValueError("generators required for VFE_dynamic mode")
@@ -98,6 +106,10 @@ class GaugeFFN(nn.Module):
             m_step_rate=vfe_dynamic_m_step_rate,
             diagonal_covariance=diagonal_covariance,
             compute_sigma_align_grad=compute_sigma_align_grad,
+            # Pure FEP mode parameters
+            pure_fep_mode=pure_fep_mode,
+            max_seq_len=max_seq_len,
+            prior_lr=prior_lr,
         )
 
     def forward(
