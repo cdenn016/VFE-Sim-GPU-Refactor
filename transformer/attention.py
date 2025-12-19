@@ -1202,6 +1202,9 @@ class IrrepMultiHeadAttention(nn.Module):
         attention_window: int = 64,
         use_fast_exp: bool = False,
         exp_order: int = 4,
+        gauge_group: str = 'SO3',  # 'SO3' or 'SON'
+        gauge_dim: int = 3,        # N for SO(N) - only used when gauge_group='SON'
+        global_generators: Optional[torch.Tensor] = None,  # (n_gen, K, K) for SO(N) mode
     ):
         """
         Initialize irrep-structured multi-head attention.
@@ -1223,6 +1226,10 @@ class IrrepMultiHeadAttention(nn.Module):
                          Faster but only accurate for small angles (|φ| < 0.5).
             exp_order: Order of Taylor expansion when use_fast_exp=True.
                       Higher = more accurate but slower. Default 4 is good for |φ| < 0.3.
+            gauge_group: 'SO3' for SO(3) Wigner D-matrices, 'SON' for SO(N) fundamentals
+            gauge_dim: N for SO(N) mode - determines generator structure
+            global_generators: Pre-computed generators for SO(N) mode (n_gen, K, K)
+                              Required when gauge_group='SON'
         """
         super().__init__()
         self.diagonal_covariance = diagonal_covariance
@@ -1262,35 +1269,63 @@ class IrrepMultiHeadAttention(nn.Module):
         self.n_heads = len(self.irrep_dims)
         self.total_dim = total_dim
 
+        # Store gauge group info
+        self.gauge_group = gauge_group
+        self.gauge_dim = gauge_dim
+
         # =================================================================
-        # Create proper SO(3) generators for each head dimension
+        # Create generators for each head dimension
         # =================================================================
-        # For ℓ=0 (dim=1): Zero generator (scalars don't transform)
-        # For ℓ≥1 (dim=3,5,7,...): Proper Wigner D-matrix generators
+        # SO(3) mode:
+        #   - For ℓ=0 (dim=1): Zero generator (scalars don't transform)
+        #   - For ℓ≥1 (dim=3,5,7,...): Proper Wigner D-matrix generators
+        #
+        # SO(N) mode:
+        #   - Use global generators (block-diagonal structure)
+        #   - Extract appropriate blocks for each head
         #
         # Store as a list of buffers (can't use ParameterList since non-trainable)
         self.head_generators = nn.ModuleList()  # Will hold generator-holding modules
 
+        # Track cumulative dimension for extracting blocks in SO(N) mode
+        cum_dim = 0
+
         for head_idx, dim in enumerate(self.irrep_dims):
-            if dim == 1:
-                # Scalar irrep: zero generator (no transformation)
-                gen = torch.zeros(3, 1, 1)
-            elif dim % 2 == 1 and dim >= 3:
-                # Proper SO(3) irrep: use Wigner D-matrix generators
-                gen_np = generate_so3_generators(dim)
-                gen = torch.from_numpy(gen_np).float()
+            if gauge_group == 'SO3':
+                # SO(3) mode: Create Wigner D-matrix generators per head
+                if dim == 1:
+                    # Scalar irrep: zero generator (no transformation)
+                    gen = torch.zeros(3, 1, 1)
+                elif dim % 2 == 1 and dim >= 3:
+                    # Proper SO(3) irrep: use Wigner D-matrix generators
+                    gen_np = generate_so3_generators(dim)
+                    gen = torch.from_numpy(gen_np).float()
+                else:
+                    # Even dimension - not a valid SO(3) irrep!
+                    raise ValueError(
+                        f"Head {head_idx} has dim={dim}, which is not a valid SO(3) irrep dimension. "
+                        f"SO(3) irreps must have odd dimensions (1, 3, 5, 7, ...). "
+                        f"For even dimensions, use gauge_group='SON' with appropriate gauge_dim."
+                    )
             else:
-                # Even dimension - not a valid SO(3) irrep!
-                # This shouldn't happen if irrep_spec is well-formed
-                raise ValueError(
-                    f"Head {head_idx} has dim={dim}, which is not a valid SO(3) irrep dimension. "
-                    f"SO(3) irreps must have odd dimensions (1, 3, 5, 7, ...)."
-                )
+                # SO(N) mode: Extract block from global generators
+                if global_generators is None:
+                    raise ValueError(
+                        f"SO(N) mode requires global_generators to be provided. "
+                        f"Pass generators from model.py to IrrepMultiHeadAttention."
+                    )
+                # Extract the block for this head from the global block-diagonal generators
+                # global_generators: (n_gen, K, K) where K = embed_dim
+                n_gen = global_generators.shape[0]
+                gen = global_generators[:, cum_dim:cum_dim+dim, cum_dim:cum_dim+dim].clone()
+                # gen shape: (n_gen, dim, dim)
 
             # Wrap in a module to register as buffer
             gen_holder = nn.Module()
             gen_holder.register_buffer('gen', gen)
             self.head_generators.append(gen_holder)
+
+            cum_dim += dim
 
         # Output projection (standard linear layer)
         self.out_proj = nn.Linear(embed_dim, embed_dim)

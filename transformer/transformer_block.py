@@ -162,6 +162,21 @@ class GaugeTransformerBlock(nn.Module):
         # =====================================================================
         # Attention Sublayer
         # =====================================================================
+        # Determine gauge group from generators shape
+        if generators is not None:
+            n_gen = generators.shape[0]
+            if n_gen == 3:
+                gauge_group = 'SO3'
+                gauge_dim_inferred = 3
+            else:
+                # n_gen = N*(N-1)/2 => N = (1 + sqrt(1 + 8*n_gen)) / 2
+                import math
+                gauge_dim_inferred = int((1 + math.sqrt(1 + 8 * n_gen)) / 2)
+                gauge_group = 'SON'
+        else:
+            gauge_group = 'SO3'
+            gauge_dim_inferred = 3
+
         self.attention = IrrepMultiHeadAttention(
             embed_dim=embed_dim,
             irrep_spec=irrep_spec,
@@ -171,6 +186,9 @@ class GaugeTransformerBlock(nn.Module):
             diagonal_covariance=diagonal_covariance,
             attention_pattern=attention_pattern,
             attention_window=attention_window,
+            gauge_group=gauge_group,
+            gauge_dim=gauge_dim_inferred,
+            global_generators=generators,  # Pass for SO(N) mode
         )
 
         self.norm1 = nn.LayerNorm(embed_dim)
