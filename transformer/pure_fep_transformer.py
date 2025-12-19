@@ -97,7 +97,12 @@ from transformer.embeddings import (
     GaugePositionalEncoding,
     so3_compose_bch,
 )
-from math_utils.generators import generate_so3_generators, generate_multi_irrep_generators
+from math_utils.generators import (
+    generate_so3_generators,
+    generate_multi_irrep_generators,
+    generate_soN_generators,
+    generate_multi_irrep_soN_generators,
+)
 
 
 # =============================================================================
@@ -302,7 +307,7 @@ class PriorBank(nn.Module):
 
 class GaugePositionEncoder(nn.Module):
     """
-    Encode position in the gauge frame φ ∈ so(3), NOT in the belief mean μ!
+    Encode position in the gauge frame φ ∈ so(N), NOT in the belief mean μ!
 
     Key insight: Position information should be in the TRANSPORT, not the content.
     - Same token at different positions: SAME μ (semantic content)
@@ -314,6 +319,8 @@ class GaugePositionEncoder(nn.Module):
     This gives shift-invariant attention with position awareness:
     - Tokens 3 apart always have same relative transport
     - Attention pattern is translation-invariant
+
+    Supports both SO(3) (phi_dim=3) and SO(N) (phi_dim = N(N-1)/2).
     """
 
     def __init__(
@@ -322,6 +329,7 @@ class GaugePositionEncoder(nn.Module):
         mode: str = 'learned',  # 'learned' or 'sinusoidal'
         scale: float = 0.1,
         composition: str = 'bch1',  # How to compose with token φ
+        phi_dim: int = 3,  # Dimension of Lie algebra: 3 for SO(3), N(N-1)/2 for SO(N)
     ):
         """
         Initialize gauge position encoder.
@@ -331,72 +339,78 @@ class GaugePositionEncoder(nn.Module):
             mode: 'learned' or 'sinusoidal'
             scale: Scale factor for position angles
             composition: 'add', 'bch1', 'bch2', or 'exact' for SO(3) composition
+            phi_dim: Dimension of φ (3 for SO(3), N(N-1)/2 for SO(N))
         """
         super().__init__()
         self.max_seq_len = max_seq_len
         self.mode = mode
         self.scale = scale
         self.composition = composition
+        self.phi_dim = phi_dim
 
         if mode == 'learned':
             # Learnable position-specific gauge frames
-            self.pos_phi = nn.Parameter(torch.randn(max_seq_len, 3) * scale)
+            self.pos_phi = nn.Parameter(torch.randn(max_seq_len, phi_dim) * scale)
         elif mode == 'sinusoidal':
-            # Fixed sinusoidal position encoding in so(3)
-            self.register_buffer('pos_phi', self._make_sinusoidal(max_seq_len, scale))
+            # Fixed sinusoidal position encoding
+            self.register_buffer('pos_phi', self._make_sinusoidal(max_seq_len, phi_dim, scale))
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
-    def _make_sinusoidal(self, max_len: int, scale: float) -> torch.Tensor:
-        """Create sinusoidal positional encoding in so(3)."""
+    def _make_sinusoidal(self, max_len: int, phi_dim: int, scale: float) -> torch.Tensor:
+        """Create sinusoidal positional encoding in so(N)."""
         position = torch.arange(max_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, 3, dtype=torch.float32) * -(math.log(10000.0) / 3))
+        # Create frequency terms for each dimension
+        div_term = torch.exp(
+            torch.arange(0, phi_dim, dtype=torch.float32) * -(math.log(10000.0) / max(phi_dim, 1))
+        )
 
-        phi = torch.zeros(max_len, 3)
-        phi[:, 0] = torch.sin(position.squeeze() * div_term[0])
-        phi[:, 1] = torch.sin(position.squeeze() * div_term[1])
-        phi[:, 2] = torch.cos(position.squeeze() * div_term[2])
+        phi = torch.zeros(max_len, phi_dim)
+        for d in range(phi_dim):
+            if d % 2 == 0:
+                phi[:, d] = torch.sin(position.squeeze() * div_term[d])
+            else:
+                phi[:, d] = torch.cos(position.squeeze() * div_term[d])
 
         return phi * scale
 
     def forward(
         self,
-        phi_token: torch.Tensor,  # (B, N, 3) token gauge frames
+        phi_token: torch.Tensor,  # (B, N, phi_dim) token gauge frames
         seq_len: int,
     ) -> torch.Tensor:
         """
         Compose token gauge frames with positional gauge frames.
 
         Args:
-            phi_token: (B, N, 3) token-specific gauge frames (or zeros)
+            phi_token: (B, N, phi_dim) token-specific gauge frames (or zeros)
             seq_len: Actual sequence length (may be < max_seq_len)
 
         Returns:
-            phi: (B, N, 3) combined gauge frames encoding position
+            phi: (B, N, phi_dim) combined gauge frames encoding position
         """
         B = phi_token.shape[0]
         device = phi_token.device
 
         # Get positional frames for this sequence length
-        pos_phi = self.pos_phi[:seq_len].to(device)  # (N, 3)
-        pos_phi = pos_phi.unsqueeze(0).expand(B, -1, -1)  # (B, N, 3)
+        pos_phi = self.pos_phi[:seq_len].to(device)  # (N, phi_dim)
+        pos_phi = pos_phi.unsqueeze(0).expand(B, -1, -1)  # (B, N, phi_dim)
 
         # Compose using appropriate method
         if self.composition == 'add':
             # Simple addition (valid for small angles)
             return phi_token + pos_phi
-        elif self.composition == 'bch1':
-            # BCH order 1: φ + φ_pos + ½[φ, φ_pos]
-            return so3_compose_bch(phi_token, pos_phi, order=1)
-        elif self.composition == 'bch2':
-            # BCH order 2
-            return so3_compose_bch(phi_token, pos_phi, order=2)
+        elif self.composition in ('bch1', 'bch2') and self.phi_dim == 3:
+            # BCH composition only works for SO(3) with 3-dimensional phi
+            order = 1 if self.composition == 'bch1' else 2
+            return so3_compose_bch(phi_token, pos_phi, order=order)
         else:
-            # Fallback to addition
+            # For SO(N) or unknown composition, use simple addition
+            # (BCH for general Lie algebras requires structure constants)
             return phi_token + pos_phi
 
     def extra_repr(self) -> str:
-        return f"max_seq_len={self.max_seq_len}, mode={self.mode}, composition={self.composition}"
+        return f"max_seq_len={self.max_seq_len}, mode={self.mode}, phi_dim={self.phi_dim}"
 
 
 @dataclass
@@ -481,6 +495,19 @@ class PureFEPConfig:
     # When False: uses single spin-ℓ irrep where ℓ = (K-1)/2
     use_multi_irrep: bool = False
 
+    # =========================================================================
+    # GAUGE GROUP: Choose the symmetry group for transport operators
+    # =========================================================================
+    # 'SO3':  Standard SO(3) with 3 generators (φ ∈ ℝ³)
+    #         - Irreps indexed by spin ℓ: dim = 2ℓ+1 (odd only)
+    #         - For embed_dim K, uses spin ℓ = (K-1)/2
+    # 'SON':  General SO(N) with N(N-1)/2 generators (φ ∈ ℝ^{N(N-1)/2})
+    #         - Uses N-dimensional fundamental representation
+    #         - More generators = richer gauge structure
+    #         - Requires gauge_dim parameter
+    gauge_group: str = 'SO3'
+    gauge_dim: int = 3  # N for SO(N) when gauge_group='SON' (ignored for 'SO3')
+
     # Numerical stability
     eps: float = 1e-6             # General numerical stability floor
     variance_floor: float = 1e-4  # Minimum variance for KL computation (larger to prevent NaN)
@@ -562,26 +589,73 @@ class PureFEPConfig:
 
     def __post_init__(self):
         """Validate configuration."""
+        # Validate gauge group
+        if self.gauge_group not in ('SO3', 'SON'):
+            raise ValueError(
+                f"gauge_group must be 'SO3' or 'SON', got '{self.gauge_group}'"
+            )
+
+        if self.gauge_group == 'SON' and self.gauge_dim < 2:
+            raise ValueError(
+                f"gauge_dim must be >= 2 for SO(N), got {self.gauge_dim}"
+            )
+
+        # Compute phi dimension based on gauge group
+        if self.gauge_group == 'SO3':
+            self._phi_dim = 3  # so(3) has 3 generators
+            self._n_generators = 3
+        else:  # SON
+            N = self.gauge_dim
+            self._phi_dim = N * (N - 1) // 2  # so(N) has N(N-1)/2 generators
+            self._n_generators = self._phi_dim
+
         # Auto-generate irrep_spec if not provided
         if self.irrep_spec is None:
-            # Single-irrep mode: embed_dim must be odd
-            if self.embed_dim % 2 == 0:
-                raise ValueError(
-                    f"embed_dim must be ODD for single SO(3) irrep (got {self.embed_dim}). "
-                    f"Either use {self.embed_dim - 1} or {self.embed_dim + 1}, "
-                    f"OR provide an irrep_spec for multi-irrep mode."
-                )
-            self.irrep_spec = self._generate_irrep_spec(self.embed_dim)
-        else:
-            # Multi-irrep mode: validate each irrep dimension is odd
-            for label, mult, dim in self.irrep_spec:
-                if dim % 2 == 0:
+            if self.gauge_group == 'SO3':
+                # SO(3): Single-irrep mode requires odd embed_dim
+                if self.embed_dim % 2 == 0:
                     raise ValueError(
-                        f"Irrep '{label}' has even dimension {dim}. "
-                        f"Each SO(3) irrep must have odd dimension (2ℓ+1)."
+                        f"embed_dim must be ODD for single SO(3) irrep (got {self.embed_dim}). "
+                        f"Either use {self.embed_dim - 1} or {self.embed_dim + 1}, "
+                        f"OR provide an irrep_spec for multi-irrep mode."
                     )
-                if mult < 0:
-                    raise ValueError(f"Irrep '{label}' has negative multiplicity {mult}.")
+                self.irrep_spec = self._generate_irrep_spec(self.embed_dim)
+            else:
+                # SO(N): Auto-generate as copies of fundamental rep
+                N = self.gauge_dim
+                n_copies = self.embed_dim // N
+                remainder = self.embed_dim % N
+                if remainder != 0:
+                    # Add scalars to fill the gap
+                    self.irrep_spec = [
+                        ('scalar', remainder, 1),
+                        ('fund', n_copies, N),
+                    ]
+                else:
+                    self.irrep_spec = [('fund', n_copies, N)]
+        else:
+            # Validate provided irrep_spec
+            if self.gauge_group == 'SO3':
+                # SO(3): Each irrep dimension must be odd (2ℓ+1)
+                for label, mult, dim in self.irrep_spec:
+                    if dim % 2 == 0:
+                        raise ValueError(
+                            f"Irrep '{label}' has even dimension {dim}. "
+                            f"Each SO(3) irrep must have odd dimension (2ℓ+1)."
+                        )
+                    if mult < 0:
+                        raise ValueError(f"Irrep '{label}' has negative multiplicity {mult}.")
+            else:
+                # SO(N): Dims must be 1 (scalar) or N (fundamental)
+                N = self.gauge_dim
+                for label, mult, dim in self.irrep_spec:
+                    if dim != 1 and dim != N:
+                        raise ValueError(
+                            f"Irrep '{label}' has dimension {dim}, but SO({N}) "
+                            f"only supports dim=1 (scalar) or dim={N} (fundamental)."
+                        )
+                    if mult < 0:
+                        raise ValueError(f"Irrep '{label}' has negative multiplicity {mult}.")
 
         # Validate irrep_spec sums to embed_dim
         total_dim = sum(mult * dim for _, mult, dim in self.irrep_spec)
@@ -590,6 +664,16 @@ class PureFEPConfig:
                 f"irrep_spec dimensions ({total_dim}) must equal embed_dim ({self.embed_dim}). "
                 f"Current spec: {self.irrep_spec}"
             )
+
+    @property
+    def phi_dim(self) -> int:
+        """Dimension of φ (Lie algebra dimension): 3 for SO(3), N(N-1)/2 for SO(N)."""
+        return getattr(self, '_phi_dim', 3)
+
+    @property
+    def n_generators(self) -> int:
+        """Number of generators in the gauge group."""
+        return getattr(self, '_n_generators', 3)
 
     @staticmethod
     def _generate_irrep_spec(K: int) -> List[Tuple[str, int, int]]:
@@ -672,30 +756,49 @@ class PureFEPLayer(nn.Module):
         # Reference to prior bank (for KL-to-prior output mode)
         self.prior_bank = prior_bank
 
-        # SO(3) generators for gauge transport
-        # Two modes: single irrep (simpler) or multi-irrep (proper block structure)
-        if config.use_multi_irrep:
-            # MULTI-IRREP MODE: Use IrrepMultiHeadAttention with block-diagonal structure
-            self.irrep_attention = IrrepMultiHeadAttention(
-                embed_dim=embed_dim,
-                irrep_spec=config.irrep_spec,
-                kappa_beta=config.kappa,
-                epsilon=config.eps,
-                aggregate_mode='mean_only',
-                diagonal_covariance=config.diagonal_covariance,
-                attention_pattern='local' if config.use_local_attention else 'full',
-                attention_window=config.attention_window,
-            )
-            # Generate proper block-diagonal generators from irrep_spec
-            # These are used for VFE gradient computation and transport operators
-            gen_np = generate_multi_irrep_generators(config.irrep_spec, validate=True)
-            self.register_buffer('generators', torch.from_numpy(gen_np).float())
+        # =====================================================================
+        # GENERATORS: Build SO(3) or SO(N) generators based on gauge_group
+        # =====================================================================
+        self.gauge_group = config.gauge_group
+        self.gauge_dim = config.gauge_dim if config.gauge_group == 'SON' else 3
+
+        if config.gauge_group == 'SO3':
+            # SO(3) mode: 3 generators, phi ∈ ℝ³
+            if config.use_multi_irrep:
+                # Multi-irrep: block-diagonal with spin-ℓ blocks
+                self.irrep_attention = IrrepMultiHeadAttention(
+                    embed_dim=embed_dim,
+                    irrep_spec=config.irrep_spec,
+                    kappa_beta=config.kappa,
+                    epsilon=config.eps,
+                    aggregate_mode='mean_only',
+                    diagonal_covariance=config.diagonal_covariance,
+                    attention_pattern='local' if config.use_local_attention else 'full',
+                    attention_window=config.attention_window,
+                )
+                gen_np = generate_multi_irrep_generators(config.irrep_spec, validate=True)
+            else:
+                # Single irrep: spin-ℓ where ℓ = (K-1)/2
+                self.irrep_attention = None
+                gen_np = generate_so3_generators(embed_dim)
         else:
-            # SINGLE IRREP MODE: Use single spin-ℓ representation
-            # (requires embed_dim to be odd)
-            self.irrep_attention = None
-            gen_np = generate_so3_generators(embed_dim)
-            self.register_buffer('generators', torch.from_numpy(gen_np).float())
+            # SO(N) mode: N(N-1)/2 generators, phi ∈ ℝ^{N(N-1)/2}
+            N = config.gauge_dim
+            self.irrep_attention = None  # IrrepMultiHeadAttention is SO(3)-specific
+
+            if config.use_multi_irrep or True:  # Always use multi-irrep for SO(N)
+                # Multi-irrep: block-diagonal with N-dim fundamental blocks
+                gen_np = generate_multi_irrep_soN_generators(
+                    config.irrep_spec, N, validate=True
+                )
+            else:
+                # Single fundamental rep (only if embed_dim == N)
+                gen_np = generate_soN_generators(N)
+
+        self.register_buffer('generators', torch.from_numpy(gen_np).float())
+
+        # Store phi dimension for later use
+        self._phi_dim = config.phi_dim
 
         # Output projection - maps beliefs to logits for observation likelihood
         # Only used when output_mode='linear' or as fallback
@@ -780,7 +883,7 @@ class PureFEPLayer(nn.Module):
             sigma_q: (B, N, K) belief variances (diagonal)
             mu_p: (B, N, K) prior means (position-dependent!)
             sigma_p: (B, N, K) prior variances (position-dependent!)
-            phi: (B, N, 3) gauge frames in so(3)
+            phi: (B, N, phi_dim) gauge frames in so(N) where phi_dim = N(N-1)/2
         """
         B, N, K = x.shape
 
@@ -814,7 +917,9 @@ class PureFEPLayer(nn.Module):
             sigma_p = torch.cat([sigma_p, sigma_p_pad], dim=1)
 
         # Gauge frames start at identity
-        phi = torch.zeros(B, N, 3, device=device)
+        # phi_dim = 3 for SO(3), N(N-1)/2 for SO(N)
+        phi_dim = getattr(self, '_phi_dim', 3)
+        phi = torch.zeros(B, N, phi_dim, device=device)
         # Enable gradients for phi if gauge evolution is enabled
         if self.config.gauge_evolution_enabled:
             phi.requires_grad_(True)
@@ -1338,7 +1443,9 @@ class PureFEPLayer(nn.Module):
 
         # Create phi for prior (use zero gauge frames for priors)
         # Priors exist in a "reference frame" at φ=0
-        phi = torch.zeros(1, N, 3, device=device)
+        # phi_dim = 3 for SO(3), N(N-1)/2 for SO(N)
+        phi_dim = self.generators.shape[0]  # Number of generators = phi dimension
+        phi = torch.zeros(1, N, phi_dim, device=device)
 
         # Compute transport operators
         transport_cache = compute_transport_operators(phi, self.generators)
@@ -1850,6 +1957,7 @@ class PureFEPTransformer(nn.Module):
                 mode=config.position_encoding,
                 scale=config.position_scale,
                 composition=config.position_composition,
+                phi_dim=config.phi_dim,  # 3 for SO(3), N(N-1)/2 for SO(N)
             )
         else:
             self.gauge_position = None
@@ -1977,7 +2085,9 @@ class PureFEPTransformer(nn.Module):
         # POSITION ENCODING: Add to μ and/or φ
         # =====================================================================
         # Initialize gauge frames (will be modified by position encoder)
-        phi = torch.zeros(B, N, 3, device=device)
+        # phi_dim = 3 for SO(3), N(N-1)/2 for SO(N)
+        phi_dim = self.config.phi_dim
+        phi = torch.zeros(B, N, phi_dim, device=device)
 
         if self.config.position_mode in ['sinusoidal_mu', 'both']:
             # AD HOC: Add sinusoidal to μ

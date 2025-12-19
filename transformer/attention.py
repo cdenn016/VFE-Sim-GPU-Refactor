@@ -127,20 +127,28 @@ def create_attention_mask(
 # =============================================================================
 
 def compute_transport_operators(
-    phi: torch.Tensor,         # (B, N, 3) gauge frames
-    generators: torch.Tensor,  # (3, K, K) SO(3) generators
+    phi: torch.Tensor,         # (B, N, n_gen) gauge frames where n_gen is # of generators
+    generators: torch.Tensor,  # (n_gen, K, K) Lie algebra generators
     use_fast_exp: bool = False,  # Use Taylor approximation for small angles
     exp_order: int = 4,          # Order of Taylor expansion (if use_fast_exp=True)
 ) -> dict:
     """
     Precompute transport operators for caching when phi is fixed.
 
+    Works for both SO(3) and SO(N) gauge groups:
+    - SO(3): n_gen = 3, phi ∈ ℝ³
+    - SO(N): n_gen = N(N-1)/2, phi ∈ ℝ^{N(N-1)/2}
+
     When evolve_phi=False, these operators are constant across layers.
     Computing once saves 2 matrix exponentials per head per layer.
 
     Args:
-        phi: Gauge frames (B, N, 3) in so(3)
-        generators: SO(3) generators (3, K, K)
+        phi: Gauge frames (B, N, n_gen) in so(N) Lie algebra
+             - For SO(3): shape (B, N, 3)
+             - For SO(N): shape (B, N, N*(N-1)/2)
+        generators: Lie algebra generators (n_gen, K, K)
+             - For SO(3): shape (3, K, K)
+             - For SO(N): shape (N*(N-1)/2, K, K)
         use_fast_exp: If True, use Taylor series approximation instead of torch.matrix_exp.
                       Faster but only accurate for small angles (|φ| < 0.5).
         exp_order: Order of Taylor expansion when use_fast_exp=True.

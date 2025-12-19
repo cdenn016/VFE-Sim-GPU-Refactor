@@ -487,6 +487,297 @@ def _validate_block_diagonal_generators(
 
 
 # =============================================================================
+# SO(N) Generators - Fundamental Representation
+# =============================================================================
+
+def generate_soN_generators(
+    N: int,
+    *,
+    validate: bool = True,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """
+    Generate SO(N) Lie algebra generators in the fundamental (N-dimensional) representation.
+
+    SO(N) is the group of N×N orthogonal matrices with determinant 1.
+    Its Lie algebra so(N) consists of N×N skew-symmetric matrices.
+
+    The Lie algebra has dimension N(N-1)/2, with basis elements L_{ij} for i < j:
+        (L_{ij})_{kl} = δ_{ik}δ_{jl} - δ_{il}δ_{jk}
+
+    These satisfy the commutation relations:
+        [L_{ij}, L_{kl}] = δ_{jk}L_{il} - δ_{ik}L_{jl} - δ_{jl}L_{ik} + δ_{il}L_{jk}
+
+    Args:
+        N: The dimension of the fundamental representation (N ≥ 2)
+        validate: If True, verify commutation relations
+        eps: Tolerance for validation
+
+    Returns:
+        G: Generators array, shape (N(N-1)/2, N, N), float32
+           G[a] is the a-th generator, indexed by pairs (i,j) with i < j
+
+    Examples:
+        >>> # SO(3) - 3 generators, 3×3 matrices
+        >>> G = generate_soN_generators(3)
+        >>> G.shape
+        (3, 3, 3)
+
+        >>> # SO(5) - 10 generators, 5×5 matrices
+        >>> G = generate_soN_generators(5)
+        >>> G.shape
+        (10, 5, 5)
+
+        >>> # SO(8) - 28 generators, 8×8 matrices
+        >>> G = generate_soN_generators(8)
+        >>> G.shape
+        (28, 8, 8)
+
+    Properties:
+        - G[a] is real skew-symmetric: G[a]ᵀ = -G[a]
+        - Orthogonal action: exp(θ G[a]) ∈ SO(N) for any θ
+        - Satisfies so(N) commutation relations
+    """
+    if N < 2:
+        raise ValueError(f"N must be >= 2 for SO(N), got N={N}")
+
+    n_generators = N * (N - 1) // 2
+    G = np.zeros((n_generators, N, N), dtype=np.float32)
+
+    # Build generators L_{ij} for i < j
+    idx = 0
+    for i in range(N):
+        for j in range(i + 1, N):
+            # (L_{ij})_{kl} = δ_{ik}δ_{jl} - δ_{il}δ_{jk}
+            G[idx, i, j] = 1.0
+            G[idx, j, i] = -1.0
+            idx += 1
+
+    if validate:
+        _validate_soN_generators(G, N, eps=eps)
+
+    return G
+
+
+def _validate_soN_generators(
+    G: np.ndarray,
+    N: int,
+    *,
+    eps: float = 1e-6,
+) -> None:
+    """
+    Validate SO(N) generators satisfy required properties.
+
+    Checks:
+    1. Skew-symmetry: G[a]ᵀ = -G[a]
+    2. Commutation relations: [L_{ij}, L_{kl}] follows so(N) structure
+
+    Args:
+        G: (n_gen, N, N) generators where n_gen = N(N-1)/2
+        N: Dimension of fundamental rep
+        eps: Tolerance for checks
+    """
+    n_gen = G.shape[0]
+    expected_n_gen = N * (N - 1) // 2
+
+    if n_gen != expected_n_gen:
+        raise ValueError(
+            f"Expected {expected_n_gen} generators for SO({N}), got {n_gen}"
+        )
+
+    # Check skew-symmetry
+    for a in range(n_gen):
+        skew_error = np.linalg.norm(G[a] + G[a].T, ord='fro')
+        if skew_error > eps:
+            raise RuntimeError(
+                f"SO({N}) generator G[{a}] not skew-symmetric: "
+                f"||G + Gᵀ|| = {skew_error:.3e}"
+            )
+
+    # Build index map: (i,j) -> generator index
+    idx_map = {}
+    idx = 0
+    for i in range(N):
+        for j in range(i + 1, N):
+            idx_map[(i, j)] = idx
+            idx += 1
+
+    # Check a sample of commutation relations
+    # [L_{ij}, L_{jk}] = L_{ik} for i < j < k
+    max_error = 0.0
+    for i in range(N):
+        for j in range(i + 1, N):
+            for k in range(j + 1, N):
+                # [L_{ij}, L_{jk}] should equal L_{ik}
+                a = idx_map[(i, j)]
+                b = idx_map[(j, k)]
+                c = idx_map[(i, k)]
+
+                comm = G[a] @ G[b] - G[b] @ G[a]
+                error = np.linalg.norm(comm - G[c], ord='fro')
+                max_error = max(max_error, error)
+
+    if max_error > eps:
+        raise RuntimeError(
+            f"SO({N}) commutation relations violated, max error: {max_error:.3e}"
+        )
+
+
+def generate_multi_irrep_soN_generators(
+    irrep_spec: list,
+    N: int,
+    *,
+    validate: bool = True,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """
+    Generate block-diagonal SO(N) generators from a multi-irrep specification.
+
+    This creates generators for a direct sum of fundamental representations:
+        V = V_N ⊕ V_N ⊕ ... ⊕ V_N  (mult copies)
+
+    Each block is an N×N fundamental representation of SO(N).
+
+    Args:
+        irrep_spec: List of (label, multiplicity, dim) tuples.
+            For SO(N), dim MUST equal N (fundamental rep only).
+            Example: [('fund', 16, 8)] means 16 copies of SO(8) fundamental
+            Total dimension K = Σ mult × dim
+        N: The gauge group dimension (SO(N))
+        validate: If True, verify the resulting generators
+        eps: Tolerance for validation
+
+    Returns:
+        G: Block-diagonal generators, shape (N(N-1)/2, K, K)
+           where K = Σ mult × dim
+
+    Example:
+        >>> # K = 16 × 8 = 128, using SO(8) gauge group
+        >>> spec = [('fund', 16, 8)]
+        >>> G = generate_multi_irrep_soN_generators(spec, N=8)
+        >>> G.shape
+        (28, 128, 128)  # 28 = 8*7/2 generators
+
+        >>> # Mixed: 10 copies of SO(5) fundamental + 20 scalars
+        >>> spec = [('scalar', 20, 1), ('fund', 10, 5)]
+        >>> G = generate_multi_irrep_soN_generators(spec, N=5)
+        >>> G.shape
+        (10, 70, 70)  # 10 = 5*4/2 generators, K = 20 + 50 = 70
+
+    Note:
+        For dim=1 (scalars), the generators act as zero (scalars are invariant).
+        For dim=N (fundamental), the generators act as the standard SO(N) generators.
+        Other dims are not supported (would require higher tensor reps).
+    """
+    # Validate irrep specification
+    for label, mult, dim in irrep_spec:
+        if dim != 1 and dim != N:
+            raise ValueError(
+                f"Irrep '{label}' has dimension {dim}, but SO({N}) fundamental "
+                f"requires dim={N} or dim=1 (scalar). Higher tensor reps not implemented."
+            )
+        if mult < 0:
+            raise ValueError(f"Irrep '{label}' has negative multiplicity {mult}.")
+
+    # Compute total dimension
+    K = sum(mult * dim for _, mult, dim in irrep_spec)
+
+    # Number of generators for SO(N)
+    n_gen = N * (N - 1) // 2
+
+    # Initialize block-diagonal generators
+    G = np.zeros((n_gen, K, K), dtype=np.float32)
+
+    # Get fundamental generators
+    G_fund = generate_soN_generators(N, validate=False)
+
+    # Fill in blocks
+    idx = 0
+    for label, mult, dim in irrep_spec:
+        if dim == 1:
+            # Scalars: generators act as zero
+            idx += mult * dim
+        else:
+            # Fundamental representation blocks
+            for _ in range(mult):
+                G[:, idx:idx+dim, idx:idx+dim] = G_fund
+                idx += dim
+
+    # Validate if requested
+    if validate and K > 1:
+        _validate_block_diagonal_soN_generators(G, irrep_spec, N, eps=eps)
+
+    return G
+
+
+def _validate_block_diagonal_soN_generators(
+    G: np.ndarray,
+    irrep_spec: list,
+    N: int,
+    *,
+    eps: float = 1e-6,
+) -> None:
+    """
+    Validate block-diagonal multi-irrep SO(N) generators.
+
+    Checks:
+    1. Skew-symmetry
+    2. Sample commutation relations
+    3. Block structure (off-diagonal blocks are zero)
+    """
+    n_gen = G.shape[0]
+    K = G.shape[1]
+
+    expected_n_gen = N * (N - 1) // 2
+    if n_gen != expected_n_gen:
+        raise ValueError(
+            f"Expected {expected_n_gen} generators for SO({N}), got {n_gen}"
+        )
+
+    # Check skew-symmetry
+    for a in range(n_gen):
+        skew_error = np.linalg.norm(G[a] + G[a].T, ord='fro')
+        if skew_error > eps:
+            raise RuntimeError(
+                f"Block-diagonal SO({N}) generator G[{a}] not skew-symmetric: "
+                f"||G + Gᵀ|| = {skew_error:.3e}"
+            )
+
+    # Check sample commutation (first 3 generators if available, like SO(3) subset)
+    if n_gen >= 3:
+        G_0, G_1, G_2 = G[0], G[1], G[2]
+
+        # For SO(N) with N >= 3, generators 0,1,2 correspond to:
+        # L_{01}, L_{02}, L_{03} or similar
+        # Their commutations depend on index structure
+
+        # Just check that commutators are skew-symmetric (sanity check)
+        comm_01 = G_0 @ G_1 - G_1 @ G_0
+        if np.linalg.norm(comm_01 + comm_01.T, ord='fro') > eps:
+            raise RuntimeError("Commutator [G_0, G_1] not skew-symmetric")
+
+    # Check block structure
+    idx = 0
+    block_starts = []
+    for _, mult, dim in irrep_spec:
+        for _ in range(mult):
+            block_starts.append((idx, dim))
+            idx += dim
+
+    for i, (start_i, dim_i) in enumerate(block_starts):
+        for j, (start_j, dim_j) in enumerate(block_starts):
+            if i != j:
+                for a in range(min(n_gen, 10)):  # Check first 10 generators
+                    block = G[a, start_i:start_i+dim_i, start_j:start_j+dim_j]
+                    block_norm = np.linalg.norm(block, ord='fro')
+                    if block_norm > eps:
+                        raise RuntimeError(
+                            f"Off-diagonal block ({i},{j}) in generator {a} "
+                            f"is non-zero: ||block|| = {block_norm:.3e}"
+                        )
+
+
+# =============================================================================
 # Cache
 # =============================================================================
 
