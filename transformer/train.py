@@ -1211,8 +1211,10 @@ def pure_fep_validate(
 
     with torch.no_grad():
         for batch in dataloader:
-            input_ids = batch['input_ids'].to(device)
-            targets = batch['targets'].to(device)
+            # Unpack batch (tuple format from dataloader)
+            input_ids, targets = batch
+            input_ids = input_ids.to(device)
+            targets = targets.to(device)
 
             # Forward WITHOUT targets for fair evaluation
             # (beliefs don't get to see answers during eval)
@@ -1341,11 +1343,14 @@ class PureFEPTrainer:
                     if self.step >= self.config.max_steps:
                         break
 
+                    # Unpack batch (tuple format from dataloader)
+                    input_ids, targets = batch
+
                     # Training step
                     metrics = pure_fep_train_step(
                         self.model,
-                        batch['input_ids'],
-                        batch['targets'],
+                        input_ids,
+                        targets,
                         self.device,
                     )
 
