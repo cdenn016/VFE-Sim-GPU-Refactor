@@ -6,12 +6,14 @@ This document explains how the Pure FEP (Free Energy Principle) Transformer work
 
 1. [Core Philosophy](#core-philosophy)
 2. [The Complete VFE Formula](#the-complete-vfe-formula)
-3. [Architecture Components](#architecture-components)
-4. [Two-Timescale Learning Dynamics](#two-timescale-learning-dynamics)
-5. [How Attention Emerges](#how-attention-emerges)
-6. [Gauge-Equivariant Position Encoding](#gauge-equivariant-position-encoding)
-7. [Advanced Features](#advanced-features)
-8. [Data Flow Summary](#data-flow-summary)
+3. [What Beliefs and Priors Represent](#what-beliefs-and-priors-represent)
+4. [Architecture Components](#architecture-components)
+5. [Two-Timescale Learning Dynamics](#two-timescale-learning-dynamics)
+6. [How Attention Emerges](#how-attention-emerges)
+7. [Meta-Agents and Hierarchical Structure](#meta-agents-and-hierarchical-structure)
+8. [Gauge-Equivariant Position Encoding](#gauge-equivariant-position-encoding)
+9. [Untied Embeddings](#untied-embeddings)
+10. [Data Flow Summary](#data-flow-summary)
 
 ---
 
@@ -21,9 +23,9 @@ Standard transformers use backpropagation to adjust weights. The Pure FEP Transf
 
 The brain is theorized to continuously minimize its "free energy" - a bound on surprise. The Pure FEP Transformer implements this:
 
-1. **Beliefs** represent what the model thinks about each token
-2. **Priors** represent what the model expects before seeing data
-3. **Learning** = adjusting priors to reduce the gap between beliefs and observations
+1. **Beliefs (q)** represent what the model INFERS given observations
+2. **Priors (p)** represent what the model EXPECTS before seeing observations
+3. **Learning** = priors flowing toward posteriors (beliefs)
 
 No `optimizer.step()`. No `.backward()`. Just VFE gradient descent on beliefs and slow prior evolution.
 
@@ -35,257 +37,320 @@ The transformer minimizes this objective:
 
 ```
 F = α·Σ_i KL(q_i||p_i)                       [Self-coupling: belief-to-prior]
-  + λ_β·Σ_i Σ_j β_ij·KL(q_i||Ω_ij·q_j)      [Belief alignment: social inference]
-  + Σ_i E_{q_i}[-log p(y_i|z_i)]             [Observation likelihood]
-  + λ_γ·Σ_i Σ_j KL(p_i||Ω_ij·p_j)           [Prior coupling: world model coherence]
-  + Σ_i Σ_d decay^d·KL(p_i||h_i^d)          [Ouroboros Tower: non-Markovian memory]
+  + λ_β·Σ_i Σ_j β_ij·KL(q_i||Ω_ij·q_j)      [Belief alignment: attention]
+  + Σ_i E_{q_i}[-log p(y_i|μ_i)]             [Observation likelihood: CE]
+  + λ_γ·Σ_i Σ_j γ_ij·KL(p_i||Ω_ij·p_j)      [Prior alignment: structure]
+  + Σ_i Σ_d decay^d·KL(p_i||h_i^d)          [Ouroboros Tower: hyperpriors]
 ```
 
 Where:
-- `i, j` index positions (tokens)
-- `d` indexes ancestor depth in the hierarchy
-- `q_i` = belief distribution at position i
+- `i, j` index positions (tokens/agents)
+- `q_i` = belief distribution at position i (posterior)
 - `p_i` = prior distribution at position i
-- `β_ij` = attention weights (emerge from KL divergences!)
-- `Ω_ij` = transport operator from position j to i
-- `h_i^d` = hyperprior from ancestor at depth d
+- `β_ij` = belief attention weights (dynamic, from current beliefs)
+- `γ_ij` = prior attention weights (structural, learned)
+- `Ω_ij` = gauge transport operator from position j to i
+- `h_i^d` = hyperprior at depth d (static or slow)
+- `y_i` = observation (target token)
 
 ### What Each Term Does
 
-| Term | Purpose | Effect |
-|------|---------|--------|
-| **Self-coupling** | Keeps beliefs close to priors | Regularization, prevents belief drift |
-| **Belief alignment** | Positions attend to each other | Creates the attention mechanism |
-| **Observation likelihood** | Match predictions to actual tokens | The cross-entropy loss |
-| **Prior coupling** | Priors learn from each other | World model consistency |
-| **Ouroboros Tower** | Non-Markovian memory | Long-range hierarchical influence |
+| Term | Purpose | Timescale |
+|------|---------|-----------|
+| **KL(q\|\|p)** | Beliefs stay close to priors | Fast (inference) |
+| **β·KL(q\|\|Ωq)** | Beliefs align with neighbors | Fast (inference) |
+| **CE(μ, y)** | Beliefs explain observations | Fast (inference) |
+| **γ·KL(p\|\|Ωp)** | Priors of related tokens align | Slow (learning) |
+| **KL(p\|\|h)** | Priors anchored to hyperpriors | Slowest (structure) |
+
+---
+
+## What Beliefs and Priors Represent
+
+### The Key Insight
+
+```
+μ_p (prior mean)    → encodes WHAT token (content/identity)
+φ   (gauge frame)   → encodes WHERE in sequence (position)
+```
+
+The token embedding IS the prior. Position is encoded separately in the gauge frame.
+
+### In Language Modeling
+
+| Component | Symbol | Meaning |
+|-----------|--------|---------|
+| **Prior** | p_i = embed[x_i] | "What I expect given input token x_i" |
+| **Belief** | q_i (after VFE) | "What I infer given context + observations" |
+| **Observation** | y_i = target | "The actual next token" |
+| **Likelihood** | p(y\|μ) = softmax(W·μ) | "How well μ predicts y" |
+
+### The Belief is a BALANCE
+
+During VFE dynamics, the belief μ_q finds equilibrium between competing forces:
+
+```
+        μ_p (prior)
+           \
+            \  KL(q||p) pulls toward prior
+             \
+              ★ ← μ_q lands HERE (balanced point)
+             / \
+   β·align /   \ CE gradient
+          /     \
+   neighbors   embed[y] (observation)
+```
+
+The posterior is NOT the observation - it's a compromise that:
+- Respects the prior (doesn't forget token identity)
+- Aligns with context (attention to neighbors)
+- Explains observations (predicts target)
 
 ---
 
 ## Architecture Components
 
-### 1. PriorBank: Unified Embedding and Output
+### 1. Token Embeddings as Priors
 
-**Location:** `transformer/pure_fep_transformer.py:107-295`
-
-Traditional transformers have separate embedding and output layers. PriorBank unifies them:
-
+Each token v has a prior belief encoded in its embedding:
 ```
-Each token v has a prior belief: π_v = N(μ_v, Σ_v)
+p_v = N(μ_v, Σ_v) where μ_v = embed[v]
 ```
 
-**Encoding (replaces nn.Embedding):**
+**Input:** Initialize belief from input token's prior
 ```python
-q(z_t) ← π_{token}  # Initialize belief from token's prior
+q(z_i) ← p_{input_token[i]}  # Belief starts at prior
 ```
 
-**Decoding (replaces linear output projection):**
+**Output:** Compare belief to all token embeddings
 ```python
-p(y = v | q) ∝ exp(-KL(q || π_v) / τ)  # Probability via KL to all token priors
+logits = μ_q @ W_out.T  # Similarity to output embeddings
 ```
 
-This creates beautiful symmetry - the same prior bank handles both directions.
+### 2. Untied Embeddings (Critical for Pure FEP)
 
-### 2. GaugePositionEncoder: Position in φ, Not μ
+With tied embeddings, the same matrix serves as both:
+- Input priors (what to expect from this token)
+- Output targets (what to aim for when predicting)
 
-**Location:** `transformer/pure_fep_transformer.py:301-398`
+**Problem:** This creates circular learning dynamics.
 
-Standard transformers add position to the embedding. This is ad hoc - it conflates content and position.
+**Solution:** Untie embeddings:
+```python
+W_in  = input_embed.weight   # (V, K) - PRIORS, updated via p-flow
+W_out = output_embed.weight  # (V, K) - OBSERVATIONS, fixed anchors
+```
 
-The Pure FEP Transformer separates them:
-- **Content** lives in the belief mean μ
-- **Position** lives in the gauge frame φ ∈ so(3)
+Now:
+- W_in learns "what beliefs should look like when this token is input"
+- W_out defines "what the observation targets look like"
+- No collapse because they're separate matrices
+
+### 3. Gauge Position Encoding
+
+Position lives in the gauge frame φ, NOT in the belief mean μ:
 
 ```python
-# Same token at different positions:
 position_5: μ = [semantic content], φ = [0.1, 0.2, 0.3]
-position_9: μ = [semantic content], φ = [0.5, 0.6, 0.7]  # SAME μ, DIFFERENT φ
+position_9: μ = [semantic content], φ = [0.5, 0.6, 0.7]
 ```
 
-Position information affects **how beliefs interact** (through transport operators), not **what they contain**.
+Same μ (token identity), different φ (position).
 
-### 3. PureFEPLayer: The Core Processing Unit
-
-**Location:** `transformer/pure_fep_transformer.py:621-1752`
-
-Each layer maintains:
-- **Beliefs** `q_i = N(μ_q, Σ_q)` - what the model currently thinks
-- **Priors** `p_i = N(μ_p, Σ_p)` - what the model expects (position-dependent!)
-- **Gauge frames** `φ_i` - for parallel transport between positions
-
-The forward pass:
-1. Initialize beliefs from input
-2. Receive priors from parent layer (if any)
-3. Run N VFE gradient descent steps
-4. Return refined beliefs
-
-### 4. PureFEPTransformer: The Complete Model
-
-**Location:** `transformer/pure_fep_transformer.py:1755-2199`
-
-Combines all components with configurable modes:
-
-| Component | Options | Pure FEP Choice |
-|-----------|---------|-----------------|
-| Embedding | 'learned', 'prior_bank', 'hybrid' | `prior_bank` |
-| Position | 'sinusoidal_mu', 'gauge_frame', 'both' | `gauge_frame` |
-| Output | 'linear', 'kl_to_prior', 'both' | `kl_to_prior` |
+Position affects HOW beliefs interact through transport:
+```
+Ω_ij = exp(φ_i - φ_j)  # Relative position determines transport
+```
 
 ---
 
 ## Two-Timescale Learning Dynamics
 
-Learning happens at two timescales:
+### Fast Timescale: Q-Flow (Inference)
 
-### Fast Timescale: Perception (VFE Steps)
-
-Within a single forward pass, beliefs are updated multiple times:
+Within a single forward pass, beliefs evolve to minimize F:
 
 ```python
-for step in range(n_vfe_steps):  # Default: 20 steps
-    # Natural gradient descent on beliefs
-    μ_q ← μ_q - η_μ · Σ_q · ∂F/∂μ_q
-    σ_q ← σ_q - η_σ · ∂F/∂σ_q
+for step in range(n_vfe_steps):
+    # Compute attention from current beliefs
+    β_ij = softmax(-KL(q_i || Ω_ij·q_j) / κ)
+
+    # Compute gradients
+    grad_q = ∂F/∂q = ∂KL(q||p)/∂q + ∂(β·alignment)/∂q + ∂CE/∂q
+
+    # Natural gradient descent
+    μ_q ← μ_q - η · Σ_q · grad_q
 ```
 
-This is **perception** - making sense of the current input given current priors.
+This is **perception** - inferring the current situation.
 
-### Slow Timescale: Learning (Prior Evolution)
+### Slow Timescale: P-Flow (Learning)
 
-After perception, priors slowly evolve:
+After inference, priors slowly evolve toward posteriors:
 
 ```python
-# Priors move toward beliefs (what the model learned)
-μ_p ← μ_p + λ · (μ_q - μ_p)  # EMA with learning rate λ
+# P-flow: prior moves toward posterior
+μ_p ← (1 - lr) · μ_p + lr · μ_q
 
-# Or gradient-based:
-μ_p ← μ_p - η_p · ∂F/∂μ_p
+# Equivalently:
+μ_p ← μ_p + lr · (μ_q - μ_p)
 ```
 
-This is **learning** - updating what the model expects based on what it perceived.
+This is **learning** - updating expectations based on experience.
 
 ### Why Two Timescales?
 
-| Timescale | Rate | Purpose |
-|-----------|------|---------|
-| Fast (beliefs) | η_μ ≈ 0.1 | Quickly fit current observation |
-| Slow (priors) | η_p ≈ 0.01 | Gradually accumulate knowledge |
+| Flow | What Updates | Rate | Purpose |
+|------|--------------|------|---------|
+| Q-flow | Beliefs q | Fast (η ≈ 0.1) | Fit current observation |
+| P-flow | Priors p | Slow (lr ≈ 0.01) | Accumulate knowledge |
 
-Without this separation, the model would either:
-- Overfit to each sample (if priors update too fast)
-- Never learn patterns (if priors don't update at all)
+The prior accumulates "where beliefs typically end up" across many examples.
 
 ---
 
 ## How Attention Emerges
 
-Standard attention uses learned Q, K, V projections. Pure FEP attention **emerges from information geometry**:
+### Attention from KL Divergence
 
-### Step 1: Compute KL Divergences
-
-For each pair of positions (i, j), compute how "surprising" j's belief is from i's perspective:
+No learned W_Q, W_K, W_V matrices. Attention emerges from belief geometry:
 
 ```python
-KL_ij = KL(q_i || Ω_ij · q_j)  # KL after transporting j to i's frame
-```
+# Step 1: Compute divergence between transported beliefs
+KL_ij = KL(q_i || Ω_ij · q_j)
 
-### Step 2: Convert to Attention Weights
+# Step 2: Convert to attention weights
+β_ij = softmax(-KL_ij / κ)  # Low KL = high attention
 
-```python
-β_ij = softmax(-KL_ij / κ)  # Temperature κ controls sharpness
-```
-
-Positions with similar beliefs (low KL) get high attention.
-
-### Step 3: Aggregate Information
-
-```python
-# Message from j to i, weighted by attention
+# Step 3: Aggregate information
 μ_aggregate = Σ_j β_ij · Ω_ij · μ_j
 ```
 
-**No learned W_Q, W_K, W_V matrices!** Attention weights emerge from the geometry of belief distributions.
+Tokens with aligned beliefs (low KL after transport) attend to each other.
+
+### Two Types of Attention
+
+| Type | Formula | Meaning |
+|------|---------|---------|
+| **β_ij (belief attention)** | softmax(-KL(q_i\|\|Ω·q_j)/κ) | "These align NOW" (dynamic) |
+| **γ_ij (prior attention)** | From prior similarity | "These SHOULD align" (structural) |
+
+β is computed fresh each forward pass from current beliefs.
+γ is learned structure about which tokens are related.
+
+---
+
+## Meta-Agents and Hierarchical Structure
+
+### What Are Meta-Agents?
+
+When tokens share aligned beliefs/priors, they form a **meta-agent**:
+
+```
+β matrix:
+        cat  dog  sat  mat
+cat   [  1   .8   .1   .1  ]
+dog   [ .8    1   .1   .1  ]     ← "cat-dog" meta-agent
+sat   [ .1   .1    1   .7  ]
+mat   [ .1   .1   .7    1  ]     ← "sat-mat" meta-agent
+```
+
+The block structure in β reveals meta-agents.
+
+### Meta-Agents at Different Levels
+
+| Level | What Aligns | Timescale | Example |
+|-------|-------------|-----------|---------|
+| Beliefs | High β_ij now | Fast | "cat" and "dog" in this sentence |
+| Priors | High γ_ij learned | Slow | "cat" and "dog" are both animals |
+| Hyperpriors | Shared h | Static | Abstract categories |
+
+### The Human Analogy
+
+```
+Shared generative model (priors)?  + Shared beliefs?  = Meta-agent?
+
+All humans:      ✅ Similar priors       ❌ Different beliefs  → Same species
+Cult/clique:     ✅ Similar priors       ✅ Aligned beliefs    → Meta-agent!
+Human + dog:     ❌ Incompatible priors  ❌ Can't align        → Never meta-agent
+```
+
+Meta-agent formation requires:
+1. **Compatible priors** (gauge transport can align them)
+2. **Aligned beliefs** (actually synchronize in context)
+
+### Gauge Orbits as Categories
+
+Meta-agents are **gauge orbits** in prior space:
+
+```
+"animal" = { p : p ≈ Ω·p_cat ≈ Ω'·p_dog ≈ Ω''·p_bird ... }
+```
+
+Tokens whose priors are related by gauge transport form an equivalence class.
 
 ---
 
 ## Gauge-Equivariant Position Encoding
 
-### The Problem with Covariance Transport
+### Transport Operators
 
-When computing `KL(q_i || Ω_ij · q_j)`, we need to transport j's distribution to i's frame:
-
-```
-μ_transported = Ω_ij · μ_j        # Mean transport: simple matrix multiply
-Σ_transported = Ω_ij · Σ_j · Ω_ij^T  # Covariance transport: full tensor contraction
-```
-
-The full covariance transport requires O(N²K²) memory - prohibitive for large models.
-
-### Efficient Diagonal Transport
-
-For diagonal covariances, we use an efficient formula:
-
-```python
-# Transport diagonal of Ω @ diag(σ) @ Ω^T without materializing full tensor
-# Formula: (Ω @ diag(σ) @ Ω^T)_kk = Σ_l Ω_kl² · σ[l]
-
-Omega_sq = Omega ** 2  # (B, N, N, K, K)
-sigma_transported = torch.einsum('bijkl,bjl->bijk', Omega_sq, sigma_j)
-```
-
-This maintains gauge equivariance while using only O(N²K) memory.
-
-### What is Gauge Equivariance?
-
-The transport operator `Ω_ij = exp(φ_i) · exp(-φ_j)` depends on gauge frames:
+The gauge transport Ω_ij relates beliefs at different positions:
 
 ```
-If we shift all frames: φ_i → φ_i + δ
-Then: Ω_ij → Ω_ij (unchanged!)
+Ω_ij = exp(φ_i · G) · exp(-φ_j · G)
 ```
 
-This gives **translation invariance**: the same relative positions produce the same attention pattern, regardless of absolute position.
+Where G are the SO(3) or SO(N) generators.
+
+### What Transport Does
+
+```
+μ_transported = Ω_ij · μ_j           # Rotate belief j into frame i
+Σ_transported = Ω_ij · Σ_j · Ω_ij^T  # Rotate covariance accordingly
+```
+
+### Translation Invariance
+
+If we shift all frames by δ:
+```
+φ_i → φ_i + δ  for all i
+Ω_ij = exp(φ_i + δ) · exp(-φ_j - δ) = exp(φ_i) · exp(-φ_j)  # Unchanged!
+```
+
+Relative positions determine attention, not absolute positions.
 
 ---
 
-## Advanced Features
+## Untied Embeddings
 
-### Prior Coupling (λ_γ term)
+### Why Untying is Necessary
 
-When enabled (`prior_coupling_enabled=True`), priors learn from each other:
-
-```
-F_prior = λ_γ · Σ_ij KL(p_i || Ω_ij · p_j)
-```
-
-This encourages priors to form a **coherent world model** - position 5's prior should be consistent with position 6's prior.
-
-### Ouroboros Tower (Non-Markovian Memory)
-
-Standard hierarchies are Markovian: layer L only receives priors from layer L+1.
-
-The Ouroboros Tower breaks this:
+With tied embeddings (W_in = W_out):
 
 ```
-Layer 0 gets priors from:
-  - Layer 1 (parent)
-  - Layer 2 (grandparent) with decay^1
-  - Layer 3 (great-grandparent) with decay^2
-  - ...
+Input "cat" → embed["cat"] → VFE → μ_q → predict "sat"
+                                    ↓
+                              μ_q ≈ embed["sat"]
+
+If we update embed["cat"] ← μ_q ≈ embed["sat"]
+→ "cat" embedding becomes like "sat" embedding
+→ Embeddings collapse!
 ```
 
-This creates long-range memory where top-level abstractions directly influence low-level processing.
-
-### Dynamic Layer Emergence
-
-When enabled, the model can spawn new layers if VFE gradients exceed a threshold:
+### The Correct Setup
 
 ```python
-if ∇F > layer_spawn_threshold:
-    spawn_new_layer()
+W_in  = input_embed.weight   # Priors - "what to expect from this token"
+W_out = output_embed.weight  # Targets - "what observations look like"
 ```
 
-This allows the hierarchy depth to adapt to task complexity.
+**P-flow updates W_in only:**
+```python
+W_in[x_i] ← (1-lr) · W_in[x_i] + lr · μ_q[i]
+```
+
+**W_out stays fixed** as the observation reference.
 
 ---
 
@@ -296,34 +361,38 @@ Input: token_ids (B, N)
          │
          ▼
 ┌─────────────────────────────────────────┐
-│  PriorBank.encode()                     │
-│  μ_q, σ_q ← π_{token_ids}               │
+│  Input Embedding (W_in)                 │
+│  μ_p, σ_p ← W_in[token_ids]  (PRIORS)   │
 └─────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────┐
-│  GaugePositionEncoder()                 │
-│  φ = compose_bch(φ_token, φ_position)   │
+│  Position Encoding                       │
+│  φ = position_encode(positions)          │
+│  (Position in gauge frame, NOT in μ)     │
 └─────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────┐
-│  For each layer:                        │
-│  ┌───────────────────────────────────┐  │
-│  │ 1. Init beliefs from input        │  │
-│  │ 2. Receive priors from parent     │  │
-│  │ 3. For step in range(n_vfe_steps):│  │
-│  │    a. Compute β_ij from KL        │  │
-│  │    b. Compute VFE gradients       │  │
-│  │    c. Update beliefs (natural grad)│ │
-│  │ 4. Update persistent priors       │  │
-│  └───────────────────────────────────┘  │
+│  VFE Dynamics (Q-FLOW)                   │
+│  For step in range(n_vfe_steps):         │
+│    1. β_ij = softmax(-KL(q_i||Ω·q_j)/κ) │
+│    2. grad = ∂F/∂q (prior + align + CE) │
+│    3. μ_q ← μ_q - η·Σ·grad              │
+│  Output: μ_q (balanced posterior)        │
 └─────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────┐
-│  PriorBank.decode()                     │
-│  logits = -KL(q || π_v) / τ             │
+│  Output Projection (W_out)               │
+│  logits = μ_q @ W_out.T  (FIXED)         │
+└─────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────┐
+│  Learning (P-FLOW)                       │
+│  W_in[x_i] ← (1-lr)·W_in[x_i] + lr·μ_q  │
+│  (Priors move toward posteriors)         │
 └─────────────────────────────────────────┘
          │
          ▼
@@ -332,37 +401,70 @@ Output: logits (B, N, vocab_size)
 
 ---
 
+## The Complete Learning Picture
+
+```
+                    HYPERPRIORS (h)
+                         │
+                         │ KL(p||h) - anchor
+                         ▼
+    ┌─────────────────────────────────────┐
+    │           PRIORS (p = W_in)          │
+    │                                      │
+    │  ← γ·KL(p||Ωp) - structural align   │
+    │  ← p-flow: p → q (slow learning)    │
+    └─────────────────────────────────────┘
+                         │
+                         │ KL(q||p) - initialization
+                         ▼
+    ┌─────────────────────────────────────┐
+    │          BELIEFS (q)                 │
+    │                                      │
+    │  ← β·KL(q||Ωq) - attention align    │
+    │  ← CE(Wμ,y) - observation gradient  │
+    │  ← VFE descent (fast inference)     │
+    └─────────────────────────────────────┘
+                         │
+                         │ logits = q @ W_out.T
+                         ▼
+                   OBSERVATIONS (y)
+```
+
+**Three timescales:**
+- **Beliefs (q):** Fastest - within forward pass
+- **Priors (p):** Slow - across training steps
+- **Hyperpriors (h):** Slowest/static - fixed structure
+
+---
+
 ## Configuration Quick Reference
 
-Key `PureFEPConfig` parameters:
+Key parameters for Pure FEP mode:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `embed_dim` | 127 | Must be ODD for SO(3) irreps |
-| `num_layers` | 2 | Hierarchical depth |
-| `belief_steps` | 20 | VFE iterations per forward |
-| `alpha` | 0.1 | Self-coupling weight |
-| `kappa` | 0.1 | Attention temperature |
-| `mu_lr` | 0.1 | Belief mean learning rate |
-| `prior_lr` | 0.01 | Prior update rate (slower!) |
-| `pure_fep_mode` | True | Disable backprop entirely |
-| `embedding_mode` | 'prior_bank' | Use unified prior bank |
-| `position_mode` | 'gauge_frame' | Position in gauge frames |
-| `output_mode` | 'kl_to_prior' | Output via KL to priors |
+| `ffn_pure_fep_mode` | True | Enable pure FEP (no backprop) |
+| `ffn_n_iterations` | 10 | VFE steps per forward pass |
+| `ffn_prior_lr` | 0.1 | P-flow learning rate |
+| `tie_embeddings` | False | Must be False for pure FEP |
+| `gauge_fixed_priors` | False | Must be False for per-token learning |
+| `kappa` | 1.0 | Attention temperature |
+| `alpha` | 0.01 | Prior anchoring weight |
 
 ---
 
 ## Summary
 
-The Pure FEP Transformer eliminates ad hoc components by deriving everything from VFE minimization:
+The Pure FEP Transformer derives everything from VFE minimization:
 
 | Traditional | Pure FEP |
 |-------------|----------|
-| nn.Embedding | PriorBank.encode() |
+| nn.Embedding | Input priors (W_in) |
+| Output projection | Observation anchors (W_out) |
 | W_Q, W_K, W_V | KL-based attention |
 | Position sinusoids | Gauge frame φ |
-| Linear output | KL to token priors |
-| Backprop | Two-timescale VFE dynamics |
+| Backprop | P-flow (priors → posteriors) |
 | Adam/SGD | Natural gradient descent |
+| Attention heads | Emergent meta-agents |
 
-The result is a transformer that learns like a brain is theorized to: by minimizing surprise through belief-prior dynamics.
+The result is a transformer that learns like a brain is theorized to: by minimizing surprise through belief-prior dynamics, with meta-agents emerging naturally from attention structure.
