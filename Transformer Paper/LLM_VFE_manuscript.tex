@@ -18,7 +18,6 @@
 \usepackage{tabularx}
 \usepackage{listings}
 \lstset{basicstyle=\ttfamily, breaklines=true}
-\usepackage{booktabs}
 
 \newcommand{\softmax}{\operatorname{softmax}}
 \newcommand{\KL}{\operatorname{KL}}
@@ -120,7 +119,7 @@ Due to limited resources our work validates feasibility at small scale (characte
 
 \subsection{Gauge-Theoretic Framework}
 
-Full details of our gauge theoretic geometry may be found in \cite{Dennis2025}. Briefly, agents are modeled as smooth sections of an associated bundle $\mathcal{E}$ to a principal $G$ bundle with statistical fibers $\mathcal{B}$. In our present consideration the fibers,  $\mathcal{B}$, are statistical manifolds of the exponential family of multi-variate Gaussians (MVG) $q_i(c)$, $p_i(c)$ with $K$-dimensional irreducible representations of the structure group $G$ acting on statistics $\mu_q(c)$ and $\Sigma_q(c)$ as
+Full details of our gauge theoretic geometry may be found in \citet{Dennis2025}. Briefly, agents are modeled as smooth sections of an associated bundle $\mathcal{E}$ to a principal $G$ bundle with statistical fibers $\mathcal{B}$. In our present consideration the fibers,  $\mathcal{B}$, are statistical manifolds of the exponential family of multi-variate Gaussians (MVG) $q_i(c)$, $p_i(c)$ with $K$-dimensional irreducible representations of the structure group $G$ acting on statistics $\mu_q(c)$ and $\Sigma_q(c)$ as
 
 \begin{equation}
     \rho(\Omega) \cdot (\mu, \Sigma) = (\Omega\mu, \Omega\Sigma\Omega^\top)
@@ -158,7 +157,7 @@ $$
 \Omega_{ij}\Sigma_j \Omega_{ij}^T \longmapsto \Sigma_i
 $$
 
-Given the action of the group $G$ on the statistical fibers we are able to derive (from a simple generative model\cite{Dennis2025}) a generalized variational free energy functional at a single point $c \in \mathcal{C}$ as
+Given the action of the group $G$ on the statistical fibers we are able to derive (from a simple generative model~\citep{Dennis2025}) a generalized variational free energy functional at a single point $c \in \mathcal{C}$ as
 
 
 \begin{align}
@@ -187,7 +186,7 @@ For a multivariate Gaussian $\mathcal{N}(\mu, \Sigma)$, the Fisher-Rao metric de
 \tilde{\nabla}_\Sigma \mathcal{F} &= -\tfrac{1}{2} \Sigma^{-1} (\nabla_\Sigma \mathcal{F}) \Sigma^{-1}, \label{eq:nat_grad_sigma}
 \end{align}
 
-where $\nabla_\mu \mathcal{F}$ and $\nabla_\Sigma \mathcal{F}$ are standard Euclidean gradients of the free energy functional~\eqref{eq:free_energy}. The Fisher metric $\mathscr{G} = \Sigma^{-1}$ for the mean parameters and the symmetric product for covariance parameters ensure that updates remain on the manifold of positive-definite matrices.
+where $\nabla_\mu \mathcal{F}$ and $\nabla_\Sigma \mathcal{F}$ are standard Euclidean gradients of the free energy functional~\eqref{eq:free_energy_decomposed}. The Fisher metric $\mathscr{G} = \Sigma^{-1}$ for the mean parameters and the symmetric product for covariance parameters ensure that updates remain on the manifold of positive-definite matrices.
 
 \subsubsection{Gauge-Invariant Covariance Updates via Retraction.}  
 
@@ -217,7 +216,7 @@ In the presence of observations
 \sum_i D_{\mathrm{KL}}(q_i \| p_i)
 + \sum_{i,j} \beta_{ij} D_{\mathrm{KL}}(q_i \| \Omega_{ij} q_j)
 - \mathbb{E}_q[\log p(o \mid c)]
-\label{eq:free_energy_decomposed}
+\label{eq:free_energy_simplified}
 \end{equation}
 
 gauge symmetry breaks and each agent generically flows towards unique non-invariant statistics.  
@@ -630,7 +629,7 @@ computed on the test set. Random baseline (uniform distribution over 256 charact
 
 \subsection{Implementation details.}
 
-All models implemented in Python 3.9+ using NumPy 1.24, SciPy 1.10, and Numba 0.57 for JIT compilation. Natural gradient computations use Cholesky parametrization~\eqref{eq:cholesky} to ensure positive-definiteness. Matrix exponentials for transport operators computed via \texttt{scipy.linalg.expm}. Training performed on a single NVIDIA RTX 3090 GPU (24GB) with mixed precision (float32 for forward pass, float64 for Fisher metrics). Code available at \url{https://github.com/cdenn016/epistemic-geometry}.
+All models implemented in Python 3.9+ using NumPy 1.24, SciPy 1.10, and Numba 0.57 for JIT compilation. Natural gradient computations use Cholesky parametrization ($\Sigma = LL^\top$) to ensure positive-definiteness. Matrix exponentials for transport operators computed via \texttt{scipy.linalg.expm}. Training performed on a single NVIDIA RTX 3090 GPU (24GB) with mixed precision (float32 for forward pass, float64 for Fisher metrics). Code available at \url{https://github.com/cdenn016/epistemic-geometry}.
 
 
 
