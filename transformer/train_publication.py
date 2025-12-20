@@ -1024,12 +1024,17 @@ def run_single_experiment(
         # With gauge_fixed_priors=True, there's only one shared base_mu for all tokens,
         # which doesn't have enough capacity for token-specific learning.
         config['gauge_fixed_priors'] = False
+        # CRITICAL: More VFE iterations for pure FEP!
+        # With only 1 iteration, beliefs don't have time to minimize CE.
+        # Need 5-10 iterations for beliefs to actually converge.
+        config['ffn_n_iterations'] = 10
         print("\n" + "="*70)
         print("PURE FEP MODE ENABLED (Backprop-Free Learning)")
         print("="*70)
         print("  Learning via prior evolution - NO backprop!")
         print(f"  Prior learning rate: {prior_lr}")
         print("  gauge_fixed_priors: DISABLED (need per-token embeddings)")
+        print("  ffn_n_iterations: 10 (beliefs need time to minimize CE)")
         print("  CE (cross-entropy) is INSIDE the VFE")
         print("  Beliefs adjust to minimize prediction error")
         print("  Priors update toward successful beliefs")
