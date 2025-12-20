@@ -69,7 +69,14 @@ from typing import Dict, List, Tuple, Any
 
 from transformer.model import GaugeTransformerLM
 from transformer.data import create_dataloaders, create_char_dataloaders
-from transformer.train import compute_free_energy_loss, compute_rg_metrics_from_attention
+from transformer.train import (
+    compute_free_energy_loss,
+    compute_rg_metrics_from_attention,
+    pure_fep_train_step,
+    pure_fep_validate,
+    PureFEPConfig,
+    PureFEPTrainer,
+)
 from transformer.train_fast import FastTrainer, FastTrainingConfig
 from transformer.publication_metrics import PublicationMetrics, AblationConfig, AblationResult
 
@@ -259,7 +266,17 @@ GPU_OPTIMIZED_CONFIG = {
     'ffn_pattern': 'full',
     'ffn_window': 64,
 
-    
+    # =========================================================================
+    # PURE FEP MODE (Backprop-Free Learning)
+    # When enabled, learning happens through prior evolution, not backprop.
+    # - CE (cross-entropy) is INSIDE the VFE during forward pass
+    # - Beliefs adjust to minimize prediction error
+    # - Priors update toward successful (low-error) beliefs
+    # This is the BELIEF paradigm: Backprop-free Evolving Local Inference via Free Energy
+    # =========================================================================
+    'ffn_pure_fep_mode': False,   # Enable backprop-free learning
+    'ffn_prior_lr': 0.01,         # Learning rate for prior updates
+
     'gauge_fixed_priors': True,
 
     # Training (scaled for GPU)
@@ -922,6 +939,8 @@ def run_single_experiment(
     use_wandb: bool = False,
     args: argparse.Namespace = None,
     enable_publication_metrics: bool = True,
+    pure_fep: bool = False,
+    prior_lr: float = 0.01,
 ) -> Dict:
     """
     Run a single training experiment.
@@ -934,12 +953,17 @@ def run_single_experiment(
         use_wandb: Whether to use Weights & Biases logging
         args: Command-line arguments for logging
         enable_publication_metrics: Whether to enable comprehensive publication metrics
+        pure_fep: If True, use backprop-free learning via prior evolution
+        prior_lr: Learning rate for prior updates in pure FEP mode
 
     Returns:
         Dictionary with final metrics
     """
     print("\n" + "="*70)
-    print(f"EXPERIMENT: FFN_MODE = {ffn_mode}")
+    if pure_fep:
+        print(f"EXPERIMENT: PURE FEP MODE (Backprop-Free)")
+    else:
+        print(f"EXPERIMENT: FFN_MODE = {ffn_mode}")
     print("="*70)
 
     # Override FFN mode in config
@@ -990,6 +1014,22 @@ def run_single_experiment(
     config['vocab_size'] = actual_vocab_size
 
     # =================================================================
+    # Pure FEP Mode Configuration
+    # =================================================================
+    if pure_fep:
+        config['ffn_pure_fep_mode'] = True
+        config['ffn_prior_lr'] = prior_lr
+        print("\n" + "="*70)
+        print("PURE FEP MODE ENABLED (Backprop-Free Learning)")
+        print("="*70)
+        print("  Learning via prior evolution - NO backprop!")
+        print(f"  Prior learning rate: {prior_lr}")
+        print("  CE (cross-entropy) is INSIDE the VFE")
+        print("  Beliefs adjust to minimize prediction error")
+        print("  Priors update toward successful beliefs")
+        print("="*70)
+
+    # =================================================================
     # Model Creation
     # =================================================================
 
@@ -997,6 +1037,8 @@ def run_single_experiment(
     print("CREATING MODEL")
     print("="*70)
     print(f"  FFN mode: {ffn_mode}")
+    if pure_fep:
+        print(f"  Pure FEP: ENABLED (backprop-free)")
     print(f"  N (seq len): {config['max_seq_len']}")
     print(f"  K (embed): {config['embed_dim']}")
     print(f"  Layers: {config['n_layers']}")
@@ -1077,93 +1119,180 @@ def run_single_experiment(
     
 
     # =================================================================
-    # Create Trainer
+    # Create Trainer (Pure FEP or Standard)
     # =================================================================
 
     print("\n" + "="*70)
     print("INITIALIZING TRAINER")
     print("="*70)
 
-    # Create comprehensive publication metrics tracker
-    pub_metrics = None
-    if enable_publication_metrics:
-        experiment_name = f"{ffn_mode}_{time.strftime('%Y%m%d_%H%M%S')}"
-        pub_metrics = PublicationMetrics(
-            experiment_name=experiment_name,
-            base_dir=exp_checkpoint_dir / "publication_outputs"
+    if pure_fep:
+        # =========================================================
+        # PURE FEP MODE: Backprop-free learning via prior evolution
+        # =========================================================
+        print("Mode: PURE FEP (Backprop-Free)")
+        print(f"Prior learning rate: {prior_lr}")
+
+        pure_fep_config = PureFEPConfig(
+            prior_lr=prior_lr,
+            max_seq_len=config['max_seq_len'],
+            max_steps=config['max_steps'],
+            log_every=config['log_interval'],
+            eval_every=config['eval_interval'],
+            save_every=config['checkpoint_interval'],
+            checkpoint_dir=exp_checkpoint_dir,
+            device=str(device),
         )
 
-    trainer = PublicationTrainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        config=train_config,
-        device=device,
-        publication_metrics=pub_metrics,
-    )
+        trainer = PureFEPTrainer(
+            model=model,
+            train_dataloader=train_loader,
+            val_dataloader=val_loader,
+            config=pure_fep_config,
+        )
 
-    # =================================================================
-    # Training
-    # =================================================================
-
-    print("\n" + "="*70)
-    print("STARTING TRAINING")
-    print("="*70)
-    print(f"Device: {device}")
-    print(f"FFN mode: {ffn_mode}")
-    print(f"Total steps: {train_config.max_steps:,}")
-    print("\nNOTE: First few batches may be slow (JIT compilation)")
-    print("="*70 + "\n")
-
-    try:
-        trainer.train()
+        # =================================================================
+        # Training (Pure FEP)
+        # =================================================================
 
         print("\n" + "="*70)
-        print("✓ TRAINING COMPLETE!")
+        print("STARTING PURE FEP TRAINING (No Backprop!)")
         print("="*70)
+        print(f"Device: {device}")
+        print(f"Total steps: {pure_fep_config.max_steps:,}")
+        print("\nLearning via prior evolution - beliefs update priors!")
+        print("="*70 + "\n")
 
-        # Final evaluation
-        final_metrics = trainer.validate()
+        try:
+            trainer.train()
 
-        print(f"\nFinal Validation Metrics:")
-        print(f"  Loss:       {final_metrics['loss']:.4f}")
-        print(f"  Perplexity: {final_metrics['perplexity']:.2f}")
+            print("\n" + "="*70)
+            print("✓ PURE FEP TRAINING COMPLETE!")
+            print("="*70)
 
-        # vs random baseline
-        random_ppl = actual_vocab_size
-        improvement = random_ppl / final_metrics['perplexity']
-        print(f"\nImprovement over random:")
-        print(f"  Random:     {random_ppl:.0f}")
-        print(f"  Model:      {final_metrics['perplexity']:.2f}")
-        print(f"  Factor:     {improvement:.1f}x better!")
+            # Final evaluation
+            final_metrics = pure_fep_validate(model, val_loader, device)
 
-        # Save final checkpoint
-        final_ckpt = trainer.save_checkpoint(is_best=True)
-        print(f"\n✓ Saved: {final_ckpt}")
+            print(f"\nFinal Validation Metrics:")
+            print(f"  Loss:       {final_metrics['val/loss']:.4f}")
+            print(f"  Perplexity: {final_metrics['val/perplexity']:.2f}")
 
-        # Return metrics
-        return {
-            'ffn_mode': ffn_mode,
-            'final_loss': final_metrics['loss'],
-            'final_ppl': final_metrics['perplexity'],
-            'random_ppl': random_ppl,
-            'improvement': improvement,
-            'total_params': total_params,
-            'vocab_size': actual_vocab_size,
-            'checkpoint': str(final_ckpt),
-        }
+            # vs random baseline
+            random_ppl = actual_vocab_size
+            improvement = random_ppl / final_metrics['val/perplexity']
+            print(f"\nImprovement over random:")
+            print(f"  Random:     {random_ppl:.0f}")
+            print(f"  Model:      {final_metrics['val/perplexity']:.2f}")
+            print(f"  Factor:     {improvement:.1f}x better!")
 
-    except KeyboardInterrupt:
-        print("\n\n" + "="*70)
-        print("TRAINING INTERRUPTED")
+            # Return metrics
+            return {
+                'ffn_mode': ffn_mode,
+                'pure_fep': True,
+                'final_loss': final_metrics['val/loss'],
+                'final_ppl': final_metrics['val/perplexity'],
+                'random_ppl': random_ppl,
+                'improvement': improvement,
+                'total_params': total_params,
+                'vocab_size': actual_vocab_size,
+                'checkpoint': str(exp_checkpoint_dir / 'final_model.pt'),
+            }
+
+        except KeyboardInterrupt:
+            print("\n\n" + "="*70)
+            print("⚠ Training interrupted by user")
+            print("="*70)
+            return None
+
+        except Exception as e:
+            print(f"\n\n❌ Error: {e}")
+            raise
+
+    else:
+        # =========================================================
+        # STANDARD MODE: Backprop-based training
+        # =========================================================
+        # Create comprehensive publication metrics tracker
+        pub_metrics = None
+        if enable_publication_metrics:
+            experiment_name = f"{ffn_mode}_{time.strftime('%Y%m%d_%H%M%S')}"
+            pub_metrics = PublicationMetrics(
+                experiment_name=experiment_name,
+                base_dir=exp_checkpoint_dir / "publication_outputs"
+            )
+
+        trainer = PublicationTrainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            config=train_config,
+            device=device,
+            publication_metrics=pub_metrics,
+        )
+
+        # =================================================================
+        # Training (Standard Backprop)
+        # =================================================================
+
+        print("\n" + "="*70)
+        print("STARTING TRAINING")
         print("="*70)
-        ckpt = trainer.save_checkpoint(is_best=False)
-        print(f"✓ Saved: {ckpt}")
-        return None
+        print(f"Device: {device}")
+        print(f"FFN mode: {ffn_mode}")
+        print(f"Total steps: {train_config.max_steps:,}")
+        print("\nNOTE: First few batches may be slow (JIT compilation)")
+        print("="*70 + "\n")
 
-    except Exception as e:
-        print(f"\n\n❌ Error: {e}")
-        raise
+        try:
+            trainer.train()
+
+            print("\n" + "="*70)
+            print("✓ TRAINING COMPLETE!")
+            print("="*70)
+
+            # Final evaluation
+            final_metrics = trainer.validate()
+
+            print(f"\nFinal Validation Metrics:")
+            print(f"  Loss:       {final_metrics['loss']:.4f}")
+            print(f"  Perplexity: {final_metrics['perplexity']:.2f}")
+
+            # vs random baseline
+            random_ppl = actual_vocab_size
+            improvement = random_ppl / final_metrics['perplexity']
+            print(f"\nImprovement over random:")
+            print(f"  Random:     {random_ppl:.0f}")
+            print(f"  Model:      {final_metrics['perplexity']:.2f}")
+            print(f"  Factor:     {improvement:.1f}x better!")
+
+            # Save final checkpoint
+            final_ckpt = trainer.save_checkpoint(is_best=True)
+            print(f"\n✓ Saved: {final_ckpt}")
+
+            # Return metrics
+            return {
+                'ffn_mode': ffn_mode,
+                'pure_fep': False,
+                'final_loss': final_metrics['loss'],
+                'final_ppl': final_metrics['perplexity'],
+                'random_ppl': random_ppl,
+                'improvement': improvement,
+                'total_params': total_params,
+                'vocab_size': actual_vocab_size,
+                'checkpoint': str(final_ckpt),
+            }
+
+        except KeyboardInterrupt:
+            print("\n\n" + "="*70)
+            print("TRAINING INTERRUPTED")
+            print("="*70)
+            ckpt = trainer.save_checkpoint(is_best=False)
+            print(f"✓ Saved: {ckpt}")
+            return None
+
+        except Exception as e:
+            print(f"\n\n❌ Error: {e}")
+            raise
 
 
 def main():
@@ -1177,6 +1306,12 @@ def main():
     # Enable full geometric learning (Σ and φ)
     parser.add_argument('--enable_sigma_phi', action='store_true', default=DEFAULT_ENABLE_SIGMA_PHI,
                         help='Enable learning covariances (Σ) and gauge frames (φ) - full geometric learning!')
+
+    # Pure FEP mode (backprop-free learning)
+    parser.add_argument('--pure_fep', action='store_true', default=False,
+                        help='Enable pure FEP mode: learning via prior evolution, NO backprop!')
+    parser.add_argument('--prior_lr', type=float, default=0.01,
+                        help='Learning rate for prior updates in pure FEP mode (default: 0.01)')
 
     # GPU optimization
     parser.add_argument('--gpu_optimized', action='store_true', default=DEFAULT_USE_GPU_OPTIMIZED,
@@ -1244,6 +1379,15 @@ def main():
         config['evolve_sigma'] = True
         config['evolve_phi'] = True
 
+    # Pure FEP mode announcement
+    if args.pure_fep:
+        print("\n" + "="*70)
+        print("PURE FEP MODE (BELIEF: Backprop-free Evolving Local Inference)")
+        print("="*70)
+        print("   Learning via prior evolution - NO backprop!")
+        print(f"   Prior learning rate: {args.prior_lr}")
+        print("="*70 + "\n")
+
     result = run_single_experiment(
         config=config,
         ffn_mode=args.ffn_mode,
@@ -1251,11 +1395,14 @@ def main():
         checkpoint_dir=checkpoint_dir,
         use_wandb=args.use_wandb,
         args=args,
+        pure_fep=args.pure_fep,
+        prior_lr=args.prior_lr,
     )
 
     if result is not None:
         # Save result
-        result_file = checkpoint_dir / f"result_{args.ffn_mode}.json"
+        mode_suffix = "pure_fep" if args.pure_fep else args.ffn_mode
+        result_file = checkpoint_dir / f"result_{mode_suffix}.json"
         result_file.parent.mkdir(parents=True, exist_ok=True)
         with open(result_file, 'w') as f:
             json.dump(result, f, indent=2)
