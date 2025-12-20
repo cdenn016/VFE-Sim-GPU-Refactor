@@ -1019,14 +1019,21 @@ def run_single_experiment(
     if pure_fep:
         config['ffn_pure_fep_mode'] = True
         config['ffn_prior_lr'] = prior_lr
+        # CRITICAL: Disable gauge_fixed_priors for pure FEP!
+        # We need per-token embeddings (mu_embed) that can be updated individually.
+        # With gauge_fixed_priors=True, there's only one shared base_mu for all tokens,
+        # which doesn't have enough capacity for token-specific learning.
+        config['gauge_fixed_priors'] = False
         print("\n" + "="*70)
         print("PURE FEP MODE ENABLED (Backprop-Free Learning)")
         print("="*70)
         print("  Learning via prior evolution - NO backprop!")
         print(f"  Prior learning rate: {prior_lr}")
+        print("  gauge_fixed_priors: DISABLED (need per-token embeddings)")
         print("  CE (cross-entropy) is INSIDE the VFE")
         print("  Beliefs adjust to minimize prediction error")
         print("  Priors update toward successful beliefs")
+        print("  Embeddings update toward successful beliefs")
         print("="*70)
 
     # =================================================================
