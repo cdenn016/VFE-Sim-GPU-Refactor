@@ -138,6 +138,13 @@ class GaugeTransformerLM(nn.Module):
         ffn_max_seq_len = config.get('ffn_max_seq_len', max_seq_len)
         ffn_prior_lr = config.get('ffn_prior_lr', 0.01)
 
+        # Pure FEP requires untied embeddings!
+        # - Input embeddings (W_in) = priors, updated via p-flow
+        # - Output embeddings (W_out) = observation anchors, fixed
+        if ffn_pure_fep_mode and tie_embeddings:
+            print("Pure FEP mode: automatically untying embeddings (priors ≠ observations)")
+            tie_embeddings = False
+
         # Gauge-fixed priors (for gauge covariance)
         gauge_fixed_priors = config.get('gauge_fixed_priors', False)
 
