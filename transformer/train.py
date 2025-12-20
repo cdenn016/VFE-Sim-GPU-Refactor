@@ -1098,7 +1098,92 @@ class Trainer:
 # - Beliefs adjust to minimize CE during forward pass
 # - Low-error beliefs update persistent priors (soft EM)
 # - Priors consolidate knowledge without backprop
+# - Embeddings update toward successful beliefs (tied with output projection)
 # =============================================================================
+
+
+def update_embeddings_from_beliefs(
+    model,
+    mu_beliefs: torch.Tensor,      # (B, N, K) final beliefs
+    targets: torch.Tensor,         # (B, N) target token IDs
+    prediction_errors: torch.Tensor,  # (B, N) per-position CE
+    lr: float = 0.01,
+):
+    """
+    Update token embeddings toward beliefs that successfully predicted.
+
+    This is the LOCAL LEARNING rule for embeddings (no backprop):
+    - For each position with target token t, pull embed[t] toward belief μ
+    - Weight by success: low CE = stronger pull
+
+    Since embeddings are tied with output projection (W_out = W_embed.T),
+    this updates both the input and output mappings.
+
+    Args:
+        model: GaugeTransformerLM with tied embeddings
+        mu_beliefs: (B, N, K) evolved belief means
+        prediction_errors: (B, N) per-position cross-entropy loss
+        targets: (B, N) target token IDs
+        lr: Base learning rate for embedding updates
+    """
+    B, N, K = mu_beliefs.shape
+
+    # Get embedding weight (tied with output projection)
+    embed_weight = model.token_embed.mu_embed.weight  # (V, K)
+
+    with torch.no_grad():
+        valid_mask = targets != -100
+
+        # Compute weights from prediction errors (low error = high weight)
+        # Clamp errors to avoid numerical issues
+        errors_clamped = prediction_errors.clamp(min=1e-6, max=20.0)
+        weights = 1.0 / (1.0 + errors_clamped)  # (B, N) in range [0.05, 1]
+
+        # Normalize weights to get effective learning rates
+        weights = weights * valid_mask.float()  # Zero out invalid positions
+
+        # For each unique token, accumulate weighted beliefs and counts
+        # Using scatter operations for efficiency
+        flat_targets = targets.view(-1)  # (B*N,)
+        flat_beliefs = mu_beliefs.view(-1, K)  # (B*N, K)
+        flat_weights = weights.view(-1)  # (B*N,)
+        flat_valid = valid_mask.view(-1)  # (B*N,)
+
+        # Only process valid positions
+        valid_indices = flat_valid.nonzero(as_tuple=True)[0]
+        if len(valid_indices) == 0:
+            return {'embed_updates': 0}
+
+        valid_tokens = flat_targets[valid_indices]  # Token IDs to update
+        valid_beliefs = flat_beliefs[valid_indices]  # Corresponding beliefs
+        valid_weights = flat_weights[valid_indices]  # Corresponding weights
+
+        # For each unique token, compute weighted average belief
+        unique_tokens = valid_tokens.unique()
+        n_updates = 0
+
+        for token_id in unique_tokens:
+            mask = valid_tokens == token_id
+            token_beliefs = valid_beliefs[mask]  # (n_occurrences, K)
+            token_weights = valid_weights[mask]  # (n_occurrences,)
+
+            # Weighted average of beliefs for this token
+            weight_sum = token_weights.sum()
+            if weight_sum > 0:
+                weighted_belief = (token_beliefs * token_weights.unsqueeze(-1)).sum(dim=0) / weight_sum
+
+                # EMA update: embed <- (1-lr)*embed + lr*belief
+                # Scale lr by average weight for this token
+                effective_lr = lr * (weight_sum / mask.sum()).item()
+                effective_lr = min(effective_lr, 0.1)  # Cap to prevent instability
+
+                embed_weight[token_id] = (
+                    (1.0 - effective_lr) * embed_weight[token_id] +
+                    effective_lr * weighted_belief
+                )
+                n_updates += 1
+
+        return {'embed_updates': n_updates, 'embed_unique_tokens': len(unique_tokens)}
 
 
 def pure_fep_train_step(
@@ -1171,6 +1256,16 @@ def pure_fep_train_step(
                     if hasattr(block.ffn, 'get_prior_stats'):
                         prior_stats = block.ffn.get_prior_stats()
 
+        # Update embeddings toward successful beliefs (local learning rule)
+        # Since embeddings are tied with output projection, this updates both
+        embed_stats = update_embeddings_from_beliefs(
+            model=model,
+            mu_beliefs=mu_beliefs,
+            targets=targets,
+            prediction_errors=ce_per_position,
+            lr=0.01,  # TODO: make configurable
+        )
+
     # Compute metrics
     perplexity = torch.exp(ce_loss).item()
 
@@ -1181,6 +1276,7 @@ def pure_fep_train_step(
         'attention/beta_mean': attn_info['beta'].mean().item(),
         'attention/kl_mean': attn_info['kl'].mean().item(),
         **{f'prior/{k}': v for k, v in prior_stats.items()},
+        **{f'embed/{k}': v for k, v in embed_stats.items()},
     }
 
     return metrics
@@ -1359,7 +1455,8 @@ class PureFEPTrainer:
                         ppl = metrics['perplexity']
                         ce = metrics['loss/ce']
                         prior_active = metrics.get('prior/prior_active_positions', 0)
-                        print(f"Step {self.step:6d} | CE: {ce:.4f} | PPL: {ppl:.2f} | Active priors: {prior_active}")
+                        embed_updates = metrics.get('embed/embed_updates', 0)
+                        print(f"Step {self.step:6d} | CE: {ce:.4f} | PPL: {ppl:.2f} | Priors: {prior_active} | Embeds: {embed_updates}")
 
                     # Validation (skip step 0)
                     if self.val_dataloader is not None and self.step % self.config.eval_every == 0 and self.step > 0:
