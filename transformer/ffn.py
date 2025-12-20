@@ -164,6 +164,26 @@ class GaugeFFN(nn.Module):
         """Get current FFN mode."""
         return self.mode
 
+    # =========================================================================
+    # Pure FEP mode pass-through methods
+    # =========================================================================
+
+    @property
+    def pure_fep_mode(self) -> bool:
+        """Check if pure FEP mode is enabled."""
+        return getattr(self.variational_ffn, 'pure_fep_mode', False)
+
+    def update_priors_from_beliefs(self, *args, **kwargs):
+        """Forward to variational_ffn for prior updates."""
+        if hasattr(self.variational_ffn, 'update_priors_from_beliefs'):
+            return self.variational_ffn.update_priors_from_beliefs(*args, **kwargs)
+
+    def get_prior_stats(self):
+        """Forward to variational_ffn for prior statistics."""
+        if hasattr(self.variational_ffn, 'get_prior_stats'):
+            return self.variational_ffn.get_prior_stats()
+        return {}
+
 
 # =============================================================================
 # Convenience functions
