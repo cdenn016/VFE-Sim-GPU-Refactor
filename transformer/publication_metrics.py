@@ -618,6 +618,24 @@ class PublicationMetrics:
         self.tracker.record(step, epoch, train_metrics, grad_norms,
                            lr, step_time, batch_size, seq_len)
 
+    def record_training_step(
+        self,
+        step: int,
+        epoch: float,
+        train_metrics: Dict[str, float],
+        diagnostics: Optional[Dict] = None,
+        grad_norms: Optional[Dict[str, float]] = None,
+        lrs: Optional[Dict[str, float]] = None,
+        step_time: float = 0.0,
+        batch_size: int = 1,
+        seq_len: int = 1,
+    ):
+        """Record training step metrics (compatibility wrapper)."""
+        # Extract lr from lrs dict if provided
+        lr = lrs.get('mu_embed', 0.0) if lrs else 0.0
+        self.tracker.record(step, epoch, train_metrics, grad_norms,
+                           lr, step_time, batch_size, seq_len)
+
     def record_validation(self, step: int, val_metrics: Dict[str, float]):
         """Record validation metrics."""
         self.tracker.record_validation(step, val_metrics)
@@ -701,6 +719,42 @@ class PublicationMetrics:
                 print(f"[WARN] Could not generate attention heatmap: {e}")
 
         print(f"[PublicationMetrics] Generated figures: {', '.join(figures_generated)}")
+
+    def generate_all_figures(self, attention_weights: Optional[torch.Tensor] = None):
+        """Alias for generate_figures (compatibility)."""
+        self.generate_figures(attention_weights)
+
+    def generate_interpretability_outputs(
+        self,
+        model: Any,
+        sample_batch: Tuple,
+        tokenizer: Any = None,
+        device: str = 'cpu',
+    ):
+        """
+        Generate interpretability outputs (attention patterns, etc).
+
+        Args:
+            model: The trained model
+            sample_batch: A sample batch (input_ids, target_ids)
+            tokenizer: Optional tokenizer for decoding
+            device: Device to run on
+        """
+        try:
+            input_ids, _ = sample_batch
+            input_ids = input_ids.to(device)
+
+            model.eval()
+            with torch.no_grad():
+                if hasattr(model, 'forward_with_attention'):
+                    _, attn_info = model.forward_with_attention(input_ids, targets=None)
+                    beta = attn_info.get('beta')
+                    if beta is not None:
+                        self.generate_figures(attention_weights=beta)
+            model.train()
+            print(f"[PublicationMetrics] Generated interpretability outputs")
+        except Exception as e:
+            print(f"[WARN] Could not generate interpretability outputs: {e}")
 
     def print_summary(self):
         """Print experiment summary."""
