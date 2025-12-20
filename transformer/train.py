@@ -1102,110 +1102,87 @@ class Trainer:
 # =============================================================================
 
 
-def update_embeddings_from_beliefs(
+def update_input_embeddings_pflow(
     model,
-    mu_beliefs: torch.Tensor,      # (B, N, K) final beliefs
-    targets: torch.Tensor,         # (B, N) target token IDs
+    input_ids: torch.Tensor,       # (B, N) input token IDs
+    mu_beliefs: torch.Tensor,      # (B, N, K) final beliefs (posteriors)
     prediction_errors: torch.Tensor,  # (B, N) per-position CE
-    lr: float = 0.01,
+    lr: float = 0.1,
 ):
     """
-    Update token embeddings toward beliefs that successfully predicted.
+    P-FLOW: Update INPUT embeddings toward posteriors (beliefs).
 
-    This is the LOCAL LEARNING rule for embeddings (no backprop):
-    - For each position with target token t, pull embed[t] toward belief μ
-    - Weight by success: low CE = stronger pull
+    This is the correct FEP learning rule:
+    - Prior (input embedding) moves toward posterior (belief)
+    - μ_p ← (1-lr) * μ_p + lr * μ_q
+    - Weighted by prediction success (low CE = stronger update)
 
-    Since embeddings are tied with output projection (W_out = W_embed.T),
-    this updates both the input and output mappings.
+    With UNTIED embeddings:
+    - Input embeddings (W_in) = priors, updated here
+    - Output embeddings (W_out) = observation anchors, stay fixed
 
     Args:
-        model: GaugeTransformerLM with tied embeddings
-        mu_beliefs: (B, N, K) evolved belief means
+        model: GaugeTransformerLM with untied embeddings
+        input_ids: (B, N) input token IDs (which tokens to update)
+        mu_beliefs: (B, N, K) evolved belief means (posteriors)
         prediction_errors: (B, N) per-position cross-entropy loss
-        targets: (B, N) target token IDs
-        lr: Base learning rate for embedding updates
+        lr: Base learning rate for p-flow updates
     """
     B, N, K = mu_beliefs.shape
 
-    # Get embedding weight (tied with output projection)
-    # Handle both standard embeddings (mu_embed) and gauge-fixed priors (base_mu)
+    # Get INPUT embedding weight (priors)
     token_embed = model.token_embed
 
     if hasattr(token_embed, 'mu_embed'):
-        # Standard per-token embeddings
-        embed_weight = token_embed.mu_embed.weight  # (V, K)
+        embed_weight = token_embed.mu_embed.weight  # (V, K) - INPUT embeddings
     elif hasattr(token_embed, 'base_mu'):
-        # Gauge-fixed priors: single base_mu rotated per token
-        # Can't do per-token updates, so update base_mu toward average belief
+        # Gauge-fixed priors: update base_mu toward average belief
         with torch.no_grad():
-            valid_mask = targets != -100
-            if valid_mask.any():
-                errors_clamped = prediction_errors.clamp(min=1e-6, max=20.0)
-                weights = 1.0 / (1.0 + errors_clamped)
-                weights = weights * valid_mask.float()
-                weight_sum = weights.sum()
-                if weight_sum > 0:
-                    weighted_belief = (mu_beliefs * weights.unsqueeze(-1)).sum(dim=(0, 1)) / weight_sum
-                    effective_lr = min(lr * 0.1, 0.01)  # Smaller lr for shared base
-                    token_embed.base_mu.data = (
-                        (1.0 - effective_lr) * token_embed.base_mu.data +
-                        effective_lr * weighted_belief
-                    )
+            errors_clamped = prediction_errors.clamp(min=1e-6, max=20.0)
+            weights = 1.0 / (1.0 + errors_clamped)
+            weight_sum = weights.sum()
+            if weight_sum > 0:
+                weighted_belief = (mu_beliefs * weights.unsqueeze(-1)).sum(dim=(0, 1)) / weight_sum
+                effective_lr = min(lr * 0.1, 0.01)
+                token_embed.base_mu.data = (
+                    (1.0 - effective_lr) * token_embed.base_mu.data +
+                    effective_lr * weighted_belief
+                )
         return {'embed_updates': 1, 'embed_mode': 'base_mu'}
     else:
-        # No updatable embeddings
         return {'embed_updates': 0, 'embed_mode': 'none'}
 
     with torch.no_grad():
-        valid_mask = targets != -100
-
-        # Compute weights from prediction errors (low error = high weight)
-        # Clamp errors to avoid numerical issues
+        # Compute weights from prediction errors (low CE = high weight)
         errors_clamped = prediction_errors.clamp(min=1e-6, max=20.0)
         weights = 1.0 / (1.0 + errors_clamped)  # (B, N) in range [0.05, 1]
 
-        # Normalize weights to get effective learning rates
-        weights = weights * valid_mask.float()  # Zero out invalid positions
-
-        # For each unique token, accumulate weighted beliefs and counts
-        # Using scatter operations for efficiency
-        flat_targets = targets.view(-1)  # (B*N,)
+        # Flatten for processing
+        flat_inputs = input_ids.view(-1)  # (B*N,) - INPUT token IDs
         flat_beliefs = mu_beliefs.view(-1, K)  # (B*N, K)
         flat_weights = weights.view(-1)  # (B*N,)
-        flat_valid = valid_mask.view(-1)  # (B*N,)
 
-        # Only process valid positions
-        valid_indices = flat_valid.nonzero(as_tuple=True)[0]
-        if len(valid_indices) == 0:
-            return {'embed_updates': 0}
-
-        valid_tokens = flat_targets[valid_indices]  # Token IDs to update
-        valid_beliefs = flat_beliefs[valid_indices]  # Corresponding beliefs
-        valid_weights = flat_weights[valid_indices]  # Corresponding weights
-
-        # For each unique token, compute weighted average belief
-        unique_tokens = valid_tokens.unique()
+        # For each unique INPUT token, compute weighted average posterior
+        unique_tokens = flat_inputs.unique()
         n_updates = 0
 
         for token_id in unique_tokens:
-            mask = valid_tokens == token_id
-            token_beliefs = valid_beliefs[mask]  # (n_occurrences, K)
-            token_weights = valid_weights[mask]  # (n_occurrences,)
+            mask = flat_inputs == token_id
+            token_beliefs = flat_beliefs[mask]  # (n_occurrences, K)
+            token_weights = flat_weights[mask]  # (n_occurrences,)
 
-            # Weighted average of beliefs for this token
+            # Weighted average of posteriors for this input token
             weight_sum = token_weights.sum()
             if weight_sum > 0:
-                weighted_belief = (token_beliefs * token_weights.unsqueeze(-1)).sum(dim=0) / weight_sum
+                weighted_posterior = (token_beliefs * token_weights.unsqueeze(-1)).sum(dim=0) / weight_sum
 
-                # EMA update: embed <- (1-lr)*embed + lr*belief
-                # Scale lr by average weight for this token
+                # P-FLOW: prior <- (1-lr)*prior + lr*posterior
                 effective_lr = lr * (weight_sum / mask.sum()).item()
-                effective_lr = min(effective_lr, 0.1)  # Cap to prevent instability
+                effective_lr = min(effective_lr, 0.1)  # Cap for stability
 
                 embed_weight[token_id] = (
                     (1.0 - effective_lr) * embed_weight[token_id] +
-                    effective_lr * weighted_belief
+                    effective_lr * weighted_posterior
                 )
                 n_updates += 1
 
@@ -1282,18 +1259,17 @@ def pure_fep_train_step(
                     if hasattr(block.ffn, 'get_prior_stats'):
                         prior_stats = block.ffn.get_prior_stats()
 
-        # NOTE: Embedding updates disabled for now - they seem to hurt learning
-        # The issue is that updating embed[target] toward beliefs that predict target
-        # is circular and doesn't help future predictions.
-        # TODO: Try updating INPUT embeddings instead of target embeddings
-        embed_stats = {'embed_updates': 0, 'embed_mode': 'disabled'}
-        # embed_stats = update_embeddings_from_beliefs(
-        #     model=model,
-        #     mu_beliefs=mu_beliefs,
-        #     targets=targets,
-        #     prediction_errors=ce_per_position,
-        #     lr=0.1,
-        # )
+        # P-FLOW: Update INPUT embeddings toward posteriors (beliefs)
+        # With untied embeddings:
+        # - Input embeddings (priors) get updated here
+        # - Output embeddings (observation anchors) stay fixed
+        embed_stats = update_input_embeddings_pflow(
+            model=model,
+            input_ids=input_ids,
+            mu_beliefs=mu_beliefs,
+            prediction_errors=ce_per_position,
+            lr=0.1,
+        )
 
     # Compute metrics
     perplexity = torch.exp(ce_loss).item()
