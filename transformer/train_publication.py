@@ -68,6 +68,7 @@ from typing import Dict, List, Tuple, Any
 
 
 from transformer.model import GaugeTransformerLM
+from transformer.standard_transformer import StandardTransformerLM
 from transformer.data import create_dataloaders, create_char_dataloaders
 from transformer.train import (
     compute_free_energy_loss,
@@ -78,7 +79,7 @@ from transformer.train import (
     PureFEPTrainer,
 )
 from transformer.train_fast import FastTrainer, FastTrainingConfig
-from transformer.publication_metrics import PublicationMetrics, AblationConfig, AblationResult
+from transformer.publication_metrics import PublicationMetrics, ExperimentResult
 
 
 def get_git_info() -> Dict[str, str]:
@@ -187,6 +188,84 @@ DEFAULT_USE_GPU_OPTIMIZED = True  # Set True for RTX 5090 / high-end GPU setting
 # ============================================================================
 
 
+
+# =============================================================================
+# STANDARD TRANSFORMER BASELINE CONFIG
+# =============================================================================
+# Standard dot-product attention + learned MLP for fair comparison.
+# Uses same batch size, seq length, and embedding dim as gauge VFE.
+#
+STANDARD_TRANSFORMER_CONFIG = {
+    # Model architecture - match gauge VFE dimensions
+    'vocab_size': 2000000,        # Will be overridden by tokenizer
+    'embed_dim': 25,              # Same K as gauge VFE
+    'n_layers': 1,                # Same depth
+    'hidden_dim': 100,            # 4×embed_dim standard ratio
+    'max_seq_len': 94,            # Same context length
+    'n_heads': 5,                 # embed_dim / head_dim (5 heads of dim 5)
+
+    # GPU Training - same as gauge VFE
+    'batch_size': 24,
+    'use_amp': False,
+    'num_workers': 4,
+
+    # Standard transformer settings
+    'ffn_mode': 'learned',        # Standard learned MLP
+    'attention_type': 'standard', # Use dot-product attention
+    'pos_encoding_mode': 'learned',
+    'tie_embeddings': True,       # Standard practice
+
+    # Disable gauge-specific features
+    'evolve_sigma': False,
+    'evolve_phi': False,
+    'diagonal_covariance': True,  # Not used but safer
+    'use_positional_embedding': True,
+
+    # Standard attention parameters
+    'kappa_beta': 1.0,            # Not used in standard attention
+    'epsilon': 1e-8,
+    'attention_pattern': 'full',
+    'attention_window': 24,
+
+    # Training
+    'max_steps': 20000,
+    'warmup_steps': 25,
+
+    # Learning rates - standard Adam rates
+    'mu_lr': 0.001,               # Standard LR for embeddings
+    'sigma_lr': 0.001,
+    'phi_lr': 0.001,
+    'ffn_lr': 0.001,              # Standard LR for MLP
+
+    # Free energy weights (not used in standard mode)
+    'alpha': 0,
+    'beta': 0,
+    'lambda_gamma': 0,
+    'kappa_gamma': 1.0,
+
+    # Regularization - standard
+    'weight_decay': 0.01,
+    'dropout': 0.1,
+    'grad_clip': 1.0,
+
+    # Logging
+    'log_interval': 100,
+    'eval_interval': 500,
+    'checkpoint_interval': 5000,
+    'patience': 5,
+
+    # Disable gauge group (not used)
+    'gauge_group': 'SO3',
+    'gauge_dim': 3,
+    'use_multi_irrep': False,
+    'gauge_fixed_priors': True,
+
+    # Irrep spec (not used in standard mode)
+    'irrep_spec': [('ℓ0', 5, 1), ('ℓ1', 0, 3)],  # 5 scalars only
+
+    # RG metrics disabled for standard
+    'compute_rg_metrics': False,
+}
 
 # =============================================================================
 # GPU-OPTIMIZED CONFIG (RTX 5090 / 32GB VRAM)
@@ -1056,22 +1135,42 @@ def run_single_experiment(
     print(f"  Layers: {config['n_layers']}")
     print(f"  Vocab: {actual_vocab_size} ({'char' if use_char else 'BPE'})")
 
-    # Scale kappa_beta with K to maintain consistent attention sharpness
-    # KL divergence can scale with K, so we scale temperature proportionally
-    if config.get('kappa_beta_scale_with_k', False):
-        K = config['embed_dim']
-        K_ref = 64  # Reference dimension (roughly GPT-2 heads)
-        original_kappa = config['kappa_beta']
-        config['kappa_beta'] = original_kappa * (K / K_ref)
-        print(f"  kappa_beta: {original_kappa} → {config['kappa_beta']:.4f} (scaled for K={K})")
+    # Create appropriate model based on mode
+    if ffn_mode == 'standard':
+        # Standard transformer baseline
+        print("  Model type: STANDARD TRANSFORMER (dot-product attention)")
+        model = StandardTransformerLM(
+            vocab_size=actual_vocab_size,
+            embed_dim=config['embed_dim'],
+            n_layers=config['n_layers'],
+            n_heads=config.get('n_heads', 1),
+            hidden_dim=config.get('hidden_dim', config['embed_dim'] * 4),
+            max_seq_len=config['max_seq_len'],
+            dropout=config.get('dropout', 0.1),
+        )
     else:
-        print(f"  kappa_beta: {config['kappa_beta']}")
+        # Gauge VFE transformer
+        print("  Model type: GAUGE VFE TRANSFORMER (KL-divergence attention)")
+        # Scale kappa_beta with K to maintain consistent attention sharpness
+        if config.get('kappa_beta_scale_with_k', False):
+            K = config['embed_dim']
+            K_ref = 64  # Reference dimension (roughly GPT-2 heads)
+            original_kappa = config['kappa_beta']
+            config['kappa_beta'] = original_kappa * (K / K_ref)
+            print(f"  kappa_beta: {original_kappa} → {config['kappa_beta']:.4f} (scaled for K={K})")
+        else:
+            print(f"  kappa_beta: {config['kappa_beta']}")
+        model = GaugeTransformerLM(config)
 
-    model = GaugeTransformerLM(config)
     model = model.to(device)
 
-    total_params = model.get_num_params(non_embedding=False)
-    non_embed_params = model.get_num_params(non_embedding=True)
+    # Get parameter counts
+    if hasattr(model, 'get_num_params'):
+        total_params = model.get_num_params(non_embedding=False)
+        non_embed_params = model.get_num_params(non_embedding=True)
+    else:
+        total_params = sum(p.numel() for p in model.parameters())
+        non_embed_params = sum(p.numel() for p in model.parameters() if 'embed' not in str(p))
 
     print(f"\nModel Parameters:")
     print(f"  Total:         {total_params:,}")
@@ -1321,8 +1420,8 @@ def main():
 
     # FFN mode (uses defaults from top of file)
     parser.add_argument('--ffn_mode', type=str, default=DEFAULT_FFN_MODE,
-                        choices=['VFE_dynamic'],
-                        help='FFN mode (VFE_dynamic is the recommended mode)')
+                        choices=['VFE_dynamic', 'standard'],
+                        help='FFN mode: VFE_dynamic (gauge VFE) or standard (baseline transformer)')
 
     # Enable full geometric learning (Σ and φ)
     parser.add_argument('--enable_sigma_phi', action='store_true', default=DEFAULT_ENABLE_SIGMA_PHI,
@@ -1376,9 +1475,6 @@ def main():
     print("="*70)
     print(f"\nDevice: {device}")
 
-    # Use GPU_OPTIMIZED_CONFIG as the base config
-    base_config = GPU_OPTIMIZED_CONFIG.copy()
-
     checkpoint_dir = Path(args.checkpoint_dir)
 
     # Run single mode
@@ -1386,6 +1482,18 @@ def main():
         print("\nError: Must specify --ffn_mode")
         print("Edit DEFAULT_FFN_MODE at top of train_publication.py or use command-line args")
         return
+
+    # Select config based on mode
+    if args.ffn_mode == 'standard':
+        print("\n" + "="*70)
+        print("STANDARD TRANSFORMER BASELINE")
+        print("="*70)
+        print("   Using dot-product attention + learned MLP")
+        print("   This is the comparison baseline!")
+        print("="*70 + "\n")
+        base_config = STANDARD_TRANSFORMER_CONFIG.copy()
+    else:
+        base_config = GPU_OPTIMIZED_CONFIG.copy()
 
     config = base_config.copy()
     config['ffn_mode'] = args.ffn_mode
