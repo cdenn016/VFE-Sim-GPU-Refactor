@@ -1282,15 +1282,18 @@ def pure_fep_train_step(
                     if hasattr(block.ffn, 'get_prior_stats'):
                         prior_stats = block.ffn.get_prior_stats()
 
-        # Update embeddings toward successful beliefs (local learning rule)
-        # Since embeddings are tied with output projection, this updates both
-        embed_stats = update_embeddings_from_beliefs(
-            model=model,
-            mu_beliefs=mu_beliefs,
-            targets=targets,
-            prediction_errors=ce_per_position,
-            lr=0.1,  # Higher lr for faster learning
-        )
+        # NOTE: Embedding updates disabled for now - they seem to hurt learning
+        # The issue is that updating embed[target] toward beliefs that predict target
+        # is circular and doesn't help future predictions.
+        # TODO: Try updating INPUT embeddings instead of target embeddings
+        embed_stats = {'embed_updates': 0, 'embed_mode': 'disabled'}
+        # embed_stats = update_embeddings_from_beliefs(
+        #     model=model,
+        #     mu_beliefs=mu_beliefs,
+        #     targets=targets,
+        #     prediction_errors=ce_per_position,
+        #     lr=0.1,
+        # )
 
     # Compute metrics
     perplexity = torch.exp(ce_loss).item()
