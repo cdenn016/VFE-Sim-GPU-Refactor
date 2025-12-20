@@ -1251,7 +1251,7 @@ class PureFEPConfig:
 
     # Training loop
     max_steps: int = 10000          # Maximum training steps
-    log_every: int = 100            # Log metrics every N steps
+    log_every: int = 10             # Log metrics every N steps (more frequent for visibility)
     eval_every: int = 1000          # Evaluate every N steps
     save_every: int = 5000          # Save checkpoint every N steps
 
@@ -1361,8 +1361,8 @@ class PureFEPTrainer:
                         prior_active = metrics.get('prior/prior_active_positions', 0)
                         print(f"Step {self.step:6d} | CE: {ce:.4f} | PPL: {ppl:.2f} | Active priors: {prior_active}")
 
-                    # Validation
-                    if self.val_dataloader is not None and self.step % self.config.eval_every == 0:
+                    # Validation (skip step 0)
+                    if self.val_dataloader is not None and self.step % self.config.eval_every == 0 and self.step > 0:
                         val_metrics = pure_fep_validate(
                             self.model, self.val_dataloader, self.device
                         )
