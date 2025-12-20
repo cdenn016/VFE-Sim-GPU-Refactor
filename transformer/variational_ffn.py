@@ -49,7 +49,7 @@ Date: November 2025
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 # Import validated gradient engine
@@ -1317,6 +1317,9 @@ class VariationalFFNDynamic(nn.Module):
         max_seq_len: int = 512,    # Max sequence length for persistent priors
         pure_fep_mode: bool = False,  # Enable backprop-free learning
         prior_lr: float = 0.01,    # Learning rate for prior updates
+        # Memory-efficient options (NEW!)
+        irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
+        chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
     ):
         """
         Initialize dynamic-β VFE FFN.
@@ -1337,6 +1340,9 @@ class VariationalFFNDynamic(nn.Module):
             max_seq_len: Maximum sequence length for persistent priors (pure FEP mode)
             pure_fep_mode: If True, use persistent priors that evolve via prediction error
             prior_lr: Learning rate for prior updates in pure FEP mode
+            irrep_dims: Block dimensions [d₁, d₂, ...] for memory-efficient block-diagonal KL.
+                       When provided, exploits O(N² × Σᵢdᵢ²) vs O(N² × K²) - massive savings!
+            chunk_size: Chunk size for memory-efficient processing. Processes N×N in C×C chunks.
         """
         super().__init__()
 
@@ -1346,6 +1352,10 @@ class VariationalFFNDynamic(nn.Module):
         self.update_sigma = update_sigma
         self.diagonal_covariance = diagonal_covariance
         self.compute_sigma_align_grad = compute_sigma_align_grad
+
+        # Memory-efficient options
+        self.irrep_dims = irrep_dims
+        self.chunk_size = chunk_size
 
         # VFE hyperparameters
         self.alpha = alpha
@@ -1485,6 +1495,9 @@ class VariationalFFNDynamic(nn.Module):
                 use_numba=False,  # Always use PyTorch for GPU
                 return_kl=False,
                 diagonal_covariance=is_diagonal,
+                # Memory-efficient options
+                irrep_dims=self.irrep_dims,
+                chunk_size=self.chunk_size,
             )  # (B, N, N)
 
             if return_beta_history:

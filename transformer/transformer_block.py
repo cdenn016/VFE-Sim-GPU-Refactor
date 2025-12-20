@@ -98,6 +98,9 @@ class GaugeTransformerBlock(nn.Module):
         ffn_pure_fep_mode: bool = False,
         ffn_max_seq_len: int = 512,
         ffn_prior_lr: float = 0.01,
+        # Memory-efficient options
+        ffn_irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
+        ffn_chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
     ):
         """
         Initialize gauge transformer block.
@@ -193,6 +196,9 @@ class GaugeTransformerBlock(nn.Module):
             pure_fep_mode=ffn_pure_fep_mode,
             max_seq_len=ffn_max_seq_len,
             prior_lr=ffn_prior_lr,
+            # Memory-efficient options
+            irrep_dims=ffn_irrep_dims,
+            chunk_size=ffn_chunk_size,
         )
 
         self.norm2 = nn.LayerNorm(embed_dim)
@@ -389,6 +395,9 @@ class GaugeTransformerStack(nn.Module):
         ffn_pure_fep_mode: bool = False,
         ffn_max_seq_len: int = 512,
         ffn_prior_lr: float = 0.01,
+        # Memory-efficient options
+        ffn_irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
+        ffn_chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
     ):
         """
         Initialize stack of transformer blocks.
@@ -454,6 +463,9 @@ class GaugeTransformerStack(nn.Module):
                 ffn_pure_fep_mode=ffn_pure_fep_mode,
                 ffn_max_seq_len=ffn_max_seq_len,
                 ffn_prior_lr=ffn_prior_lr,
+                # Memory-efficient options
+                ffn_irrep_dims=ffn_irrep_dims,
+                ffn_chunk_size=ffn_chunk_size,
             )
             for _ in range(n_layers)
         ])
