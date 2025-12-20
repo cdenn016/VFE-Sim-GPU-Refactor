@@ -87,7 +87,7 @@ class GaugeFFN(nn.Module):
         self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim
         self.mode = 'VFE_dynamic'
-        self.pure_fep_mode = pure_fep_mode
+        # Note: pure_fep_mode accessed via property that delegates to variational_ffn
 
         if generators is None:
             raise ValueError("generators required for VFE_dynamic mode")
