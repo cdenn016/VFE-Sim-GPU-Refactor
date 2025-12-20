@@ -49,7 +49,7 @@ Date: November 2025
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import numpy as np
 
 # Import validated gradient engine
