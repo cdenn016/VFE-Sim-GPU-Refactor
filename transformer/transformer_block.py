@@ -26,7 +26,7 @@ from typing import Optional, Tuple, List
 # Import our gauge attention
 from transformer.attention import IrrepMultiHeadAttention
 
-# Import unified FFN (supports learned + variational + hamiltonian modes)
+# Import VFE FFN module
 from transformer.ffn import GaugeFFN
 
 # Trajectory tracking (optional)
@@ -76,38 +76,17 @@ class GaugeTransformerBlock(nn.Module):
         evolve_phi: bool = False,
         # Variational FFN parameters
         generators: Optional[torch.Tensor] = None,  # (3, K, K)
-        ffn_mode: str = 'learned',  # 'learned', 'standard', 'VFE', 'VFE_dynamic', 'VFE_dynamic_stable', 'variational_*', 'hamiltonian'
+        ffn_mode: str = 'VFE_dynamic',  # VFE_dynamic is the only supported mode
         ffn_alpha: float = 0.001,
         # Dynamic VFE specific parameters
         ffn_vfe_dynamic_m_step_interval: int = 0,  # M-step every N steps (0 = disabled)
         ffn_vfe_dynamic_m_step_rate: float = 0.01,  # Prior update rate
         # AD-HOC stabilization (default OFF for first-principles)
-        ffn_vfe_kappa_start: float = None,       # AD-HOC: Temp annealing (None = no annealing)
-        ffn_vfe_balance_gradients: bool = False, # AD-HOC: Balance gradient norms
-        ffn_vfe_obs_grad_weight: float = 1.0,    # Relative weight of observation gradient
-        ffn_vfe_entropy_penalty: float = 0.0,    # AD-HOC: Penalty for uniform β
-        ffn_vfe_self_attn_damping: float = 0.0,  # AD-HOC: Reduce self-attention (0-1)
-        ffn_vfe_grad_clip: float = 1e3,          # Numerical stability (overflow prevention)
-        ffn_tau_eff: float = 1.0,
         ffn_kappa: float = 1.0,
         ffn_n_iterations: int = 1,
         ffn_learnable_lr: bool = True,
-        # Gradient engine specific
         ffn_lambda_belief: float = 1.0,
-        ffn_lambda_prior: float = 0.0,
-        ffn_lambda_phi: float = 0.0,
         ffn_update_sigma: bool = True,
-        # Hamiltonian specific
-        ffn_hamiltonian_dt: float = 0.01,
-        ffn_hamiltonian_n_steps: int = 10,
-        ffn_hamiltonian_momentum_scale: float = 1.0,
-        ffn_hamiltonian_gamma: float = 0.0,
-        # Hamiltonian mass configuration (from Inertia of Belief paper)
-        ffn_hamiltonian_mass_use_prior: bool = True,
-        ffn_hamiltonian_mass_use_observation: bool = False,
-        ffn_hamiltonian_mass_use_incoming_social: bool = False,
-        ffn_hamiltonian_mass_use_outgoing_recoil: bool = False,
-        ffn_hamiltonian_evolve_mass: bool = False,
         # Diagonal covariance mode
         diagonal_covariance: bool = False,
         # Sparse attention
@@ -133,29 +112,17 @@ class GaugeTransformerBlock(nn.Module):
             evolve_phi: If True, update gauge frames via FFN
             attention_pattern: 'full', 'local', or 'sparse' for efficient attention
             attention_window: Window size for local attention pattern
-            generators: SO(3) generators (required for variational/hamiltonian modes)
-            ffn_mode: 'learned'/'standard', 'VFE'/'variational_gradient_engine', 'hamiltonian'
-            ffn_alpha: Prior weight for variational/hamiltonian FFN
+            generators: Lie algebra generators (required for VFE mode)
+            ffn_mode: 'VFE_dynamic' - dynamic-β VFE with attention-belief co-evolution
+            ffn_alpha: Prior weight for VFE
+            ffn_kappa: Softmax temperature for attention
+            ffn_n_iterations: VFE inference iterations per forward pass
+            ffn_learnable_lr: Learn step size for variational descent
+            ffn_lambda_belief: Belief alignment weight
+            ffn_update_sigma: Update covariances in FFN
             ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
             ffn_max_seq_len: Max sequence length for persistent priors (pure FEP mode)
             ffn_prior_lr: Learning rate for prior updates (pure FEP mode)
-            ffn_tau_eff: Temperature for variational FFN
-            ffn_kappa: Softmax temperature for variational_full/hamiltonian
-            ffn_n_iterations: Inference iterations for variational FFN
-            ffn_learnable_lr: Learn step size for variational FFN
-            ffn_lambda_belief: Belief alignment weight (gradient_engine/hamiltonian)
-            ffn_lambda_prior: Prior alignment weight (gradient_engine)
-            ffn_lambda_phi: Gauge field weight (gradient_engine)
-            ffn_update_sigma: Update covariances in FFN? (gradient_engine/hamiltonian)
-            ffn_hamiltonian_dt: Leapfrog time step (hamiltonian)
-            ffn_hamiltonian_n_steps: Number of leapfrog steps (hamiltonian)
-            ffn_hamiltonian_momentum_scale: Initial momentum scale (hamiltonian)
-            ffn_hamiltonian_gamma: Damping coefficient (hamiltonian, 0=pure)
-            ffn_hamiltonian_mass_use_prior: Include prior precision in mass (Inertia of Belief)
-            ffn_hamiltonian_mass_use_observation: Include observation precision in mass
-            ffn_hamiltonian_mass_use_incoming_social: Include incoming social precision in mass
-            ffn_hamiltonian_mass_use_outgoing_recoil: Include outgoing recoil precision in mass
-            ffn_hamiltonian_evolve_mass: Recompute mass at each leapfrog step (hamiltonian)
         """
         super().__init__()
         self.embed_dim = embed_dim
@@ -202,47 +169,24 @@ class GaugeTransformerBlock(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
 
         # =====================================================================
-        # Feedforward Sublayer (Unified: learned + variational + hamiltonian)
+        # VFE_dynamic FFN Sublayer
         # =====================================================================
         self.ffn = GaugeFFN(
             embed_dim=embed_dim,
             hidden_dim=hidden_dim,
-            generators=generators,  # Required for variational/hamiltonian modes
+            generators=generators,  # Required for VFE mode
             dropout=dropout,
             mode=ffn_mode,
-            # Variational parameters
+            # VFE parameters
             alpha=ffn_alpha,
-            tau_eff=ffn_tau_eff,
             kappa=ffn_kappa,
             n_iterations=ffn_n_iterations,
             learnable_lr=ffn_learnable_lr,
-            # Gradient engine parameters
             lambda_belief=ffn_lambda_belief,
-            lambda_prior=ffn_lambda_prior,
-            lambda_phi=ffn_lambda_phi,
             update_sigma=ffn_update_sigma,
-            # Dynamic VFE parameters (attention-belief co-evolution)
+            # Dynamic VFE parameters
             vfe_dynamic_m_step_interval=ffn_vfe_dynamic_m_step_interval,
             vfe_dynamic_m_step_rate=ffn_vfe_dynamic_m_step_rate,
-            # Stabilized dynamic VFE parameters
-            vfe_kappa_start=ffn_vfe_kappa_start,
-            vfe_balance_gradients=ffn_vfe_balance_gradients,
-            vfe_obs_grad_weight=ffn_vfe_obs_grad_weight,
-            vfe_entropy_penalty=ffn_vfe_entropy_penalty,
-            vfe_self_attn_damping=ffn_vfe_self_attn_damping,
-            vfe_grad_clip=ffn_vfe_grad_clip,
-            # Hamiltonian parameters
-            hamiltonian_dt=ffn_hamiltonian_dt,
-            hamiltonian_n_steps=ffn_hamiltonian_n_steps,
-            hamiltonian_momentum_scale=ffn_hamiltonian_momentum_scale,
-            hamiltonian_gamma=ffn_hamiltonian_gamma,
-            hamiltonian_update_phi=evolve_phi,  # Use evolve_phi setting
-            # Hamiltonian mass configuration (from Inertia of Belief paper)
-            hamiltonian_mass_use_prior=ffn_hamiltonian_mass_use_prior,
-            hamiltonian_mass_use_observation=ffn_hamiltonian_mass_use_observation,
-            hamiltonian_mass_use_incoming_social=ffn_hamiltonian_mass_use_incoming_social,
-            hamiltonian_mass_use_outgoing_recoil=ffn_hamiltonian_mass_use_outgoing_recoil,
-            hamiltonian_evolve_mass=ffn_hamiltonian_evolve_mass,
             # Diagonal covariance mode
             diagonal_covariance=diagonal_covariance,
             # Pure FEP mode parameters
@@ -313,7 +257,7 @@ class GaugeTransformerBlock(nn.Module):
         # Capture beta if needed for variational/hamiltonian FFN or trajectory recording
         recorder = get_global_recorder() if TRAJECTORY_TRACKING_AVAILABLE else None
         recording_attention = recorder is not None and recorder.enabled and recorder.record_attention
-        need_beta = self.ffn_mode in ['variational_approx', 'variational_full', 'variational_gradient_engine', 'VFE_dynamic', 'VFE_dynamic_stable', 'hamiltonian']
+        need_beta = self.ffn_mode == 'VFE_dynamic'
         need_attention_output = need_beta or recording_attention
 
         mu_attn, sigma_attn, beta, kl_matrix = self.attention(
@@ -345,121 +289,33 @@ class GaugeTransformerBlock(nn.Module):
         # Pre-layer normalization
         mu_normalized = self.norm2(mu_q)
 
-        # Feedforward network (learned, variational, or hamiltonian)
-        if self.ffn_mode == 'learned':
-            # Standard learned FFN (just needs mu)
-            mu_ffn = self.ffn(mu_normalized)
+        # VFE_dynamic FFN: β recomputed at each VFE step
+        # Returns (mu, sigma) tuple
+        if mu_prior is None:
+            raise ValueError("VFE_dynamic mode requires mu_prior argument")
 
-        elif self.ffn_mode == 'hamiltonian':
-            # Hamiltonian mode: returns (mu, sigma, phi, diagnostics)
-            if mu_prior is None:
-                raise ValueError(f"FFN mode '{self.ffn_mode}' requires mu_prior argument")
+        mu_ffn, sigma_ffn = self.ffn(
+            mu=mu_normalized,
+            beta=beta,          # Initial β (will be recomputed each step inside FFN)
+            mu_prior=mu_prior,  # From embeddings
+            phi=phi,            # Current gauge frames
+            sigma=sigma_q,      # Current covariances
+            mask=mask,          # Causal mask
+            targets=targets,    # Target tokens (discrete observations)
+            W_out=W_out,        # Output projection for ∂CE/∂μ
+        )
 
-            mu_ffn, sigma_ffn, phi_ffn, diagnostics = self.ffn(
-                mu=mu_normalized,
-                beta=beta,          # From attention (for alignment potential)
-                mu_prior=mu_prior,  # Prior means
-                phi=phi,            # Current gauge frames
-                sigma=sigma_q,      # Current covariances
-                sigma_prior=None,   # Will default to identity in FFN
-                mask=mask,          # Causal mask
-                targets=targets,    # Target tokens for CE term
-                W_out=W_out,        # Output projection
-            )
-
-            # Update covariances from Hamiltonian dynamics
-            if self.evolve_sigma and sigma_ffn is not None:
-                sigma_q = sigma_ffn
-
-            # Update gauge frames from Hamiltonian dynamics
-            if self.evolve_phi and phi_ffn is not None:
-                phi = phi_ffn
-
-            # Store diagnostics for monitoring
-            self._last_hamiltonian_diagnostics = diagnostics
-
-        elif self.ffn_mode == 'variational_gradient_engine':
-            # Gradient engine mode: returns (mu, sigma) tuple
-            if mu_prior is None:
-                raise ValueError(f"FFN mode '{self.ffn_mode}' requires mu_prior argument")
-
-            mu_ffn, sigma_ffn = self.ffn(
-                mu=mu_normalized,
-                beta=beta,          # From attention
-                mu_prior=mu_prior,  # From embeddings
-                phi=phi,            # Current gauge frames
-                sigma=sigma_q,      # Current covariances
-                mask=mask,          # Causal mask
-                targets=targets,    # Target tokens (discrete observations!)
-                W_out=W_out,        # Output projection for ∂CE/∂μ
-            )
-
-            # Update covariances from FFN if evolving
-            if self.evolve_sigma and sigma_ffn is not None:
-                sigma_q = sigma_ffn
-
-        elif self.ffn_mode == 'VFE_dynamic':
-            # Dynamic-β VFE mode: β recomputed at each VFE step
-            # Returns (mu, sigma) tuple like gradient_engine
-            if mu_prior is None:
-                raise ValueError(f"FFN mode '{self.ffn_mode}' requires mu_prior argument")
-
-            mu_ffn, sigma_ffn = self.ffn(
-                mu=mu_normalized,
-                beta=beta,          # Initial β (will be recomputed each step inside FFN)
-                mu_prior=mu_prior,  # From embeddings
-                phi=phi,            # Current gauge frames
-                sigma=sigma_q,      # Current covariances
-                mask=mask,          # Causal mask
-                targets=targets,    # Target tokens (discrete observations!)
-                W_out=W_out,        # Output projection for ∂CE/∂μ
-            )
-
-            # Update covariances from FFN if evolving
-            if self.evolve_sigma and sigma_ffn is not None:
-                sigma_q = sigma_ffn
-
-        elif self.ffn_mode == 'VFE_dynamic_stable':
-            # Stabilized dynamic-β VFE mode with temperature annealing (RECOMMENDED!)
-            # Same interface as VFE_dynamic but more stable training
-            if mu_prior is None:
-                raise ValueError(f"FFN mode '{self.ffn_mode}' requires mu_prior argument")
-
-            mu_ffn, sigma_ffn = self.ffn(
-                mu=mu_normalized,
-                beta=beta,          # Initial β
-                mu_prior=mu_prior,  # From embeddings
-                phi=phi,            # Current gauge frames
-                sigma=sigma_q,      # Current covariances
-                mask=mask,          # Causal mask
-                targets=targets,    # Target tokens
-                W_out=W_out,        # Output projection
-            )
-
-            # Update covariances from FFN if evolving
-            if self.evolve_sigma and sigma_ffn is not None:
-                sigma_q = sigma_ffn
-        else:
-            # Legacy variational FFN modes (mu only)
-            if mu_prior is None:
-                raise ValueError(f"FFN mode '{self.ffn_mode}' requires mu_prior argument")
-
-            mu_ffn = self.ffn(
-                mu=mu_normalized,
-                beta=beta,          # From attention
-                mu_prior=mu_prior,  # From embeddings
-                phi=phi,            # Current gauge frames
-                sigma=sigma_q,      # Current covariances (for variational_full)
-                mask=mask,          # Causal mask
-            )
+        # Update covariances from FFN if evolving
+        if self.evolve_sigma and sigma_ffn is not None:
+            sigma_q = sigma_ffn
 
         # Residual connection
         mu_q = mu_q + mu_ffn
 
         # =====================================================================
-        # 3. Optional: Gauge Frame Evolution (skip if Hamiltonian handles it)
+        # 3. Optional: Gauge Frame Evolution
         # =====================================================================
-        if self.evolve_phi and self.phi_ffn is not None and self.ffn_mode != 'hamiltonian':
+        if self.evolve_phi and self.phi_ffn is not None:
             # Evolve gauge frames based on current means
             # φ_new = φ + Δφ(μ)
             delta_phi = self.phi_ffn(mu_q)  # (B, N, 3)
@@ -473,13 +329,11 @@ class GaugeTransformerBlock(nn.Module):
                 phi * (max_phi_norm / phi_norm),
                 phi
             )
-        # Otherwise phi stays unchanged (or was updated by Hamiltonian FFN)
-
         return mu_q, sigma_q, phi
 
-    def get_hamiltonian_diagnostics(self) -> Optional[dict]:
-        """Get diagnostics from last Hamiltonian forward pass."""
-        return getattr(self, '_last_hamiltonian_diagnostics', None)
+    def get_hamiltonian_diagnostics(self) -> None:
+        """Stub for backward compatibility with trajectory recording."""
+        return None
 
     def extra_repr(self) -> str:
         return (
@@ -514,38 +368,16 @@ class GaugeTransformerStack(nn.Module):
         evolve_phi: bool = False,
         # Variational FFN parameters
         generators: Optional[torch.Tensor] = None,
-        ffn_mode: str = 'learned',
+        ffn_mode: str = 'VFE_dynamic',
         ffn_alpha: float = 0.001,
-        ffn_tau_eff: float = 1.0,
         ffn_kappa: float = 1.0,
         ffn_n_iterations: int = 1,
         ffn_learnable_lr: bool = True,
-        # Gradient engine specific
         ffn_lambda_belief: float = 1.0,
-        ffn_lambda_prior: float = 0.0,
-        ffn_lambda_phi: float = 0.0,
         ffn_update_sigma: bool = True,
         # Dynamic VFE specific parameters
         ffn_vfe_dynamic_m_step_interval: int = 0,  # M-step every N steps (0 = disabled)
         ffn_vfe_dynamic_m_step_rate: float = 0.01,  # Prior update rate
-        # AD-HOC stabilization (default OFF for first-principles)
-        ffn_vfe_kappa_start: float = None,       # AD-HOC: Temp annealing (None = no annealing)
-        ffn_vfe_balance_gradients: bool = False, # AD-HOC: Balance gradient norms
-        ffn_vfe_obs_grad_weight: float = 1.0,    # Relative weight of observation gradient
-        ffn_vfe_entropy_penalty: float = 0.0,    # AD-HOC: Penalty for uniform β
-        ffn_vfe_self_attn_damping: float = 0.0,  # AD-HOC: Reduce self-attention (0-1)
-        ffn_vfe_grad_clip: float = 1e3,          # Numerical stability (overflow prevention)
-        # Hamiltonian specific
-        ffn_hamiltonian_dt: float = 0.01,
-        ffn_hamiltonian_n_steps: int = 10,
-        ffn_hamiltonian_momentum_scale: float = 1.0,
-        ffn_hamiltonian_gamma: float = 0.0,
-        # Hamiltonian mass configuration (from Inertia of Belief paper)
-        ffn_hamiltonian_mass_use_prior: bool = True,
-        ffn_hamiltonian_mass_use_observation: bool = False,
-        ffn_hamiltonian_mass_use_incoming_social: bool = False,
-        ffn_hamiltonian_mass_use_outgoing_recoil: bool = False,
-        ffn_hamiltonian_evolve_mass: bool = False,
         # Diagonal covariance mode
         diagonal_covariance: bool = False,
         # Sparse attention
@@ -570,29 +402,17 @@ class GaugeTransformerStack(nn.Module):
             dropout: Dropout probability
             evolve_sigma: If True, covariances evolve through layers
             evolve_phi: If True, gauge frames evolve through layers
-            generators: Lie algebra generators (for variational/hamiltonian FFN)
+            generators: Lie algebra generators (required for VFE FFN)
             phi_dim: Dimension of gauge frame (3 for SO(3), N(N-1)/2 for SO(N))
-            ffn_mode: 'learned'/'standard', 'VFE'/'variational_gradient_engine', 'VFE_dynamic', 'hamiltonian'
-            ffn_alpha: Prior weight (variational/hamiltonian)
-            ffn_tau_eff: Temperature (variational)
-            ffn_kappa: Softmax temperature (variational_full/hamiltonian)
-            ffn_n_iterations: Inference iterations (variational)
-            ffn_learnable_lr: Learn step size (variational)
-            ffn_lambda_belief: Belief alignment weight (gradient_engine/hamiltonian)
-            ffn_lambda_prior: Prior alignment weight (gradient_engine)
-            ffn_lambda_phi: Gauge field weight (gradient_engine)
-            ffn_update_sigma: Update covariances in FFN? (gradient_engine/hamiltonian)
-            ffn_vfe_dynamic_m_step_interval: M-step every N iterations (VFE_dynamic, 0=disabled)
-            ffn_vfe_dynamic_m_step_rate: Prior update rate in M-step (VFE_dynamic)
-            ffn_hamiltonian_dt: Leapfrog time step (hamiltonian)
-            ffn_hamiltonian_n_steps: Number of leapfrog steps (hamiltonian)
-            ffn_hamiltonian_momentum_scale: Initial momentum scale (hamiltonian)
-            ffn_hamiltonian_gamma: Damping coefficient (hamiltonian)
-            ffn_hamiltonian_mass_use_prior: Include prior precision in mass (Inertia of Belief)
-            ffn_hamiltonian_mass_use_observation: Include observation precision in mass
-            ffn_hamiltonian_mass_use_incoming_social: Include incoming social precision in mass
-            ffn_hamiltonian_mass_use_outgoing_recoil: Include outgoing recoil precision in mass
-            ffn_hamiltonian_evolve_mass: Recompute mass at each leapfrog step (hamiltonian)
+            ffn_mode: 'VFE_dynamic' (only supported mode)
+            ffn_alpha: Prior weight
+            ffn_kappa: Softmax temperature for attention
+            ffn_n_iterations: VFE inference iterations
+            ffn_learnable_lr: Learn step size for variational descent
+            ffn_lambda_belief: Belief alignment weight
+            ffn_update_sigma: Update covariances in FFN
+            ffn_vfe_dynamic_m_step_interval: M-step every N iterations (0=disabled)
+            ffn_vfe_dynamic_m_step_rate: Prior update rate in M-step
             attention_pattern: 'full', 'local', or 'sparse' for efficient attention
             attention_window: Window size for local attention pattern
             ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
@@ -611,40 +431,18 @@ class GaugeTransformerStack(nn.Module):
                 dropout=dropout,
                 evolve_sigma=evolve_sigma,
                 evolve_phi=evolve_phi,
-                # Variational FFN
+                # VFE FFN
                 generators=generators,
                 ffn_mode=ffn_mode,
                 ffn_alpha=ffn_alpha,
-                ffn_tau_eff=ffn_tau_eff,
                 ffn_kappa=ffn_kappa,
                 ffn_n_iterations=ffn_n_iterations,
                 ffn_learnable_lr=ffn_learnable_lr,
-                # Gradient engine
                 ffn_lambda_belief=ffn_lambda_belief,
-                ffn_lambda_prior=ffn_lambda_prior,
-                ffn_lambda_phi=ffn_lambda_phi,
                 ffn_update_sigma=ffn_update_sigma,
                 # Dynamic VFE
                 ffn_vfe_dynamic_m_step_interval=ffn_vfe_dynamic_m_step_interval,
                 ffn_vfe_dynamic_m_step_rate=ffn_vfe_dynamic_m_step_rate,
-                # Stabilized dynamic VFE
-                ffn_vfe_kappa_start=ffn_vfe_kappa_start,
-                ffn_vfe_balance_gradients=ffn_vfe_balance_gradients,
-                ffn_vfe_obs_grad_weight=ffn_vfe_obs_grad_weight,
-                ffn_vfe_entropy_penalty=ffn_vfe_entropy_penalty,
-                ffn_vfe_self_attn_damping=ffn_vfe_self_attn_damping,
-                ffn_vfe_grad_clip=ffn_vfe_grad_clip,
-                # Hamiltonian
-                ffn_hamiltonian_dt=ffn_hamiltonian_dt,
-                ffn_hamiltonian_n_steps=ffn_hamiltonian_n_steps,
-                ffn_hamiltonian_momentum_scale=ffn_hamiltonian_momentum_scale,
-                ffn_hamiltonian_gamma=ffn_hamiltonian_gamma,
-                # Hamiltonian mass configuration (from Inertia of Belief paper)
-                ffn_hamiltonian_mass_use_prior=ffn_hamiltonian_mass_use_prior,
-                ffn_hamiltonian_mass_use_observation=ffn_hamiltonian_mass_use_observation,
-                ffn_hamiltonian_mass_use_incoming_social=ffn_hamiltonian_mass_use_incoming_social,
-                ffn_hamiltonian_mass_use_outgoing_recoil=ffn_hamiltonian_mass_use_outgoing_recoil,
-                ffn_hamiltonian_evolve_mass=ffn_hamiltonian_evolve_mass,
                 # Diagonal covariance mode
                 diagonal_covariance=diagonal_covariance,
                 # Sparse attention
@@ -783,10 +581,14 @@ if __name__ == '__main__':
         dropout=0.1,
         evolve_sigma=False,
         evolve_phi=False,
+        generators=G,  # Required for VFE_dynamic mode
     )
     print(f"    {block}")
 
-    mu_out, sigma_out, phi_out = block(mu_q, sigma_q, phi, G)
+    # Create mu_prior for VFE_dynamic mode
+    mu_prior = mu_q.clone() * 0.5
+
+    mu_out, sigma_out, phi_out = block(mu_q, sigma_q, phi, G, mu_prior=mu_prior)
     print(f"    Output μ shape: {mu_out.shape}")
     print(f"    Output Σ shape: {sigma_out.shape}")
     print(f"    Output φ shape: {phi_out.shape}")
@@ -803,10 +605,11 @@ if __name__ == '__main__':
         dropout=0.1,
         evolve_sigma=False,
         evolve_phi=False,
+        generators=G,  # Required for VFE_dynamic mode
     )
 
     mu_final, sigma_final, phi_final, intermediates = stack(
-        mu_q, sigma_q, phi, G, return_intermediates=True
+        mu_q, sigma_q, phi, G, mu_prior=mu_prior, return_intermediates=True
     )
 
     print(f"    Final μ shape: {mu_final.shape}")
@@ -816,7 +619,7 @@ if __name__ == '__main__':
     # Test with causal mask
     print(f"\n[4] Testing with causal mask...")
     mask = torch.tril(torch.ones(N, N)).unsqueeze(0).expand(B, -1, -1)
-    mu_causal, _, _, _ = stack(mu_q, sigma_q, phi, G, mask=mask)
+    mu_causal, _, _, _ = stack(mu_q, sigma_q, phi, G, mask=mask, mu_prior=mu_prior)
     print(f"    Causal output shape: {mu_causal.shape}")
     print(f"    ✓ Causal masking works")
 
@@ -840,71 +643,6 @@ if __name__ == '__main__':
     print(f"    Gauge total:    {total_params:,} parameters")
     print(f"    Reduction:      {reduction:.2f}x fewer parameters!")
 
-    # =========================================================================
-    # Test Hamiltonian FFN mode
-    # =========================================================================
-    print(f"\n[7] Testing HAMILTONIAN FFN mode...")
-
-    # Create Hamiltonian transformer block
-    hamiltonian_block = GaugeTransformerBlock(
-        embed_dim=K,
-        irrep_spec=irrep_spec,
-        hidden_dim=hidden_dim,
-        kappa_beta=1.0,
-        dropout=0.0,  # No dropout for energy test
-        evolve_sigma=True,
-        evolve_phi=False,
-        generators=G,
-        ffn_mode='hamiltonian',
-        ffn_alpha=1.0,
-        ffn_lambda_belief=0.0,  # Disable alignment for cleaner test
-        ffn_update_sigma=True,
-        ffn_hamiltonian_dt=0.01,
-        ffn_hamiltonian_n_steps=10,
-        ffn_hamiltonian_momentum_scale=0.5,
-        ffn_hamiltonian_gamma=0.0,  # Pure Hamiltonian
-    )
-
-    # Forward pass (need mu_prior for Hamiltonian)
-    mu_prior = mu_q.clone() * 0.5  # Simple prior
-
-    try:
-        mu_ham, sigma_ham, phi_ham = hamiltonian_block(
-            mu_q.clone(), sigma_q.clone(), phi.clone(), G,
-            mu_prior=mu_prior,
-        )
-
-        print(f"    Output μ shape: {mu_ham.shape}")
-        print(f"    Output Σ shape: {sigma_ham.shape}")
-        print(f"    Output φ shape: {phi_ham.shape}")
-
-        # Get diagnostics
-        diagnostics = hamiltonian_block.get_hamiltonian_diagnostics()
-        if diagnostics:
-            print(f"    H_init: {diagnostics['H_init']:.4f}")
-            print(f"    H_final: {diagnostics['H_final']:.4f}")
-            print(f"    ΔH = {diagnostics['delta_H']:.6f}")
-
-            if diagnostics['delta_H'] < 1.0:
-                print(f"    ✓ Hamiltonian FFN: Energy approximately conserved!")
-            else:
-                print(f"    ~ Hamiltonian FFN: Energy drift (may need smaller dt)")
-
-        # Check SPD preservation
-        eigenvalues = torch.linalg.eigvalsh(sigma_ham)
-        min_eig = eigenvalues.min().item()
-        if min_eig > 0:
-            print(f"    ✓ SPD preserved (min eigenvalue: {min_eig:.6f})")
-        else:
-            print(f"    ✗ SPD violated!")
-
-        print(f"    ✓ Hamiltonian block forward pass complete")
-
-    except Exception as e:
-        print(f"    ✗ Hamiltonian test failed: {e}")
-        import traceback
-        traceback.print_exc()
-
     print("\n" + "="*70)
-    print("✓ All transformer block tests passed!")
+    print("All transformer block tests passed!")
     print("="*70)

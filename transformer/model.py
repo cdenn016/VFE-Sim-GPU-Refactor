@@ -111,18 +111,13 @@ class GaugeTransformerLM(nn.Module):
         evolve_phi = config.get('evolve_phi', False)
         tie_embeddings = config.get('tie_embeddings', True)
 
-        # Variational FFN config
-        ffn_mode = config.get('ffn_mode', 'learned')
+        # VFE FFN config
+        ffn_mode = config.get('ffn_mode', 'VFE_dynamic')
         ffn_alpha = config.get('ffn_alpha', 0.001)
-        ffn_tau_eff = config.get('ffn_tau_eff', 1.0)
         ffn_kappa = config.get('ffn_kappa', 1.0)
         ffn_n_iterations = config.get('ffn_n_iterations', 1)
         ffn_learnable_lr = config.get('ffn_learnable_lr', True)
-
-        # Gradient engine config (for variational_gradient_engine mode)
         ffn_lambda_belief = config.get('ffn_lambda_belief', 1.0)
-        ffn_lambda_prior = config.get('ffn_lambda_prior', 0.0)
-        ffn_lambda_phi = config.get('ffn_lambda_phi', 0.0)
         ffn_update_sigma = config.get('ffn_update_sigma', True)
 
         # Hamiltonian FFN config
@@ -260,30 +255,15 @@ class GaugeTransformerLM(nn.Module):
             dropout=dropout,
             evolve_sigma=evolve_sigma,
             evolve_phi=evolve_phi,
-            # Variational FFN parameters
+            # VFE FFN parameters
             generators=self.generators,
             ffn_mode=ffn_mode,
             ffn_alpha=ffn_alpha,
-            ffn_tau_eff=ffn_tau_eff,
             ffn_kappa=ffn_kappa,
             ffn_n_iterations=ffn_n_iterations,
             ffn_learnable_lr=ffn_learnable_lr,
-            # Gradient engine parameters
             ffn_lambda_belief=ffn_lambda_belief,
-            ffn_lambda_prior=ffn_lambda_prior,
-            ffn_lambda_phi=ffn_lambda_phi,
             ffn_update_sigma=ffn_update_sigma,
-            # Hamiltonian parameters
-            ffn_hamiltonian_dt=ffn_hamiltonian_dt,
-            ffn_hamiltonian_n_steps=ffn_hamiltonian_n_steps,
-            ffn_hamiltonian_momentum_scale=ffn_hamiltonian_momentum_scale,
-            ffn_hamiltonian_gamma=ffn_hamiltonian_gamma,
-            # Hamiltonian mass config (from Inertia of Belief paper)
-            ffn_hamiltonian_mass_use_prior=ffn_hamiltonian_mass_use_prior,
-            ffn_hamiltonian_mass_use_observation=ffn_hamiltonian_mass_use_observation,
-            ffn_hamiltonian_mass_use_incoming_social=ffn_hamiltonian_mass_use_incoming_social,
-            ffn_hamiltonian_mass_use_outgoing_recoil=ffn_hamiltonian_mass_use_outgoing_recoil,
-            ffn_hamiltonian_evolve_mass=ffn_hamiltonian_evolve_mass,
             diagonal_covariance=diagonal_covariance,
             # Sparse attention
             attention_pattern=self.attention_pattern,
@@ -360,7 +340,7 @@ class GaugeTransformerLM(nn.Module):
         # =================================================================
         recorder = get_global_recorder() if TRAJECTORY_TRACKING_AVAILABLE else None
         if recorder is not None and recorder.enabled:
-            ffn_mode = self.config.get('ffn_mode', 'learned')
+            ffn_mode = self.config.get('ffn_mode', 'VFE_dynamic')
             recorder.start_forward(batch_size, num_agents, ffn_mode=ffn_mode)
 
         # =================================================================
@@ -537,70 +517,20 @@ class GaugeTransformerLM(nn.Module):
         # FFN sublayer
         mu_normalized = final_block.norm2(mu_q)
 
-        # Call FFN with appropriate parameters based on mode
-        if final_block.ffn_mode == 'learned':
-            mu_ffn = final_block.ffn(mu_normalized)
-        elif final_block.ffn_mode == 'variational_gradient_engine':
-            # Gradient engine returns (mu, sigma) tuple
-            # E-STEP: Minimize full F w.r.t. beliefs with DISCRETE observations (cross-entropy)
-            mu_ffn, sigma_ffn = final_block.ffn(
-                mu=mu_normalized,
-                beta=beta,
-                mu_prior=mu_prior,
-                phi=phi,
-                sigma=sigma_q,
-                mask=mask,
-                targets=targets,  # DISCRETE observations (token IDs)!
-                W_out=self.out_proj.weight if hasattr(self.out_proj, 'weight') else None,
-            )
-            # Update covariances if evolving
-            if final_block.evolve_sigma and sigma_ffn is not None:
-                sigma_q = sigma_ffn
-        elif final_block.ffn_mode == 'hamiltonian':
-            # Hamiltonian mode returns (mu, sigma, phi, diagnostics) tuple
-            mu_ffn, sigma_ffn, phi_ffn, diagnostics = final_block.ffn(
-                mu=mu_normalized,
-                beta=beta,
-                mu_prior=mu_prior,
-                phi=phi,
-                sigma=sigma_q,
-                sigma_prior=None,  # Will default to identity
-                mask=mask,
-                targets=targets,
-                W_out=self.out_proj.weight if hasattr(self.out_proj, 'weight') else None,
-            )
-            # Update covariances from Hamiltonian dynamics
-            if final_block.evolve_sigma and sigma_ffn is not None:
-                sigma_q = sigma_ffn
-            # Update gauge frames from Hamiltonian dynamics
-            if final_block.evolve_phi and phi_ffn is not None:
-                phi = phi_ffn
-            # Store diagnostics for monitoring
-            final_block._last_hamiltonian_diagnostics = diagnostics
-        elif final_block.ffn_mode in ['VFE_dynamic', 'VFE_dynamic_stable']:
-            # Dynamic-β VFE modes return (mu, sigma) tuple
-            mu_ffn, sigma_ffn = final_block.ffn(
-                mu=mu_normalized,
-                beta=beta,
-                mu_prior=mu_prior,
-                phi=phi,
-                sigma=sigma_q,
-                mask=mask,
-                targets=targets,
-                W_out=self.out_proj.weight if hasattr(self.out_proj, 'weight') else None,
-            )
-            # Update covariances if evolving
-            if final_block.evolve_sigma and sigma_ffn is not None:
-                sigma_q = sigma_ffn
-        else:  # Legacy variational modes (variational_approx, variational_full)
-            mu_ffn = final_block.ffn(
-                mu=mu_normalized,
-                beta=beta,
-                mu_prior=mu_prior,
-                phi=phi,
-                sigma=sigma_q,
-                mask=mask,
-            )
+        # VFE_dynamic FFN returns (mu, sigma) tuple
+        mu_ffn, sigma_ffn = final_block.ffn(
+            mu=mu_normalized,
+            beta=beta,
+            mu_prior=mu_prior,
+            phi=phi,
+            sigma=sigma_q,
+            mask=mask,
+            targets=targets,
+            W_out=self.out_proj.weight if hasattr(self.out_proj, 'weight') else None,
+        )
+        # Update covariances if evolving
+        if final_block.evolve_sigma and sigma_ffn is not None:
+            sigma_q = sigma_ffn
 
         mu_q = mu_q + mu_ffn
 
