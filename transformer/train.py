@@ -1289,7 +1289,7 @@ def pure_fep_train_step(
             mu_beliefs=mu_beliefs,
             targets=targets,
             prediction_errors=ce_per_position,
-            lr=0.01,  # TODO: make configurable
+            lr=0.1,  # Higher lr for faster learning
         )
 
     # Compute metrics

@@ -1326,8 +1326,10 @@ def main():
     # Pure FEP mode (backprop-free learning)
     parser.add_argument('--pure_fep', action='store_true', default=False,
                         help='Enable pure FEP mode: learning via prior evolution, NO backprop!')
-    parser.add_argument('--prior_lr', type=float, default=0.01,
-                        help='Learning rate for prior updates in pure FEP mode (default: 0.01)')
+    parser.add_argument('--prior_lr', type=float, default=0.1,
+                        help='Learning rate for prior updates in pure FEP mode (default: 0.1)')
+    parser.add_argument('--embed_lr', type=float, default=0.1,
+                        help='Learning rate for embedding updates in pure FEP mode (default: 0.1)')
 
     # GPU optimization
     parser.add_argument('--gpu_optimized', action='store_true', default=DEFAULT_USE_GPU_OPTIMIZED,
