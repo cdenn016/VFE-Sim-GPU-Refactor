@@ -13,7 +13,7 @@ Date: December 2025
 
 import torch
 import torch.nn as nn
-from typing import Optional, Literal, Tuple, Union
+from typing import List, Optional, Literal, Tuple, Union
 
 from transformer.variational_ffn import (
     VariationalFFNDynamic,  # Dynamic-β VFE with attention-belief co-evolution
@@ -56,6 +56,9 @@ class GaugeFFN(nn.Module):
         pure_fep_mode: bool = False,
         max_seq_len: int = 512,
         prior_lr: float = 0.01,
+        # Memory-efficient options (NEW!)
+        irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
+        chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
         # Legacy parameters (ignored, kept for API compatibility)
         **kwargs,
     ):
@@ -81,6 +84,9 @@ class GaugeFFN(nn.Module):
             pure_fep_mode: If True, use persistent priors for backprop-free learning
             max_seq_len: Max sequence length for persistent priors (pure FEP mode)
             prior_lr: Learning rate for prior updates (pure FEP mode)
+            irrep_dims: Block dimensions [d₁, d₂, ...] for memory-efficient block-diagonal KL.
+                       Exploits O(N² × Σᵢdᵢ²) vs O(N² × K²) - massive savings for multi-irrep!
+            chunk_size: Chunk size for memory-efficient processing. Processes N×N in C×C chunks.
         """
         super().__init__()
 
@@ -110,6 +116,9 @@ class GaugeFFN(nn.Module):
             pure_fep_mode=pure_fep_mode,
             max_seq_len=max_seq_len,
             prior_lr=prior_lr,
+            # Memory-efficient options
+            irrep_dims=irrep_dims,
+            chunk_size=chunk_size,
         )
 
     def forward(

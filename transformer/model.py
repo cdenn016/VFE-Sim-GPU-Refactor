@@ -281,6 +281,9 @@ class GaugeTransformerLM(nn.Module):
             ffn_pure_fep_mode=ffn_pure_fep_mode,
             ffn_max_seq_len=ffn_max_seq_len,
             ffn_prior_lr=ffn_prior_lr,
+            # Memory-efficient options
+            ffn_irrep_dims=self._compute_irrep_dims(irrep_spec) if config.get('use_block_diagonal_kl', False) else None,
+            ffn_chunk_size=config.get('ffn_chunk_size', None),
         )
 
         # =================================================================
@@ -304,6 +307,21 @@ class GaugeTransformerLM(nn.Module):
         # Count parameters
         n_params = sum(p.numel() for p in self.parameters())
         print(f"GaugeTransformerLM initialized: {n_params/1e6:.2f}M parameters")
+
+    def _compute_irrep_dims(self, irrep_spec: List[Tuple[str, int, int]]) -> List[int]:
+        """
+        Compute flat list of block dimensions from irrep_spec.
+
+        For irrep_spec = [('ℓ0', 75, 1), ('ℓ1', 30, 3), ('ℓ2', 18, 5)]:
+        Returns: [1, 1, ...(75 times)..., 3, 3, ...(30 times)..., 5, 5, ...(18 times)...]
+
+        This is used for block-diagonal KL computation which exploits
+        the gauge structure for massive memory savings.
+        """
+        irrep_dims = []
+        for label, mult, dim in irrep_spec:
+            irrep_dims.extend([dim] * mult)
+        return irrep_dims
 
     def _init_weights(self, module):
         """Initialize weights following best practices."""
