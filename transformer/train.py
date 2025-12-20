@@ -1129,7 +1129,33 @@ def update_embeddings_from_beliefs(
     B, N, K = mu_beliefs.shape
 
     # Get embedding weight (tied with output projection)
-    embed_weight = model.token_embed.mu_embed.weight  # (V, K)
+    # Handle both standard embeddings (mu_embed) and gauge-fixed priors (base_mu)
+    token_embed = model.token_embed
+
+    if hasattr(token_embed, 'mu_embed'):
+        # Standard per-token embeddings
+        embed_weight = token_embed.mu_embed.weight  # (V, K)
+    elif hasattr(token_embed, 'base_mu'):
+        # Gauge-fixed priors: single base_mu rotated per token
+        # Can't do per-token updates, so update base_mu toward average belief
+        with torch.no_grad():
+            valid_mask = targets != -100
+            if valid_mask.any():
+                errors_clamped = prediction_errors.clamp(min=1e-6, max=20.0)
+                weights = 1.0 / (1.0 + errors_clamped)
+                weights = weights * valid_mask.float()
+                weight_sum = weights.sum()
+                if weight_sum > 0:
+                    weighted_belief = (mu_beliefs * weights.unsqueeze(-1)).sum(dim=(0, 1)) / weight_sum
+                    effective_lr = min(lr * 0.1, 0.01)  # Smaller lr for shared base
+                    token_embed.base_mu.data = (
+                        (1.0 - effective_lr) * token_embed.base_mu.data +
+                        effective_lr * weighted_belief
+                    )
+        return {'embed_updates': 1, 'embed_mode': 'base_mu'}
+    else:
+        # No updatable embeddings
+        return {'embed_updates': 0, 'embed_mode': 'none'}
 
     with torch.no_grad():
         valid_mask = targets != -100
