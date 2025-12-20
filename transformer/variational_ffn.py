@@ -1435,11 +1435,22 @@ class VariationalFFNDynamic(nn.Module):
             self.initialize_priors_from_embeddings(mu_prior)
 
             # Get persistent priors (these evolve via prediction-error updates)
+            # Note: persistent priors are always stored as diagonal (B, N, K)
             persistent_mu, persistent_sigma = self.get_persistent_priors(N, B, device)
 
             # Use persistent priors for VFE dynamics
             mu_p_current = persistent_mu.clone()
-            sigma_p = persistent_sigma.clone() if persistent_sigma is not None else sigma.clone()
+
+            # Convert diagonal persistent_sigma to full covariance if needed
+            if persistent_sigma is not None:
+                if is_diagonal:
+                    # Both are diagonal - use directly
+                    sigma_p = persistent_sigma.clone()
+                else:
+                    # Need full covariance (B, N, K, K) from diagonal (B, N, K)
+                    sigma_p = torch.diag_embed(persistent_sigma)  # (B, N, K) -> (B, N, K, K)
+            else:
+                sigma_p = sigma.clone()
         else:
             # Standard mode: use embedding priors
             mu_p_current = mu_prior.clone()

@@ -1212,6 +1212,15 @@ def run_single_experiment(
         # =========================================================
         # STANDARD MODE: Backprop-based training
         # =========================================================
+        # Safety check: warn if model has pure_fep_mode but we're using standard training
+        for block in model.transformer.blocks:
+            if hasattr(block, 'ffn') and hasattr(block.ffn, 'pure_fep_mode'):
+                if block.ffn.pure_fep_mode:
+                    print("\n⚠ WARNING: Model has pure_fep_mode=True but using standard training!")
+                    print("  This may cause issues. Use --pure_fep flag for backprop-free training.")
+                    print("  Or set ffn_pure_fep_mode=False in config.\n")
+                break
+
         # Create comprehensive publication metrics tracker
         pub_metrics = None
         if enable_publication_metrics:
