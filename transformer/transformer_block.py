@@ -94,6 +94,10 @@ class GaugeTransformerBlock(nn.Module):
         attention_window: int = 64,
         # Gauge frame dimension
         phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
+        # Pure FEP mode: learning via prior evolution (no backprop)
+        ffn_pure_fep_mode: bool = False,
+        ffn_max_seq_len: int = 512,
+        ffn_prior_lr: float = 0.01,
     ):
         """
         Initialize gauge transformer block.
@@ -109,13 +113,16 @@ class GaugeTransformerBlock(nn.Module):
             attention_pattern: 'full', 'local', or 'sparse' for efficient attention
             attention_window: Window size for local attention pattern
             generators: Lie algebra generators (required for VFE mode)
-            ffn_mode: 'VFE_dynamic' (only supported mode)
-            ffn_alpha: Prior weight
+            ffn_mode: 'VFE_dynamic' - dynamic-β VFE with attention-belief co-evolution
+            ffn_alpha: Prior weight for VFE
             ffn_kappa: Softmax temperature for attention
-            ffn_n_iterations: VFE inference iterations
+            ffn_n_iterations: VFE inference iterations per forward pass
             ffn_learnable_lr: Learn step size for variational descent
             ffn_lambda_belief: Belief alignment weight
             ffn_update_sigma: Update covariances in FFN
+            ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
+            ffn_max_seq_len: Max sequence length for persistent priors (pure FEP mode)
+            ffn_prior_lr: Learning rate for prior updates (pure FEP mode)
         """
         super().__init__()
         self.embed_dim = embed_dim
@@ -182,6 +189,10 @@ class GaugeTransformerBlock(nn.Module):
             vfe_dynamic_m_step_rate=ffn_vfe_dynamic_m_step_rate,
             # Diagonal covariance mode
             diagonal_covariance=diagonal_covariance,
+            # Pure FEP mode parameters
+            pure_fep_mode=ffn_pure_fep_mode,
+            max_seq_len=ffn_max_seq_len,
+            prior_lr=ffn_prior_lr,
         )
 
         self.norm2 = nn.LayerNorm(embed_dim)
@@ -374,6 +385,10 @@ class GaugeTransformerStack(nn.Module):
         attention_window: int = 64,
         # Gauge frame dimension
         phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
+        # Pure FEP mode: learning via prior evolution (no backprop)
+        ffn_pure_fep_mode: bool = False,
+        ffn_max_seq_len: int = 512,
+        ffn_prior_lr: float = 0.01,
     ):
         """
         Initialize stack of transformer blocks.
@@ -400,6 +415,9 @@ class GaugeTransformerStack(nn.Module):
             ffn_vfe_dynamic_m_step_rate: Prior update rate in M-step
             attention_pattern: 'full', 'local', or 'sparse' for efficient attention
             attention_window: Window size for local attention pattern
+            ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
+            ffn_max_seq_len: Max sequence length for persistent priors (pure FEP mode)
+            ffn_prior_lr: Learning rate for prior updates (pure FEP mode)
         """
         super().__init__()
         self.n_layers = n_layers
@@ -432,6 +450,10 @@ class GaugeTransformerStack(nn.Module):
                 attention_window=attention_window,
                 # Gauge frame dimension
                 phi_dim=phi_dim,
+                # Pure FEP mode
+                ffn_pure_fep_mode=ffn_pure_fep_mode,
+                ffn_max_seq_len=ffn_max_seq_len,
+                ffn_prior_lr=ffn_prior_lr,
             )
             for _ in range(n_layers)
         ])

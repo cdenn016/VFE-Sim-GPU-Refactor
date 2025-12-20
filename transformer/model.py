@@ -120,6 +120,24 @@ class GaugeTransformerLM(nn.Module):
         ffn_lambda_belief = config.get('ffn_lambda_belief', 1.0)
         ffn_update_sigma = config.get('ffn_update_sigma', True)
 
+        # Hamiltonian FFN config
+        ffn_hamiltonian_dt = config.get('ffn_hamiltonian_dt', 0.01)
+        ffn_hamiltonian_n_steps = config.get('ffn_hamiltonian_n_steps', 10)
+        ffn_hamiltonian_momentum_scale = config.get('ffn_hamiltonian_momentum_scale', 1.0)
+        ffn_hamiltonian_gamma = config.get('ffn_hamiltonian_gamma', 0.0)
+
+        # Hamiltonian mass config (from Inertia of Belief paper)
+        ffn_hamiltonian_mass_use_prior = config.get('ffn_hamiltonian_mass_use_prior', True)
+        ffn_hamiltonian_mass_use_observation = config.get('ffn_hamiltonian_mass_use_observation', False)
+        ffn_hamiltonian_mass_use_incoming_social = config.get('ffn_hamiltonian_mass_use_incoming_social', False)
+        ffn_hamiltonian_mass_use_outgoing_recoil = config.get('ffn_hamiltonian_mass_use_outgoing_recoil', False)
+        ffn_hamiltonian_evolve_mass = config.get('ffn_hamiltonian_evolve_mass', False)
+
+        # Pure FEP mode: learning via prior evolution (no backprop)
+        ffn_pure_fep_mode = config.get('ffn_pure_fep_mode', False)
+        ffn_max_seq_len = config.get('ffn_max_seq_len', max_seq_len)
+        ffn_prior_lr = config.get('ffn_prior_lr', 0.01)
+
         # Gauge-fixed priors (for gauge covariance)
         gauge_fixed_priors = config.get('gauge_fixed_priors', False)
 
@@ -252,6 +270,10 @@ class GaugeTransformerLM(nn.Module):
             attention_window=self.attention_window,
             # Gauge frame dimension
             phi_dim=self.phi_dim,
+            # Pure FEP mode parameters
+            ffn_pure_fep_mode=ffn_pure_fep_mode,
+            ffn_max_seq_len=ffn_max_seq_len,
+            ffn_prior_lr=ffn_prior_lr,
         )
 
         # =================================================================

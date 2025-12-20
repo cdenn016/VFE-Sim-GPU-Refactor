@@ -1079,3 +1079,346 @@ class Trainer:
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
 
         print(f"✓ Loaded checkpoint from step {self.step}")
+
+
+# =============================================================================
+# PURE FEP MODE: Backprop-Free Training via Prior Evolution
+# =============================================================================
+# This implements the BELIEF (Backprop-free Evolving Local Inference via Free Energy)
+# training paradigm where learning happens through prior evolution, not backprop.
+#
+# Key differences from standard training:
+# 1. Forward pass wrapped in torch.no_grad() - no gradient tracking
+# 2. Targets ARE passed to VFE dynamics (observation term active)
+# 3. Learning via update_priors_from_beliefs() based on prediction errors
+# 4. Persistent priors in each FFN layer consolidate successful beliefs
+#
+# The theoretical basis:
+# - VFE includes observation term: F = KL(q||p) + alignment + CE
+# - Beliefs adjust to minimize CE during forward pass
+# - Low-error beliefs update persistent priors (soft EM)
+# - Priors consolidate knowledge without backprop
+# =============================================================================
+
+
+def pure_fep_train_step(
+    model,
+    input_ids: torch.Tensor,
+    targets: torch.Tensor,
+    device: torch.device,
+) -> Dict[str, float]:
+    """
+    Single training step using pure FEP (no backprop).
+
+    Learning happens through prior evolution:
+    1. Forward pass WITH targets (CE inside VFE)
+    2. Beliefs adjust to minimize prediction error
+    3. Priors update toward successful beliefs
+
+    Args:
+        model: GaugeTransformerLM with VFE_dynamic FFN in pure_fep_mode
+        input_ids: (B, N) input token IDs
+        targets: (B, N) target token IDs
+        device: Target device
+
+    Returns:
+        Dict of training metrics
+    """
+    model.eval()  # No dropout etc during pure FEP
+
+    input_ids = input_ids.to(device)
+    targets = targets.to(device)
+
+    B, N = input_ids.shape
+
+    with torch.no_grad():
+        # Forward pass WITH targets - observation term is now active!
+        # This is the key change: targets flow into VFE dynamics
+        logits, attn_info = model.forward_with_attention(input_ids, targets=targets)
+
+        # Per-position cross-entropy for prior weighting
+        ce_per_position = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            targets.view(-1),
+            reduction='none',
+            ignore_index=-100,
+        ).view(B, N)
+
+        # Overall loss for logging
+        valid_mask = targets != -100
+        ce_loss = ce_per_position[valid_mask].mean() if valid_mask.any() else ce_per_position.mean()
+
+        # Get evolved beliefs for prior updates
+        mu_beliefs = attn_info['mu']  # (B, N, K)
+        sigma_beliefs = attn_info['sigma']  # (B, N, K, K) or (B, N, K)
+
+        # Convert full covariance to diagonal if needed
+        if sigma_beliefs is not None and sigma_beliefs.dim() == 4:
+            sigma_beliefs = torch.diagonal(sigma_beliefs, dim1=-2, dim2=-1)
+
+        # Update priors in each transformer block's FFN
+        prior_stats = {}
+        for layer_idx, block in enumerate(model.transformer.blocks):
+            if hasattr(block, 'ffn') and hasattr(block.ffn, 'update_priors_from_beliefs'):
+                block.ffn.update_priors_from_beliefs(
+                    mu_beliefs=mu_beliefs,
+                    sigma_beliefs=sigma_beliefs if sigma_beliefs is not None else torch.ones_like(mu_beliefs),
+                    prediction_errors=ce_per_position,
+                )
+
+                # Collect prior stats from last layer
+                if layer_idx == len(model.transformer.blocks) - 1:
+                    if hasattr(block.ffn, 'get_prior_stats'):
+                        prior_stats = block.ffn.get_prior_stats()
+
+    # Compute metrics
+    perplexity = torch.exp(ce_loss).item()
+
+    metrics = {
+        'loss/ce': ce_loss.item(),
+        'loss/total': ce_loss.item(),  # No other loss terms in pure FEP
+        'perplexity': perplexity,
+        'attention/beta_mean': attn_info['beta'].mean().item(),
+        'attention/kl_mean': attn_info['kl'].mean().item(),
+        **{f'prior/{k}': v for k, v in prior_stats.items()},
+    }
+
+    return metrics
+
+
+def pure_fep_validate(
+    model,
+    dataloader: DataLoader,
+    device: torch.device,
+) -> Dict[str, float]:
+    """
+    Validate model in pure FEP mode.
+
+    Note: Validation does NOT update priors - just measures performance.
+
+    Args:
+        model: GaugeTransformerLM
+        dataloader: Validation data
+        device: Target device
+
+    Returns:
+        Dict of validation metrics
+    """
+    model.eval()
+
+    total_loss = 0.0
+    total_tokens = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            input_ids = batch['input_ids'].to(device)
+            targets = batch['targets'].to(device)
+
+            # Forward WITHOUT targets for fair evaluation
+            # (beliefs don't get to see answers during eval)
+            logits, _ = model.forward_with_attention(input_ids, targets=None)
+
+            # Compute CE loss
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                reduction='sum',
+                ignore_index=-100,
+            )
+
+            valid_tokens = (targets != -100).sum().item()
+            total_loss += loss.item()
+            total_tokens += valid_tokens
+
+    avg_loss = total_loss / max(total_tokens, 1)
+    perplexity = np.exp(avg_loss)
+
+    return {
+        'val/loss': avg_loss,
+        'val/perplexity': perplexity,
+    }
+
+
+@dataclass
+class PureFEPConfig:
+    """Configuration for pure FEP (backprop-free) training."""
+
+    # Prior learning
+    prior_lr: float = 0.01          # Learning rate for prior updates
+    max_seq_len: int = 512          # Max sequence length for persistent priors
+
+    # Training loop
+    max_steps: int = 10000          # Maximum training steps
+    log_every: int = 100            # Log metrics every N steps
+    eval_every: int = 1000          # Evaluate every N steps
+    save_every: int = 5000          # Save checkpoint every N steps
+
+    # Checkpointing
+    checkpoint_dir: Optional[Path] = None
+
+    # Device
+    device: str = 'cuda'
+
+
+class PureFEPTrainer:
+    """
+    Trainer for pure FEP (backprop-free) learning.
+
+    This implements the BELIEF paradigm where learning happens through
+    prior evolution rather than gradient-based backpropagation.
+
+    Usage:
+        # Create model with pure_fep_mode=True in FFN layers
+        model = create_gauge_transformer_lm(
+            ffn_mode='VFE_dynamic',
+            ffn_pure_fep_mode=True,  # Enable pure FEP
+            ...
+        )
+
+        trainer = PureFEPTrainer(model, train_loader, val_loader, config)
+        trainer.train()
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        train_dataloader: DataLoader,
+        val_dataloader: Optional[DataLoader] = None,
+        config: Optional[PureFEPConfig] = None,
+    ):
+        self.config = config or PureFEPConfig()
+        self.device = torch.device(self.config.device if torch.cuda.is_available() else 'cpu')
+
+        self.model = model.to(self.device)
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
+
+        self.step = 0
+        self.best_val_loss = float('inf')
+
+        # Verify model is in pure FEP mode
+        self._verify_pure_fep_mode()
+
+    def _verify_pure_fep_mode(self):
+        """Check that model has pure FEP mode enabled in FFN layers."""
+        n_pure_fep = 0
+        for block in self.model.transformer.blocks:
+            if hasattr(block, 'ffn') and hasattr(block.ffn, 'pure_fep_mode'):
+                if block.ffn.pure_fep_mode:
+                    n_pure_fep += 1
+
+        if n_pure_fep == 0:
+            print("⚠ WARNING: No FFN layers have pure_fep_mode=True!")
+            print("  Training will not update priors. Enable with ffn_pure_fep_mode=True")
+        else:
+            print(f"✓ Pure FEP mode enabled in {n_pure_fep} layers")
+
+    def train(self):
+        """
+        Main training loop for pure FEP learning.
+
+        Key difference from standard training:
+        - No optimizer, no loss.backward()
+        - Learning via prior evolution in FFN layers
+        """
+        print("="*70)
+        print("PURE FEP TRAINING (Backprop-Free)")
+        print("="*70)
+        print(f"Device: {self.device}")
+        print(f"Max steps: {self.config.max_steps}")
+        print(f"Prior learning rate: {self.config.prior_lr}")
+        print("="*70)
+
+        # Progress tracking
+        if TQDM_AVAILABLE:
+            pbar = tqdm(total=self.config.max_steps, desc="Training")
+        else:
+            pbar = None
+
+        try:
+            while self.step < self.config.max_steps:
+                for batch in self.train_dataloader:
+                    if self.step >= self.config.max_steps:
+                        break
+
+                    # Training step
+                    metrics = pure_fep_train_step(
+                        self.model,
+                        batch['input_ids'],
+                        batch['targets'],
+                        self.device,
+                    )
+
+                    # Logging
+                    if self.step % self.config.log_every == 0:
+                        ppl = metrics['perplexity']
+                        ce = metrics['loss/ce']
+                        prior_active = metrics.get('prior/prior_active_positions', 0)
+                        print(f"Step {self.step:6d} | CE: {ce:.4f} | PPL: {ppl:.2f} | Active priors: {prior_active}")
+
+                    # Validation
+                    if self.val_dataloader is not None and self.step % self.config.eval_every == 0:
+                        val_metrics = pure_fep_validate(
+                            self.model, self.val_dataloader, self.device
+                        )
+                        print(f"  [VAL] Loss: {val_metrics['val/loss']:.4f} | PPL: {val_metrics['val/perplexity']:.2f}")
+
+                        if val_metrics['val/loss'] < self.best_val_loss:
+                            self.best_val_loss = val_metrics['val/loss']
+                            if self.config.checkpoint_dir:
+                                self._save_checkpoint('best_model.pt')
+
+                    # Checkpointing
+                    if self.config.checkpoint_dir and self.step % self.config.save_every == 0 and self.step > 0:
+                        self._save_checkpoint(f'checkpoint_step_{self.step}.pt')
+
+                    if pbar is not None:
+                        pbar.update(1)
+                        pbar.set_postfix({'ppl': f"{metrics['perplexity']:.2f}"})
+
+                    self.step += 1
+
+        except KeyboardInterrupt:
+            print("\n⚠ Training interrupted by user")
+
+        finally:
+            if pbar is not None:
+                pbar.close()
+
+        # Final evaluation
+        print("\n" + "="*70)
+        print("PURE FEP TRAINING COMPLETE")
+        print("="*70)
+
+        if self.val_dataloader is not None:
+            final_metrics = pure_fep_validate(self.model, self.val_dataloader, self.device)
+            print(f"Final Validation Loss: {final_metrics['val/loss']:.4f}")
+            print(f"Final Perplexity: {final_metrics['val/perplexity']:.2f}")
+
+        if self.config.checkpoint_dir:
+            self._save_checkpoint('final_model.pt')
+
+    def _save_checkpoint(self, filename: str):
+        """Save model checkpoint including persistent priors."""
+        if self.config.checkpoint_dir is None:
+            return
+
+        self.config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = self.config.checkpoint_dir / filename
+
+        # Collect prior statistics
+        prior_stats = {}
+        for layer_idx, block in enumerate(self.model.transformer.blocks):
+            if hasattr(block, 'ffn') and hasattr(block.ffn, 'get_prior_stats'):
+                prior_stats[f'layer_{layer_idx}'] = block.ffn.get_prior_stats()
+
+        checkpoint = {
+            'step': self.step,
+            'model_state': self.model.state_dict(),
+            'best_val_loss': self.best_val_loss,
+            'prior_stats': prior_stats,
+            'config': self.model.config if hasattr(self.model, 'config') else None,
+        }
+
+        torch.save(checkpoint, checkpoint_path)
+        print(f"  💾 Saved checkpoint: {checkpoint_path.name}")
