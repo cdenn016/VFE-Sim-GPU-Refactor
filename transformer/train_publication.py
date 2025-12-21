@@ -1186,15 +1186,16 @@ def run_single_experiment(
     if ffn_mode == 'standard':
         # Standard transformer baseline
         print("  Model type: STANDARD TRANSFORMER (dot-product attention)")
-        model = StandardTransformerLM(
-            vocab_size=actual_vocab_size,
-            embed_dim=config['embed_dim'],
-            n_layers=config['n_layers'],
-            n_heads=config.get('n_heads', 1),
-            hidden_dim=config.get('hidden_dim', config['embed_dim'] * 4),
-            max_seq_len=config['max_seq_len'],
-            dropout=config.get('dropout', 0.1),
-        )
+        model_config = {
+            'vocab_size': actual_vocab_size,
+            'embed_dim': config['embed_dim'],
+            'n_layers': config['n_layers'],
+            'n_heads': config.get('n_heads', 1),
+            'hidden_dim': config.get('hidden_dim', config['embed_dim'] * 4),
+            'max_seq_len': config['max_seq_len'],
+            'dropout': config.get('dropout', 0.1),
+        }
+        model = StandardTransformerLM(model_config)
     else:
         # Gauge VFE transformer
         print("  Model type: GAUGE VFE TRANSFORMER (KL-divergence attention)")
