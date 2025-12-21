@@ -298,7 +298,16 @@ GPU_OPTIMIZED_CONFIG = {
     'num_workers': 4,         # Parallel data loading
 
     # Gauge transformer parameters
-    'kappa_beta': 1,
+    # =========================================================================
+    # TEMPERATURE SCALING (κ ∝ K)
+    # Theory: E[D_KL] = Kρ²/σ², so κ must scale with K for stable attention.
+    # When kappa_beta_auto_scale=True, κ is computed as:
+    #   κ = kappa_beta_base × (K / K_ref)
+    # K_ref=11 is the reference dimension where kappa_beta_base=1 works well.
+    # =========================================================================
+    'kappa_beta_auto_scale': True,   # Enable automatic κ scaling with K
+    'kappa_beta_base': 1.0,          # Base temperature at K=K_ref
+    'kappa_beta_k_ref': 11,          # Reference dimension (K=11 works with κ=1)
     'epsilon': 1e-8,
     'pos_encoding_mode': 'learned',   #'learned' or 'sinusoidal'
     'evolve_sigma': True,     # Full geometric learning
@@ -1189,15 +1198,20 @@ def run_single_experiment(
     else:
         # Gauge VFE transformer
         print("  Model type: GAUGE VFE TRANSFORMER (KL-divergence attention)")
-        # Scale kappa_beta with K to maintain consistent attention sharpness
-        if config.get('kappa_beta_scale_with_k', False):
-            K = config['embed_dim']
-            K_ref = 64  # Reference dimension (roughly GPT-2 heads)
-            original_kappa = config['kappa_beta']
-            config['kappa_beta'] = original_kappa * (K / K_ref)
-            print(f"  kappa_beta: {original_kappa} → {config['kappa_beta']:.4f} (scaled for K={K})")
+
+        # Compute kappa_beta: either auto-scale with K or use fixed value
+        K = config['embed_dim']
+        if config.get('kappa_beta_auto_scale', False):
+            kappa_base = config.get('kappa_beta_base', 1.0)
+            K_ref = config.get('kappa_beta_k_ref', 11)
+            config['kappa_beta'] = kappa_base * (K / K_ref)
+            print(f"  kappa_beta: {kappa_base} × ({K}/{K_ref}) = {config['kappa_beta']:.3f} (auto-scaled)")
         else:
-            print(f"  kappa_beta: {config['kappa_beta']}")
+            # Backward compatibility: use kappa_beta directly if set, else compute from base
+            if 'kappa_beta' not in config:
+                config['kappa_beta'] = config.get('kappa_beta_base', 1.0)
+            print(f"  kappa_beta: {config['kappa_beta']} (fixed)")
+
         model = GaugeTransformerLM(config)
 
     model = model.to(device)
