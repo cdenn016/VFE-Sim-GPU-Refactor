@@ -692,10 +692,45 @@ class PublicationTrainer(FastTrainer):
             self.global_step % getattr(self.config, 'rg_metrics_interval', 100) == 0
         )
 
+        # Check if using standard transformer (no VFE loss)
+        is_standard = isinstance(self.model, StandardTransformerLM)
+
         # Forward pass with full metrics (with optional AMP)
         if self.scaler is not None:
             # Mixed precision forward pass
             with torch.amp.autocast('cuda'):
+                if is_standard:
+                    # Standard transformer: simple cross-entropy loss
+                    output = self.model(input_ids, labels=target_ids)
+                    loss = output['loss']
+                    full_metrics = {
+                        'loss/total': loss.item(),
+                        'loss/ce': loss.item(),
+                    }
+                else:
+                    loss, full_metrics = compute_free_energy_loss(
+                        self.model,
+                        input_ids,
+                        target_ids,
+                        alpha=self.config.alpha,
+                        lambda_beta=self.config.beta,
+                        lambda_gamma=self.config.lambda_gamma,
+                        kappa_gamma=self.config.kappa_gamma,
+
+                    )
+            # Scaled backward
+            self.scaler.scale(loss).backward()
+        else:
+            # Standard forward pass
+            if is_standard:
+                # Standard transformer: simple cross-entropy loss
+                output = self.model(input_ids, labels=target_ids)
+                loss = output['loss']
+                full_metrics = {
+                    'loss/total': loss.item(),
+                    'loss/ce': loss.item(),
+                }
+            else:
                 loss, full_metrics = compute_free_energy_loss(
                     self.model,
                     input_ids,
@@ -704,22 +739,8 @@ class PublicationTrainer(FastTrainer):
                     lambda_beta=self.config.beta,
                     lambda_gamma=self.config.lambda_gamma,
                     kappa_gamma=self.config.kappa_gamma,
-                    
+
                 )
-            # Scaled backward
-            self.scaler.scale(loss).backward()
-        else:
-            # Standard forward pass
-            loss, full_metrics = compute_free_energy_loss(
-                self.model,
-                input_ids,
-                target_ids,
-                alpha=self.config.alpha,
-                lambda_beta=self.config.beta,
-                lambda_gamma=self.config.lambda_gamma,
-                kappa_gamma=self.config.kappa_gamma,
-                
-            )
             loss.backward()
 
         # Compute gradient norms BEFORE clipping
