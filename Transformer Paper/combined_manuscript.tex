@@ -206,19 +206,25 @@ Defining learned projections $Q_i = \mu_i^\top W_Q$ and $K_j = \mu_j^\top W_K$:
 
 This is exactly the standard transformer attention formula, with temperature $\tau = \sigma^2\sqrt{d_k}$.
 
-\subsection{Backpropagation as Free Energy Gradient Descent}
+\subsection{Loss Functions from Free Energy}
 
 In the deterministic limit, the free energy becomes:
 \begin{equation}
-\mathcal{F}[\{\mu_i\}] = \sum_i \frac{\lambda_p}{2}\|\mu_i - \mu_{\text{prior}}\|^2 + \sum_{i,j} \frac{\beta_{ij}}{2\sigma^2}\|\mu_i - \mu_j\|^2 - \sum_i \log p(o_i | \mu_i).
+\mathcal{F}[\{\mu_i\}] = \underbrace{\sum_i \frac{\lambda_p}{2}\|\mu_i - \mu_{\text{prior}}\|^2}_{\text{L2 regularization}} + \underbrace{\sum_{i,j} \frac{\beta_{ij}}{2\sigma^2}\|\mu_i - \mu_j\|^2}_{\text{alignment coupling}} - \underbrace{\sum_i \log p(o_i | \mu_i)}_{\text{cross-entropy loss}}.
 \end{equation}
 
-The gradient flow $\frac{d\mu_i}{dt} = -\eta \frac{\partial \mathcal{F}}{\partial \mu_i}$ is \textbf{mathematically identical} to backpropagation:
+This has precisely the structure of a standard neural network loss: regularization plus cross-entropy. Gradient descent on $\mathcal{F}$ yields:
 \begin{equation}
 \mu_i^{(t+1)} = \mu_i^{(t)} - \eta \left[\lambda_p(\mu_i - \mu_{\text{prior}}) + \sum_j \frac{\beta_{ij}}{\sigma^2}(\mu_i - \mu_j) - \frac{\partial \log p(o_i|\mu_i)}{\partial \mu_i}\right].
 \end{equation}
 
-This establishes that standard neural network training is the deterministic limit of variational free energy minimization.
+\paragraph{Clarification on Backpropagation.} Backpropagation is an \emph{algorithm} for computing gradients via the chain rule; gradient descent is the \emph{optimization} that uses those gradients. The deeper insight is not that ``backprop emerges from VFE''---the chain rule is simply calculus---but rather that the \textbf{loss function structure} (cross-entropy + L2 regularization) is \emph{derived} from first principles rather than chosen heuristically.
+
+For layered architectures, computing $\partial \mathcal{F}/\partial \mu_i^{(\ell)}$ via the chain rule gives:
+\begin{equation}
+\frac{\partial \mathcal{F}}{\partial \mu_i^{(\ell)}} = \frac{\partial \mathcal{F}_{\text{local}}^{(\ell)}}{\partial \mu_i^{(\ell)}} + \sum_j \frac{\partial \mathcal{F}}{\partial \mu_j^{(\ell+1)}} \cdot \frac{\partial \mu_j^{(\ell+1)}}{\partial \mu_i^{(\ell)}},
+\end{equation}
+which is the backpropagation formula. This is a mathematical identity, not a surprising emergence.
 
 %=============================================================================
 \section{Empirical Validation: BERT Comparison}
@@ -274,20 +280,43 @@ This explains why layer normalization is prevalent: it implements the gauge-theo
 \label{sec:implementation}
 %=============================================================================
 
-We implement the full non-degenerate framework as a working transformer for language modeling.
+We implement the full non-degenerate framework as a working transformer for language modeling. Our implementation (VFE\_dynamic mode) uses VFE gradient dynamics for the forward pass while training parameters via standard backpropagation.
 
-\subsection{Architecture}
+\subsection{Two-Timescale Architecture}
 
-Each token $i$ at position $t$ maintains:
+The architecture separates fast perception (VFE dynamics) from slow learning (backprop):
+
 \begin{itemize}
-\item \textbf{Belief mean:} $\mu_i \in \mathbb{R}^K$ (initialized from input embedding)
-\item \textbf{Belief covariance:} $\Sigma_i \in \mathbb{R}^{K \times K}$, $\Sigma_i \succ 0$
-\item \textbf{Gauge frame:} $\phi_i \in \mathfrak{so}(3)$ (encodes position)
+\item \textbf{Fast timescale (forward pass):} Beliefs $(\mu, \Sigma)$ evolve via VFE gradient descent within each layer
+\item \textbf{Slow timescale (training):} Embeddings and output projections update via backpropagation
 \end{itemize}
 
-\textbf{No MLPs, no learned weight matrices, no activation functions.}
+Each token $i$ maintains:
+\begin{itemize}
+\item \textbf{Belief mean:} $\mu_i \in \mathbb{R}^K$ (initialized from input embedding)
+\item \textbf{Belief covariance:} $\Sigma_i \in \mathbb{R}^{K \times K}$, $\Sigma_i \succ 0$ (diagonal for efficiency)
+\item \textbf{Gauge frame:} $\phi_i \in \mathfrak{so}(3)$ (encodes position via transport)
+\end{itemize}
 
-\subsection{Forward Pass}
+\textbf{Key difference from standard transformers:} The feed-forward network (FFN) is replaced by VFE gradient dynamics. There are no learned MLP weights or activation functions---the nonlinearity emerges from the softmax coupling gradient.
+
+\subsection{Two Modes: VFE\_dynamic vs Pure-FEP}
+
+We implement two variants with increasing adherence to pure VFE principles:
+
+\paragraph{VFE\_dynamic (current experiments):} Uses VFE gradient descent for the forward pass (fast perception), but trains embeddings and output projection via backpropagation (slow learning). This is a hybrid that validates VFE dynamics while leveraging efficient GPU autograd.
+
+\paragraph{Pure-FEP (future work):} Eliminates backpropagation entirely:
+\begin{itemize}
+\item \textbf{Prior Bank:} A unified structure serves as BOTH input embedding AND output projection. Each token $v$ has a prior $\pi_v = \mathcal{N}(\mu_v, \Sigma_v)$.
+\item \textbf{Encoding:} Initialize belief from token prior: $q \leftarrow \pi_{y_t}$
+\item \textbf{Decoding:} Output via KL to all priors: $p(y=v|q) \propto \exp(-D_{\mathrm{KL}}(q \| \pi_v)/\tau)$
+\item \textbf{Learning:} Priors evolve via slow VFE pressure (no backprop, no Adam/SGD)
+\end{itemize}
+
+The Pure-FEP mode achieves complete theoretical purity: attention, nonlinearity, and learning all emerge from VFE minimization. However, VFE\_dynamic is more practical for current GPU training.
+
+\subsection{Forward Pass (VFE\_dynamic)}
 
 \begin{enumerate}
 \item \textbf{Initialization:} $(\mu_i^{(0)}, \Sigma_i^{(0)}) \leftarrow \text{embed}[x_i]$, $\phi_i \leftarrow \text{pos\_encode}(i)$
