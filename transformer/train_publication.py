@@ -1376,7 +1376,7 @@ def run_single_experiment(
         # STANDARD MODE: Backprop-based training
         # =========================================================
         # Safety check: warn if model has pure_fep_mode but we're using standard training
-        for block in model.transformer.blocks:
+        for block in model.blocks:
             if hasattr(block, 'ffn') and hasattr(block.ffn, 'pure_fep_mode'):
                 if block.ffn.pure_fep_mode:
                     print("\n⚠ WARNING: Model has pure_fep_mode=True but using standard training!")
