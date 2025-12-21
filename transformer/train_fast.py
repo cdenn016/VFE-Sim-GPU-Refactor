@@ -45,6 +45,7 @@ except ImportError:
 
 # Import standard loss computation
 from transformer.train import compute_free_energy_loss
+from transformer.standard_transformer import StandardTransformerLM
 
 
 # =============================================================================
@@ -403,24 +404,33 @@ class FastTrainer:
         total_ce = 0.0
         num_batches = 0
 
+        is_standard = isinstance(self.model, StandardTransformerLM)
+
         with torch.no_grad():
             for batch in self.val_loader:
                 input_ids, target_ids = batch
                 input_ids = input_ids.to(self.device)
                 target_ids = target_ids.to(self.device)
 
-                loss, metrics = compute_free_energy_loss(
-                    self.model,
-                    input_ids,
-                    target_ids,
-                    alpha=self.config.alpha,
-                    lambda_beta=self.config.beta,
-                    lambda_gamma=self.config.lambda_gamma,
-                    kappa_gamma=self.config.kappa_gamma,
-                )
+                if is_standard:
+                    # Standard transformer: simple cross-entropy loss
+                    output = self.model(input_ids, labels=target_ids)
+                    loss = output['loss']
+                    ce_loss = loss.item()
+                else:
+                    loss, metrics = compute_free_energy_loss(
+                        self.model,
+                        input_ids,
+                        target_ids,
+                        alpha=self.config.alpha,
+                        lambda_beta=self.config.beta,
+                        lambda_gamma=self.config.lambda_gamma,
+                        kappa_gamma=self.config.kappa_gamma,
+                    )
+                    ce_loss = metrics['loss/ce']
 
                 total_loss += loss.item()
-                total_ce += metrics['loss/ce']  # Fix: use correct key format
+                total_ce += ce_loss
                 num_batches += 1
 
                 # Limit validation batches for speed
