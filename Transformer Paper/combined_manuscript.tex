@@ -206,6 +206,8 @@ Defining learned projections $Q_i = \mu_i^\top W_Q$ and $K_j = \mu_j^\top W_K$:
 
 This is exactly the standard transformer attention formula, with temperature $\tau = \sigma^2\sqrt{d_k}$.
 
+\paragraph{Temperature Scaling.} The attention temperature $\kappa$ must scale with embedding dimension to maintain stable softmax behavior. For embeddings with fixed per-dimension variance $\rho^2$, the expected KL divergence is $\mathbb{E}[D_{\mathrm{KL}}] = K\rho^2/\sigma^2$, yielding the scaling law $\kappa \propto K$ (see Appendix~\ref{app:temperature} for full derivation). This is the VFE analog of the $1/\sqrt{d_k}$ normalization in standard dot-product attention.
+
 \subsection{Loss Functions from Free Energy}
 
 In the deterministic limit, the free energy becomes:
@@ -411,9 +413,10 @@ Gauge VFE Transformer & --- & --- & --- \\
 We have established that:
 \begin{enumerate}
 \item Transformer attention is the flat-bundle, deterministic limit of gauge-equivariant VFE
-\item Backpropagation equals variational gradient descent in this limit
-\item The full framework can be implemented as a working transformer
-\item Empirical validation confirms the theoretical equivalence
+\item The loss function structure (cross-entropy + L2 regularization) derives from VFE first principles
+\item The temperature scaling $\kappa \propto K$ emerges naturally from KL divergence statistics
+\item The full framework can be implemented as a working transformer with VFE dynamics
+\item Empirical validation confirms the theoretical equivalence (BERT: $r = 0.821$)
 \end{enumerate}
 
 \subsection{Implications}
@@ -440,7 +443,8 @@ We have established that:
 We have presented a unified gauge-theoretic framework that:
 \begin{enumerate}
 \item Derives transformer attention from first principles as the degenerate limit of gauge-equivariant variational free energy
-\item Proves that backpropagation is variational gradient descent in the deterministic limit
+\item Shows that the standard loss function structure (cross-entropy + regularization) emerges from VFE
+\item Derives the temperature scaling law $\kappa \propto K$ from KL divergence statistics
 \item Validates the equivalence empirically against pretrained BERT ($r = 0.821$)
 \item Implements the full non-degenerate framework as a working transformer
 \item Demonstrates language modeling capability on WikiText-103
@@ -468,6 +472,102 @@ The complete implementation is available at:
 %=============================================================================
 
 [TO BE ADDED: Full derivation from normalized generative model with agreement variables, from attention manuscript Section 3]
+
+%=============================================================================
+\section{Temperature Scaling Law}
+\label{app:temperature}
+%=============================================================================
+
+We derive the scaling law for the attention temperature $\kappa$ as a function of embedding dimension $K$.
+
+\subsection{KL Divergence in the Isotropic Limit}
+
+For Gaussian beliefs with diagonal covariance $\Sigma_i = \sigma^2 I$, the KL divergence simplifies to:
+\begin{equation}
+D_{\mathrm{KL}}(q_i \| q_j) = \frac{1}{2\sigma^2} \|\mu_i - \mu_j\|^2 = \frac{1}{2\sigma^2} \sum_{k=1}^{K} (\mu_i[k] - \mu_j[k])^2.
+\end{equation}
+
+\subsection{Expected KL Magnitude}
+
+Let embedding entries have variance $\rho^2$ per dimension. For two independent embeddings $\mu_i, \mu_j$:
+\begin{equation}
+\mathbb{E}[(\mu_i[k] - \mu_j[k])^2] = \mathrm{Var}(\mu_i[k]) + \mathrm{Var}(\mu_j[k]) = 2\rho^2.
+\end{equation}
+
+Summing over $K$ dimensions:
+\begin{equation}
+\mathbb{E}[\|\mu_i - \mu_j\|^2] = 2K\rho^2.
+\end{equation}
+
+Therefore, the expected KL divergence is:
+\begin{equation}
+\mathbb{E}[D_{\mathrm{KL}}] = \frac{K\rho^2}{\sigma^2}.
+\label{eq:expected_kl}
+\end{equation}
+
+\textbf{Key result:} KL divergence scales linearly with embedding dimension $K$.
+
+\subsection{Softmax Stability Condition}
+
+The attention weights are computed via:
+\begin{equation}
+\beta_{ij} = \mathrm{softmax}_j\left(-\frac{D_{\mathrm{KL}}(q_i \| \Omega_{ij} q_j)}{\kappa}\right).
+\end{equation}
+
+For well-behaved attention (neither collapsed to argmax nor uniform), the softmax inputs should be $O(1)$:
+\begin{equation}
+\frac{D_{\mathrm{KL}}}{\kappa} = O(1) \quad \Rightarrow \quad \kappa = O(\mathbb{E}[D_{\mathrm{KL}}]).
+\end{equation}
+
+Substituting Eq.~\eqref{eq:expected_kl}:
+\begin{equation}
+\boxed{\kappa \propto K \cdot \frac{\rho^2}{\sigma^2}}
+\label{eq:kappa_scaling}
+\end{equation}
+
+\subsection{Connection to Standard Transformer $1/\sqrt{d_k}$ Scaling}
+
+In standard dot-product attention with learned projections $Q, K \in \mathbb{R}^{d_k}$:
+\begin{equation}
+\alpha_{ij} = \mathrm{softmax}_j\left(\frac{Q_i \cdot K_j}{\sqrt{d_k}}\right).
+\end{equation}
+
+The $1/\sqrt{d_k}$ normalization arises because:
+\begin{equation}
+\mathrm{Var}(Q_i \cdot K_j) = \sum_{k=1}^{d_k} \mathrm{Var}(Q[k] K[k]) = O(d_k).
+\end{equation}
+
+Dividing by $\sqrt{d_k}$ yields $O(1)$ variance in the softmax input.
+
+In our KL formulation, the analogous quantity is the squared distance:
+\begin{equation}
+\|\mu_i - \mu_j\|^2 = \sum_{k=1}^{K} (\mu_i[k] - \mu_j[k])^2 \quad \text{has } \mathbb{E} = O(K).
+\end{equation}
+
+Thus $\kappa \propto K$ in the KL formulation corresponds to $\sqrt{d_k}$ in the dot-product formulation. The relationship is:
+\begin{equation}
+\kappa_{\mathrm{KL}} \leftrightarrow \sqrt{d_k} \cdot \sigma^2.
+\end{equation}
+
+\subsection{Practical Recommendations}
+
+For embedding dimension $K$ with per-dimension variance $\rho^2$ and belief variance $\sigma^2$:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Initialization} & \textbf{$\rho^2$} & \textbf{Recommended $\kappa$} \\
+\midrule
+Standard ($\rho = 1/\sqrt{K}$) & $1/K$ & $\kappa = \sigma^{-2}$ (constant) \\
+Fixed per-dim ($\rho = c$) & $c^2$ & $\kappa \propto K$ \\
+Layer-normed & $\approx 1/K$ & $\kappa = \sigma^{-2}$ (constant) \\
+\bottomrule
+\end{tabular}
+\caption{Temperature scaling depends on embedding initialization.}
+\end{table}
+
+\textbf{Rule of thumb:} If using fixed per-dimension variance (common after training), set $\kappa \approx K/K_{\mathrm{ref}}$ where $K_{\mathrm{ref}}$ is a reference dimension where $\kappa=1$ works well.
 
 %=============================================================================
 \section{Mathematical Framework Details}
