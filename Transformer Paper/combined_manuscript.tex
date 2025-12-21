@@ -505,7 +505,7 @@ Therefore, the expected KL divergence is:
 \label{eq:expected_kl}
 \end{equation}
 
-\textbf{Key result:} KL divergence scales linearly with embedding dimension $K$.
+Thus KL divergence scales linearly with embedding dimension $K$.
 
 \subsection{Softmax Stability Condition}
 
@@ -567,7 +567,7 @@ Layer-normed & $\approx 1/K$ & $\kappa = \sigma^{-2}$ (constant) \\
 \caption{Temperature scaling depends on embedding initialization.}
 \end{table}
 
-\textbf{Rule of thumb:} If using fixed per-dimension variance (common after training), set $\kappa \approx K/K_{\mathrm{ref}}$ where $K_{\mathrm{ref}}$ is a reference dimension where $\kappa=1$ works well.
+In practice, if using fixed per-dimension variance (common after training), one may set $\kappa \approx K/K_{\mathrm{ref}}$ where $K_{\mathrm{ref}}$ is a reference dimension at which $\kappa=1$ yields stable training.
 
 %=============================================================================
 \section{Mathematical Framework Details}

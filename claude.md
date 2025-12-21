@@ -24,6 +24,16 @@ Honest uncertainty:
 "I'm not sure this is right" beats confident speculation
 Acknowledge when something needs verification
 
+## Manuscript Writing Style
+
+When writing or editing LaTeX manuscripts:
+
+- Minimize bullet points and itemized lists. Use flowing prose instead.
+- Avoid phrases like "Key insight:", "Key result:", "Important:", etc. Let the content speak for itself.
+- Write in formal academic style with complete sentences and paragraphs.
+- Prefer equations inline with explanatory text over standalone equations followed by bullet-point explanations.
+- Tables are acceptable for data presentation, but avoid using them as a substitute for prose exposition.
+
 VFE, Renormalization, and the Information Bottleneck
 The gauge transformer framework unifies three deep theoretical perspectives: variational inference, renormalization group flow, and the information bottleneck principle.
 
