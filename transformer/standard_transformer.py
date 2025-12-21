@@ -283,6 +283,73 @@ class StandardTransformerLM(nn.Module):
 
         return output
 
+    def generate(
+        self,
+        prompt_ids: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Autoregressive generation.
+
+        Args:
+            prompt_ids: (1, prompt_len) initial tokens
+            max_new_tokens: Number of tokens to generate
+            temperature: Sampling temperature (higher = more random)
+            top_k: Top-k sampling (optional)
+            top_p: Nucleus sampling (optional)
+
+        Returns:
+            generated: (1, prompt_len + max_new_tokens) full sequence
+        """
+        self.eval()
+        generated = prompt_ids.clone()
+
+        for _ in range(max_new_tokens):
+            # Truncate if exceeds max_seq_len
+            if generated.shape[1] > self.config['max_seq_len']:
+                generated = generated[:, -self.config['max_seq_len']:]
+
+            # Forward pass
+            output = self.forward(generated)
+            logits = output['logits']  # (1, T, V)
+
+            # Get logits for last token
+            logits_next = logits[:, -1, :] / temperature  # (1, V)
+
+            # Apply top-k filtering
+            if top_k is not None:
+                v, _ = torch.topk(logits_next, min(top_k, logits_next.size(-1)))
+                logits_next[logits_next < v[:, [-1]]] = -float('inf')
+
+            # Apply top-p (nucleus) filtering
+            if top_p is not None:
+                sorted_logits, sorted_indices = torch.sort(logits_next, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+                # Remove tokens with cumulative probability above threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift right to keep first token above threshold
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+
+                # Scatter back to original indexing
+                indices_to_remove = sorted_indices_to_remove.scatter(
+                    1, sorted_indices, sorted_indices_to_remove
+                )
+                logits_next[indices_to_remove] = -float('inf')
+
+            # Sample
+            probs = F.softmax(logits_next, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)  # (1, 1)
+
+            # Append
+            generated = torch.cat([generated, next_token], dim=1)
+
+        return generated
+
     def count_parameters(self) -> Dict[str, int]:
         """Count parameters by component."""
         counts = {}
