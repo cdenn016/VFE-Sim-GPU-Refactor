@@ -365,32 +365,9 @@ GPU_OPTIMIZED_CONFIG = {
 
     # Variational FFN parameters
     'ffn_mode': 'VFE_dynamic',
-    'ffn_alpha': 1,
-    'ffn_tau_eff': 1.0,
-    'ffn_kappa': 1,
+    # NOTE: alpha and kappa are shared between loss and FFN (consolidated)
     'ffn_n_iterations': 1,
     'ffn_learnable_lr': True,
-    'ffn_pattern': 'full',
-    'ffn_window': 64,
-
-    # =========================================================================
-    # BLOCK-DIAGONAL KL COMPUTATION (Principled Memory Optimization)
-    # When use_block_diagonal_kl=True, exploits the irrep structure:
-    # - Generators are block-diagonal → Omega is block-diagonal
-    # - KL decomposes additively across blocks
-    # - Memory: O(N² × Σᵢdᵢ²) instead of O(N² × K²)
-    # For K=255 with 75×ℓ₀ + 30×ℓ₁ + 18×ℓ₂: ~82× memory savings!
-    # This is the PRINCIPLED approach that respects gauge structure.
-    # =========================================================================
-    'use_block_diagonal_kl': True,  # Enable block-diagonal KL (recommended!)
-
-    # =========================================================================
-    # CHUNKED KL COMPUTATION (Additional Memory Optimization)
-    # Processes N×N attention matrix in C×C chunks to reduce peak memory.
-    # Set to None for no chunking, or a small value (32-64) for memory savings.
-    # Combines with block-diagonal for maximum efficiency.
-    # =========================================================================
-    'ffn_chunk_size': 64,  # Chunk size for memory-efficient attention (None = no chunking)
 
     # =========================================================================
     # PURE FEP MODE (Backprop-Free Learning)

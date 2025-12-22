@@ -113,8 +113,9 @@ class GaugeTransformerLM(nn.Module):
 
         # VFE FFN config
         ffn_mode = config.get('ffn_mode', 'VFE_dynamic')
-        ffn_alpha = config.get('ffn_alpha', 0.001)
-        ffn_kappa = config.get('ffn_kappa', 1.0)
+        # Use unified alpha/kappa for both loss and FFN (consolidated parameters)
+        ffn_alpha = config.get('alpha', 0.001)  # Unified: prior weight
+        ffn_kappa = kappa_beta  # Unified: use same temperature for attention and FFN
         ffn_n_iterations = config.get('ffn_n_iterations', 1)
         ffn_learnable_lr = config.get('ffn_learnable_lr', True)
         ffn_lambda_belief = config.get('ffn_lambda_belief', 1.0)
