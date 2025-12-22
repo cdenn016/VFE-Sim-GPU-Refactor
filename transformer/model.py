@@ -221,9 +221,9 @@ class GaugeTransformerLM(nn.Module):
             init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
             init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
             learnable_sigma=False,  # Keep simple for now
-            learnable_phi=gauge_fixed_priors,  # Enable phi learning if gauge_fixed_priors
+            learnable_phi=evolve_phi or gauge_fixed_priors,  # Enable phi if evolving OR gauge_fixed
             gauge_fixed_priors=gauge_fixed_priors,
-            generators=self.generators if gauge_fixed_priors else None,
+            generators=self.generators,  # Always pass generators for gauge transport
             diagonal_covariance=diagonal_covariance,
             max_seq_len=max_seq_len,
             use_positional_embedding=use_positional_embedding,
