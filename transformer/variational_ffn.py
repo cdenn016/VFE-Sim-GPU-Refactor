@@ -92,14 +92,17 @@ def _compute_vfe_gradients_block_diagonal(
     compute_sigma_align_grad: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Block-diagonal VFE gradient computation.
+    Block-diagonal VFE gradient computation with optional chunking.
 
     Processes each irrep block separately to reduce memory from O(N²K²) to O(N² × max(dᵢ²)).
-    Gradients are accumulated across blocks.
+    When chunk_size is provided, also chunks over query positions to reduce memory further.
     """
     B, N, K = mu_q.shape
     device = mu_q.device
     dtype = mu_q.dtype
+
+    # Default chunk size to N (no chunking) if not provided
+    C = chunk_size if chunk_size is not None else N
 
     # Initialize output gradients
     grad_mu = torch.zeros(B, N, K, device=device, dtype=dtype)
@@ -121,10 +124,9 @@ def _compute_vfe_gradients_block_diagonal(
     grad_sigma = grad_sigma + grad_sigma_self
 
     # =================================================================
-    # 2. Belief Alignment Gradient (block-diagonal processing)
-    # Process each irrep block separately to save memory
+    # 2. Belief Alignment Gradient (block-diagonal + chunked processing)
     # =================================================================
-    # Precompute matrix exponentials per block
+    # Precompute matrix exponentials per block (these are (B, N, d, d))
     block_exp_phi = []
     block_exp_neg_phi = []
     block_start = 0
@@ -140,78 +142,90 @@ def _compute_vfe_gradients_block_diagonal(
     grad_mu_align = torch.zeros_like(mu_q)
     grad_sigma_align = torch.zeros_like(sigma_q)
 
-    # For KL values (needed for softmax coupling), accumulate across blocks
+    # For KL values and gradients - we'll accumulate these in chunks
+    # We need full (B, N, N) for final softmax coupling, so accumulate
     kl_values = torch.zeros(B, N, N, device=device, dtype=dtype)
     grad_kl_per_pair_full = torch.zeros(B, N, N, K, device=device, dtype=dtype)
 
-    # Process each block
-    block_start = 0
-    for block_idx, d in enumerate(irrep_dims):
-        block_end = block_start + d
+    # Process in chunks over query positions (i dimension)
+    for i_start in range(0, N, C):
+        i_end = min(i_start + C, N)
+        C_actual = i_end - i_start
 
-        # Extract block beliefs
-        mu_block = mu_q[:, :, block_start:block_end]
-        sigma_block = sigma_q[:, :, block_start:block_end, block_start:block_end]
+        # Process each irrep block for this chunk of query positions
+        block_start = 0
+        for block_idx, d in enumerate(irrep_dims):
+            block_end = block_start + d
 
-        # Compute Omega for this block
-        Omega_block = torch.einsum(
-            'bikl,bjlm->bijkm',
-            block_exp_phi[block_idx], block_exp_neg_phi[block_idx]
-        )  # (B, N, N, d, d)
+            # Extract block beliefs
+            mu_block = mu_q[:, :, block_start:block_end]  # (B, N, d)
+            sigma_block = sigma_q[:, :, block_start:block_end, block_start:block_end]  # (B, N, d, d)
 
-        # Transport means and covariances for this block
-        mu_j_transported = torch.einsum('bijkl,bjl->bijk', Omega_block, mu_block)
-        sigma_j_transported = torch.einsum(
-            'bijkl,bjlm,bijmn->bijkn',
-            Omega_block, sigma_block, Omega_block.transpose(-1, -2)
-        )
+            # Get chunked exponentials for query positions
+            exp_phi_i = block_exp_phi[block_idx][:, i_start:i_end]  # (B, C, d, d)
+            exp_neg_phi_j = block_exp_neg_phi[block_idx]  # (B, N, d, d)
 
-        del Omega_block
+            # Compute Omega for this chunk: (B, C, N, d, d)
+            Omega_chunk = torch.einsum(
+                'bikl,bjlm->bijkm',
+                exp_phi_i, exp_neg_phi_j
+            )  # (B, C, N, d, d)
 
-        # Regularize and invert
-        I_d = torch.eye(d, device=device, dtype=dtype)
-        sigma_j_reg = sigma_j_transported + eps * I_d
-        sigma_j_inv = torch.linalg.inv(sigma_j_reg)
+            # Transport means and covariances for this chunk
+            mu_j_transported = torch.einsum('bijkl,bjl->bijk', Omega_chunk, mu_block)  # (B, C, N, d)
+            sigma_j_transported = torch.einsum(
+                'bijkl,bjlm,bijmn->bijkn',
+                Omega_chunk, sigma_block, Omega_chunk.transpose(-1, -2)
+            )  # (B, C, N, d, d)
 
-        # Delta mu for this block
-        delta_mu_block = mu_block[:, :, None, :] - mu_j_transported
+            del Omega_chunk
 
-        # ∂KL_ij/∂μ_i for this block
-        grad_kl_block = torch.einsum('bijkl,bijl->bijk', sigma_j_inv, delta_mu_block)
-        grad_kl_per_pair_full[:, :, :, block_start:block_end] = grad_kl_block
+            # Regularize and invert
+            I_d = torch.eye(d, device=device, dtype=dtype)
+            sigma_j_reg = sigma_j_transported + eps * I_d
+            sigma_j_inv = torch.linalg.inv(sigma_j_reg)  # (B, C, N, d, d)
 
-        # KL terms for this block
-        mahal_block = torch.einsum('bijk,bijk->bij', delta_mu_block, grad_kl_block)
+            # Delta mu for this block (query chunk)
+            mu_block_i = mu_block[:, i_start:i_end]  # (B, C, d)
+            delta_mu_block = mu_block_i[:, :, None, :] - mu_j_transported  # (B, C, N, d)
 
-        sigma_i_block = sigma_block[:, :, None, :, :].expand(-1, -1, N, -1, -1)
-        trace_block = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_block))
+            # ∂KL_ij/∂μ_i for this block
+            grad_kl_block = torch.einsum('bijkl,bijl->bijk', sigma_j_inv, delta_mu_block)  # (B, C, N, d)
+            grad_kl_per_pair_full[:, i_start:i_end, :, block_start:block_end] = grad_kl_block
 
-        try:
-            L_j = torch.linalg.cholesky(sigma_j_reg)
-            logdet_j = 2.0 * torch.sum(torch.log(torch.diagonal(L_j, dim1=-2, dim2=-1) + eps), dim=-1)
-        except RuntimeError:
-            logdet_j = torch.zeros(B, N, N, device=device, dtype=dtype)
+            # KL terms for this block
+            mahal_block = torch.einsum('bijk,bijk->bij', delta_mu_block, grad_kl_block)  # (B, C, N)
 
-        sigma_i_block_reg = sigma_block + eps * I_d
-        try:
-            L_i = torch.linalg.cholesky(sigma_i_block_reg)
-            logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1) + eps), dim=-1)
-        except RuntimeError:
-            logdet_i = torch.zeros(B, N, device=device, dtype=dtype)
+            sigma_i_block = sigma_block[:, i_start:i_end, None, :, :].expand(-1, -1, N, -1, -1)  # (B, C, N, d, d)
+            trace_block = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_block))
 
-        kl_block = 0.5 * (trace_block + mahal_block - d + logdet_j - logdet_i[:, :, None])
-        kl_values = kl_values + kl_block.clamp(min=0.0)
+            try:
+                L_j = torch.linalg.cholesky(sigma_j_reg)
+                logdet_j = 2.0 * torch.sum(torch.log(torch.diagonal(L_j, dim1=-2, dim2=-1) + eps), dim=-1)
+            except RuntimeError:
+                logdet_j = torch.zeros(B, C_actual, N, device=device, dtype=dtype)
 
-        # Sigma alignment gradient for this block
-        if compute_sigma_align_grad:
-            sigma_i_inv_block = torch.linalg.inv(sigma_i_block_reg)
-            sigma_i_inv_exp = sigma_i_inv_block[:, :, None, :, :].expand(-1, -1, N, -1, -1)
-            grad_sigma_block = 0.5 * (sigma_j_inv - sigma_i_inv_exp)
-            grad_sigma_block_weighted = lambda_belief * torch.einsum('bij,bijkl->bikl', beta, grad_sigma_block)
-            grad_sigma_align[:, :, block_start:block_end, block_start:block_end] += grad_sigma_block_weighted
+            sigma_i_block_diag = sigma_block[:, i_start:i_end] + eps * I_d  # (B, C, d, d)
+            try:
+                L_i = torch.linalg.cholesky(sigma_i_block_diag)
+                logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1) + eps), dim=-1)
+            except RuntimeError:
+                logdet_i = torch.zeros(B, C_actual, device=device, dtype=dtype)
 
-        del sigma_j_transported, sigma_j_inv, mu_j_transported
-        block_start = block_end
+            kl_block = 0.5 * (trace_block + mahal_block - d + logdet_j - logdet_i[:, :, None])
+            kl_values[:, i_start:i_end, :] = kl_values[:, i_start:i_end, :] + kl_block.clamp(min=0.0)
+
+            # Sigma alignment gradient for this block
+            if compute_sigma_align_grad:
+                sigma_i_inv_block = torch.linalg.inv(sigma_i_block_diag)  # (B, C, d, d)
+                sigma_i_inv_exp = sigma_i_inv_block[:, :, None, :, :].expand(-1, -1, N, -1, -1)
+                grad_sigma_block = 0.5 * (sigma_j_inv - sigma_i_inv_exp)
+                beta_chunk = beta[:, i_start:i_end, :]  # (B, C, N)
+                grad_sigma_block_weighted = lambda_belief * torch.einsum('bij,bijkl->bikl', beta_chunk, grad_sigma_block)
+                grad_sigma_align[:, i_start:i_end, block_start:block_end, block_start:block_end] += grad_sigma_block_weighted
+
+            del sigma_j_transported, sigma_j_inv, mu_j_transported
+            block_start = block_end
 
     # Direct term
     grad_mu_direct = lambda_belief * torch.einsum('bij,bijk->bik', beta, grad_kl_per_pair_full)
