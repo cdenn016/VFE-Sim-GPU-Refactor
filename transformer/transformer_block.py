@@ -74,8 +74,8 @@ class GaugeTransformerBlock(nn.Module):
         dropout: float = 0.1,
         evolve_sigma: bool = False,
         evolve_phi: bool = False,
-        # Phi evolution parameters
-        phi_ffn_hidden_dim: Optional[int] = None,  # Hidden dim for phi FFN (default: embed_dim)
+        # Phi evolution parameters (VFE gradient-based, not neural network)
+        phi_lr: float = 0.05,  # Learning rate for phi gradient descent
         phi_max_norm: float = 3.14159,  # Max phi norm (π radians = 180° rotation)
         # Variational FFN parameters
         generators: Optional[torch.Tensor] = None,  # (3, K, K)
@@ -199,6 +199,10 @@ class GaugeTransformerBlock(nn.Module):
             pure_fep_mode=ffn_pure_fep_mode,
             max_seq_len=ffn_max_seq_len,
             prior_lr=ffn_prior_lr,
+            # Phi evolution via VFE gradients (principled approach)
+            update_phi=evolve_phi,  # When evolve_phi=True, update φ via ∂F/∂φ
+            phi_lr=phi_lr,
+            phi_max_norm=phi_max_norm,
             # Memory-efficient options
             irrep_dims=ffn_irrep_dims,
             chunk_size=ffn_chunk_size,
@@ -207,26 +211,14 @@ class GaugeTransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(embed_dim)
 
         # =====================================================================
-        # Optional: Gauge Frame Evolution
+        # Gauge Frame Evolution Configuration
         # =====================================================================
+        # When evolve_phi=True, phi is updated via VFE gradient descent in the
+        # variational FFN, NOT via a neural network. This is the principled
+        # approach: ∂F/∂φ comes from the belief alignment term.
         self.phi_dim = phi_dim
         self.phi_max_norm = phi_max_norm
-        if evolve_phi:
-            # FFN for φ evolution (phi_dim output in so(n))
-            # Use larger hidden dim for expressiveness (default: embed_dim)
-            phi_hidden = phi_ffn_hidden_dim if phi_ffn_hidden_dim is not None else embed_dim
-            self.phi_ffn = nn.Sequential(
-                nn.Linear(embed_dim, phi_hidden),
-                nn.GELU(),  # GELU instead of Tanh for better gradient flow
-                nn.Linear(phi_hidden, phi_hidden // 2),
-                nn.GELU(),
-                nn.Linear(phi_hidden // 2, phi_dim),
-            )
-            # Initialize output layer to small values (not zeros!) for gradient flow
-            nn.init.normal_(self.phi_ffn[-1].weight, std=0.01)
-            nn.init.zeros_(self.phi_ffn[-1].bias)
-        else:
-            self.phi_ffn = None
+        self.evolve_phi = evolve_phi
 
     def forward(
         self,
@@ -308,7 +300,7 @@ class GaugeTransformerBlock(nn.Module):
         if mu_prior is None:
             raise ValueError("VFE_dynamic mode requires mu_prior argument")
 
-        mu_ffn, sigma_ffn = self.ffn(
+        mu_ffn, sigma_ffn, phi_out = self.ffn(
             mu=mu_normalized,
             beta=beta,          # Initial β (will be recomputed each step inside FFN)
             mu_prior=mu_prior,  # From embeddings
@@ -326,23 +318,9 @@ class GaugeTransformerBlock(nn.Module):
         # Residual connection
         mu_q = mu_q + mu_ffn
 
-        # =====================================================================
-        # 3. Optional: Gauge Frame Evolution
-        # =====================================================================
-        if self.evolve_phi and self.phi_ffn is not None:
-            # Evolve gauge frames based on current means
-            # φ_new = φ + Δφ(μ)
-            delta_phi = self.phi_ffn(mu_q)  # (B, N, phi_dim)
-            phi = phi + delta_phi
-
-            # Retract to principal ball (configurable max norm)
-            phi_norm = torch.norm(phi, dim=-1, keepdim=True)
-            phi = torch.where(
-                phi_norm > self.phi_max_norm,
-                phi * (self.phi_max_norm / phi_norm),
-                phi
-            )
-        return mu_q, sigma_q, phi
+        # phi is updated inside the VFE FFN via gradient descent (when update_phi=True)
+        # This is the principled approach: φ evolves via ∂F/∂φ, not a neural network.
+        return mu_q, sigma_q, phi_out
 
     def get_hamiltonian_diagnostics(self) -> None:
         """Stub for backward compatibility with trajectory recording."""
@@ -379,8 +357,8 @@ class GaugeTransformerStack(nn.Module):
         dropout: float = 0.1,
         evolve_sigma: bool = False,
         evolve_phi: bool = False,
-        # Phi evolution parameters
-        phi_ffn_hidden_dim: Optional[int] = None,  # Hidden dim for phi FFN (default: embed_dim)
+        # Phi evolution parameters (VFE gradient-based, not neural network)
+        phi_lr: float = 0.05,  # Learning rate for phi gradient descent
         phi_max_norm: float = 3.14159,  # Max phi norm (π radians = 180° rotation)
         # Variational FFN parameters
         generators: Optional[torch.Tensor] = None,
@@ -450,8 +428,8 @@ class GaugeTransformerStack(nn.Module):
                 dropout=dropout,
                 evolve_sigma=evolve_sigma,
                 evolve_phi=evolve_phi,
-                # Phi evolution
-                phi_ffn_hidden_dim=phi_ffn_hidden_dim,
+                # Phi evolution (VFE gradient-based)
+                phi_lr=phi_lr,
                 phi_max_norm=phi_max_norm,
                 # VFE FFN
                 generators=generators,

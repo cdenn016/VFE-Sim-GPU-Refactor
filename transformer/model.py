@@ -262,8 +262,8 @@ class GaugeTransformerLM(nn.Module):
             dropout=dropout,
             evolve_sigma=evolve_sigma,
             evolve_phi=evolve_phi,
-            # Phi evolution parameters
-            phi_ffn_hidden_dim=config.get('phi_ffn_hidden_dim', None),  # Default: embed_dim
+            # Phi evolution parameters (VFE gradient-based)
+            phi_lr=config.get('phi_lr', 0.05),  # Learning rate for ∂F/∂φ descent
             phi_max_norm=config.get('phi_max_norm', 3.14159),  # Default: π radians
             # VFE FFN parameters
             generators=self.generators,

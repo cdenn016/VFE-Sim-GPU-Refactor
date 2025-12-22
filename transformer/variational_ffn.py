@@ -1660,6 +1660,10 @@ class VariationalFFNDynamic(nn.Module):
         m_step_rate: float = 0.01, # Prior update rate toward beliefs
         diagonal_covariance: bool = False,  # Use diagonal Σ for efficiency
         compute_sigma_align_grad: bool = True,  # Compute sigma gradient from alignment term
+        # Phi (gauge frame) evolution via VFE gradients
+        update_phi: bool = False,  # If True, update phi via ∂F/∂φ
+        phi_lr: float = 0.05,      # Learning rate for phi updates
+        phi_max_norm: float = 3.14159,  # Max norm for phi (π = 180° rotation)
         # Pure FEP mode: learning via prior evolution (no backprop)
         max_seq_len: int = 512,    # Max sequence length for persistent priors
         pure_fep_mode: bool = False,  # Enable backprop-free learning
@@ -1699,6 +1703,11 @@ class VariationalFFNDynamic(nn.Module):
         self.update_sigma = update_sigma
         self.diagonal_covariance = diagonal_covariance
         self.compute_sigma_align_grad = compute_sigma_align_grad
+
+        # Phi evolution via VFE gradients (principled approach)
+        self.update_phi = update_phi
+        self.phi_lr = phi_lr
+        self.phi_max_norm = phi_max_norm
 
         # Memory-efficient options
         self.irrep_dims = irrep_dims
@@ -1743,7 +1752,7 @@ class VariationalFFNDynamic(nn.Module):
         targets: Optional[torch.Tensor] = None,  # (B, N) - target token IDs
         W_out: Optional[torch.Tensor] = None,    # (V, K) - output projection
         return_beta_history: bool = False,  # Return β evolution for analysis
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[list]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[list]]:
         """
         Dynamic VFE descent with β recomputation at each step.
 
@@ -1752,13 +1761,14 @@ class VariationalFFNDynamic(nn.Module):
             2. ∂F/∂μ = α(μ-μ_p)/σ_p + λΣβ(∂KL/∂μ) + Σ KL(∂β/∂μ) + ∂CE/∂μ
             3. μ ← μ - η·F⁻¹·∂F/∂μ  [Natural gradient descent]
             4. (Optional) σ ← retract_spd(σ, -η·∂F/∂σ)
-            5. (Optional M-step) μ_p ← μ_p + rate·(μ - μ_p)
+            5. (Optional) φ ← φ - η_φ·∂F/∂φ  [VFE gradient descent on gauge frames]
+            6. (Optional M-step) μ_p ← μ_p + rate·(μ - μ_p)
 
         Args:
             mu: Current belief means (B, N, K)
             beta: Initial attention weights (B, n_heads, N, N) - used only for first step
             mu_prior: Prior means from embeddings (B, N, K)
-            phi: Gauge frames (B, N, 3)
+            phi: Gauge frames (B, N, phi_dim)
             sigma: Belief covariances - (B, N, K, K) full or (B, N, K) diagonal
             mask: Causal mask (B, N, N) where 0 = cannot attend
             targets: Target tokens for observation term (B, N)
@@ -1768,6 +1778,7 @@ class VariationalFFNDynamic(nn.Module):
         Returns:
             mu_new: Updated beliefs (B, N, K)
             sigma_new: Updated covariances (same shape as input) or None
+            phi_new: Updated gauge frames (B, N, phi_dim)
             beta_history: List of β tensors if return_beta_history, else None
         """
         B, N, K = mu.shape
@@ -1944,6 +1955,75 @@ class VariationalFFNDynamic(nn.Module):
                 # Move priors toward beliefs
                 mu_p_current = mu_p_current + self.m_step_rate * (mu_current.detach() - mu_p_current)
 
+        # =================================================================
+        # STEP 6: Optional Phi Evolution via VFE Gradient
+        # =================================================================
+        # This is the PRINCIPLED approach: φ evolves via ∂F/∂φ, not a neural net.
+        # The belief alignment term F_align = λ·Σ β_ij KL(q_i || Ω_ij[q_j])
+        # depends on φ through the transport operator Ω_ij = exp(φ_i)·exp(-φ_j).
+        phi_current = phi
+        if self.update_phi:
+            # Enable gradients for phi
+            phi_for_grad = phi.clone().requires_grad_(True)
+
+            # Recompute attention with gradient-enabled phi
+            beta_for_phi = compute_attention_weights(
+                mu_q=mu_current.detach(),  # Detach mu to isolate phi gradient
+                sigma_q=sigma_current.detach() if sigma_current is not None else None,
+                phi=phi_for_grad,
+                generators=self.generators,
+                kappa=self.kappa,
+                epsilon=eps,
+                mask=mask,
+                use_numba=False,
+                return_kl=True,  # Need KL for the loss
+                diagonal_covariance=is_diagonal,
+                irrep_dims=self.irrep_dims,
+                chunk_size=self.chunk_size,
+            )
+
+            # beta_for_phi is (beta, kl_matrix) when return_kl=True
+            if isinstance(beta_for_phi, tuple):
+                beta_phi, kl_matrix = beta_for_phi
+            else:
+                beta_phi = beta_for_phi
+                # Recompute KL for loss
+                kl_matrix = compute_attention_weights(
+                    mu_q=mu_current.detach(),
+                    sigma_q=sigma_current.detach() if sigma_current is not None else None,
+                    phi=phi_for_grad,
+                    generators=self.generators,
+                    kappa=self.kappa,
+                    epsilon=eps,
+                    mask=mask,
+                    use_numba=False,
+                    return_kl=True,
+                    diagonal_covariance=is_diagonal,
+                )[1]
+
+            # Belief alignment loss: F_align = λ·Σ_ij β_ij · KL_ij
+            # This is the term that depends on φ
+            alignment_loss = self.lambda_belief * (beta_phi * kl_matrix).sum()
+
+            # Compute ∂F/∂φ
+            grad_phi = torch.autograd.grad(
+                alignment_loss,
+                phi_for_grad,
+                create_graph=False,
+                retain_graph=False,
+            )[0]
+
+            # Gradient descent on phi
+            phi_current = phi - self.phi_lr * grad_phi
+
+            # Clamp to max norm (retraction to ball)
+            phi_norm = torch.norm(phi_current, dim=-1, keepdim=True)
+            phi_current = torch.where(
+                phi_norm > self.phi_max_norm,
+                phi_current * (self.phi_max_norm / phi_norm),
+                phi_current
+            )
+
         # Return results
         # NOTE: Previously returned .detach() which BREAKS gradient flow!
         # The VFE descent is an "inner loop" optimization, but we still need
@@ -1952,9 +2032,9 @@ class VariationalFFNDynamic(nn.Module):
         # but it completely breaks learning. If memory is an issue, consider
         # gradient checkpointing instead.
         if self.update_sigma:
-            return mu_current, sigma_current, beta_history
+            return mu_current, sigma_current, phi_current, beta_history
         else:
-            return mu_current, None, beta_history
+            return mu_current, None, phi_current, beta_history
 
     # =========================================================================
     # Pure FEP Mode: Backprop-free Learning via Prior Evolution
