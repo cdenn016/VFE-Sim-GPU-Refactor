@@ -545,8 +545,8 @@ class GaugeTransformerLM(nn.Module):
         # FFN sublayer
         mu_normalized = final_block.norm2(mu_q)
 
-        # VFE_dynamic FFN returns (mu, sigma) tuple
-        mu_ffn, sigma_ffn = final_block.ffn(
+        # VFE_dynamic FFN returns (mu, sigma, phi) tuple
+        mu_ffn, sigma_ffn, phi_ffn = final_block.ffn(
             mu=mu_normalized,
             beta=beta,
             mu_prior=mu_prior,
