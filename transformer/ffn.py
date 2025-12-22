@@ -56,6 +56,10 @@ class GaugeFFN(nn.Module):
         pure_fep_mode: bool = False,
         max_seq_len: int = 512,
         prior_lr: float = 0.01,
+        # Phi evolution via VFE gradients (principled approach)
+        update_phi: bool = False,  # If True, update phi via ∂F/∂φ
+        phi_lr: float = 0.05,      # Learning rate for phi updates
+        phi_max_norm: float = 3.14159,  # Max norm for phi (π = 180° rotation)
         # Memory-efficient options (NEW!)
         irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
         chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
@@ -116,6 +120,10 @@ class GaugeFFN(nn.Module):
             pure_fep_mode=pure_fep_mode,
             max_seq_len=max_seq_len,
             prior_lr=prior_lr,
+            # Phi evolution via VFE gradients
+            update_phi=update_phi,
+            phi_lr=phi_lr,
+            phi_max_norm=phi_max_norm,
             # Memory-efficient options
             irrep_dims=irrep_dims,
             chunk_size=chunk_size,
@@ -132,7 +140,7 @@ class GaugeFFN(nn.Module):
         mask: Optional[torch.Tensor] = None,      # (B, N, N)
         targets: Optional[torch.Tensor] = None,   # (B, N) - target tokens
         W_out: Optional[torch.Tensor] = None,     # (V, K) - output projection
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass through VFE_dynamic FFN.
 
@@ -140,7 +148,7 @@ class GaugeFFN(nn.Module):
             mu: Current beliefs (B, N, K)
             beta: Initial attention weights (will be recomputed each step)
             mu_prior: Embedding priors (B, N, K)
-            phi: Gauge frames (B, N, 3)
+            phi: Gauge frames (B, N, phi_dim)
             sigma: Covariances (B, N, K, K)
             sigma_prior: Prior covariances (unused)
             mask: Causal mask (B, N, N)
@@ -148,15 +156,15 @@ class GaugeFFN(nn.Module):
             W_out: Output projection matrix (V, K)
 
         Returns:
-            (mu_out, sigma_out): Updated beliefs and covariances
+            (mu_out, sigma_out, phi_out): Updated beliefs, covariances, and gauge frames
         """
         # Check required inputs
         if mu_prior is None or phi is None:
             raise ValueError("VFE_dynamic requires mu_prior, phi")
 
-        # Dynamic VFE returns (mu, sigma, beta_history)
+        # Dynamic VFE returns (mu, sigma, phi, beta_history)
         # beta_history is None unless return_beta_history=True is passed
-        mu_out, sigma_out, beta_history = self.variational_ffn(
+        mu_out, sigma_out, phi_out, beta_history = self.variational_ffn(
             mu=mu,
             beta=beta,          # Initial β (will be recomputed each step)
             mu_prior=mu_prior,
@@ -167,7 +175,7 @@ class GaugeFFN(nn.Module):
             W_out=W_out,
             return_beta_history=False,
         )
-        return (mu_out, sigma_out)
+        return (mu_out, sigma_out, phi_out)
 
     def get_mode(self) -> str:
         """Get current FFN mode."""
