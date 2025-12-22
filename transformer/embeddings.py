@@ -382,16 +382,25 @@ class GaugePositionalEncoding(nn.Module):
     All agents are at the same point c*, but need to distinguish
     their roles in the sequence via gauge frame modulation.
 
-    Composition modes:
+    Encoding modes:
+        - 'none': No positional encoding in gauge space. Transport Ω_ij is purely
+                  content-based. Use with use_positional_embedding=True to put
+                  position info in μ instead, or for position-invariant attention.
+        - 'learned': Learnable per-position gauge frames φ_pos[i] ∈ so(n)
+        - 'sinusoidal': Fixed sinusoidal encoding (like original Transformer)
+
+    Composition modes (for combining token φ with positional φ):
         - 'add': φ_combined = φ_base + φ_pos (valid for small angles)
         - 'bch1': φ_combined = φ_base + φ_pos + ½[φ_base, φ_pos] (BCH order 1) [SO(3) only]
         - 'bch2': Higher-order BCH correction [SO(3) only]
         - 'exact': Full SO(3) composition via exp → multiply → log [SO(3) only]
 
+    WARNING: Positional encoding in gauge space creates ABSOLUTE position-dependent
+    transport operators. This can cause attention to be dominated by position rather
+    than content. For translation-invariant attention, use mode='none'.
+
     For SO(N) with N > 3, only 'add' composition is supported since the BCH formula
     requires Lie bracket computation which differs for so(N).
-
-    This is analogous to standard positional encoding, but in so(n) instead of ℝ^K.
     """
 
     def __init__(
@@ -407,8 +416,11 @@ class GaugePositionalEncoding(nn.Module):
 
         Args:
             max_seq_len: Maximum sequence length (max number of agents at c*)
-            mode: 'learned' or 'sinusoidal'
-            scale: Scaling factor for positional encodings
+            mode: 'none', 'learned', or 'sinusoidal'
+                  - 'none': No positional gauge encoding (transport is content-only)
+                  - 'learned': Learnable positional gauge frames
+                  - 'sinusoidal': Fixed sinusoidal encoding
+            scale: Scaling factor for positional encodings (ignored if mode='none')
             composition: How to combine token φ with positional φ:
                 - 'add': Simple addition (φ_base + φ_pos) - fast but only valid for small angles
                 - 'bch1': BCH order 1 correction (SO(3) only)
@@ -429,7 +441,13 @@ class GaugePositionalEncoding(nn.Module):
             composition = 'add'
         self.composition = composition
 
-        if mode == 'learned':
+        if mode == 'none':
+            # No positional encoding in gauge space - φ stays content-only
+            # Use this when position info comes from μ (use_positional_embedding)
+            # or when you want purely content-based transport operators
+            self.register_buffer('pos_phi', torch.zeros(max_seq_len, phi_dim))
+
+        elif mode == 'learned':
             # Learnable agent-index-specific gauge biases
             # Each agent index i gets a unique φ_pos(i) ∈ so(n)
             self.pos_phi = nn.Parameter(torch.randn(max_seq_len, phi_dim) * scale)
@@ -440,7 +458,7 @@ class GaugePositionalEncoding(nn.Module):
             self.register_buffer('pos_phi', self._make_sinusoidal(max_seq_len, scale, phi_dim))
 
         else:
-            raise ValueError(f"Unknown mode: {mode}. Use 'learned' or 'sinusoidal'.")
+            raise ValueError(f"Unknown mode: {mode}. Use 'none', 'learned', or 'sinusoidal'.")
 
     def _make_sinusoidal(self, max_len: int, scale: float, phi_dim: int = 3) -> torch.Tensor:
         """
@@ -527,6 +545,11 @@ class GaugePositionalEncoding(nn.Module):
             For SO(N) with N > 3, the Lie bracket is [X,Y] = XY - YX, which is more
             complex. We use simple addition for these cases (valid for small angles).
         """
+        # Short-circuit: if mode='none', φ_pos is all zeros, so return unchanged φ
+        # This avoids unnecessary tensor operations and BCH computations
+        if self.mode == 'none':
+            return phi
+
         pos_phi = self.forward(num_agents, device)  # (N, phi_dim)
         pos_phi = pos_phi.unsqueeze(0).expand(phi.shape[0], -1, -1)  # (B, N, phi_dim)
 

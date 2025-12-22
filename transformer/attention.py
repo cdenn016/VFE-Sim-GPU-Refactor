@@ -234,6 +234,8 @@ def compute_attention_weights(
     # Memory-efficient options (NEW!)
     irrep_dims: Optional[List[int]] = None,  # Block-diagonal structure [d₁, d₂, ...] for principled KL decomposition
     chunk_size: Optional[int] = None,  # Chunk size for memory-efficient computation (None = auto)
+    # ALiBi-style positional bias (NEW!)
+    alibi_slope: Optional[float] = None,  # If set, adds slope * (i-j) to logits for relative position
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Compute attention weights from KL divergences (0D version).
@@ -270,6 +272,13 @@ def compute_attention_weights(
         chunk_size: Optional chunk size for memory-efficient processing.
                    When provided, processes N×N attention in C×C chunks.
                    None = no chunking (fast but memory-hungry)
+        alibi_slope: Optional ALiBi-style positional bias slope.
+                    When set, adds slope * (i - j) to attention logits.
+                    Negative values favor recent tokens (recency bias).
+                    Unlike positional embeddings in μ or φ, this doesn't
+                    affect transport Ω_ij, keeping attention content-based
+                    while adding controlled positional information.
+                    Typical values: -0.1 to -0.01 (for recency bias)
 
     Returns:
         beta: Attention weights, shape (B, N, N)
@@ -362,6 +371,23 @@ def compute_attention_weights(
 
     # Attention logits: -KL / κ (more similar = less KL = higher attention)
     logits = -kl_matrix / kappa  # (B, N, N)
+
+    # ==========================================================================
+    # ALiBi-STYLE POSITIONAL BIAS: Add relative position information
+    # Unlike positional embeddings in μ or φ, this doesn't affect transport Ω_ij.
+    # The bias is purely additive: logits[i,j] += slope * (i - j)
+    # Negative slope encourages attending to recent tokens (recency bias).
+    # This provides explicit, controlled positional information while keeping
+    # the gauge transport purely content-based.
+    # ==========================================================================
+    if alibi_slope is not None and alibi_slope != 0.0:
+        B, N, _ = logits.shape
+        positions = torch.arange(N, device=logits.device, dtype=logits.dtype)
+        # rel_pos[i, j] = i - j (positive for future, negative for past)
+        rel_pos = positions[:, None] - positions[None, :]  # (N, N)
+        # Apply slope (typically negative to favor recent tokens)
+        alibi_bias = alibi_slope * rel_pos  # (N, N)
+        logits = logits + alibi_bias.unsqueeze(0)  # (B, N, N)
 
     # ==========================================================================
     # SELF-ATTENTION PENALTY: Prevent diagonal from dominating
