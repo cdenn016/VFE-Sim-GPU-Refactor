@@ -105,6 +105,10 @@ class GaugeTransformerBlock(nn.Module):
         # Memory-efficient options
         ffn_irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
         ffn_chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
+        # Pure VFE mode: disable ad-hoc transformer components
+        use_layernorm: bool = False,  # Pure VFE: beliefs evolve freely, no normalization
+        use_dropout: bool = False,    # Pure VFE: uncertainty lives in Σ, not random masking
+        use_residual: bool = False,   # Pure VFE: FFN outputs final belief, not delta
     ):
         """
         Initialize gauge transformer block.
@@ -140,6 +144,11 @@ class GaugeTransformerBlock(nn.Module):
         self.generators = generators  # Store for variational FFN
         self.diagonal_covariance = diagonal_covariance
 
+        # Pure VFE mode flags
+        self.use_layernorm = use_layernorm
+        self.use_dropout = use_dropout
+        self.use_residual = use_residual
+
         # =====================================================================
         # Attention Sublayer
         # =====================================================================
@@ -172,8 +181,9 @@ class GaugeTransformerBlock(nn.Module):
             global_generators=generators,  # Pass for SO(N) mode
         )
 
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.dropout1 = nn.Dropout(dropout)
+        # Conditionally create LayerNorm and Dropout (disabled for pure VFE)
+        self.norm1 = nn.LayerNorm(embed_dim) if use_layernorm else nn.Identity()
+        self.dropout1 = nn.Dropout(dropout) if use_dropout else nn.Identity()
 
         # =====================================================================
         # VFE_dynamic FFN Sublayer
@@ -209,7 +219,7 @@ class GaugeTransformerBlock(nn.Module):
             chunk_size=ffn_chunk_size,
         )
 
-        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim) if use_layernorm else nn.Identity()
 
         # =====================================================================
         # Gauge Frame Evolution Configuration
@@ -281,8 +291,15 @@ class GaugeTransformerBlock(nn.Module):
         if recording_attention and beta is not None:
             recorder.record_attention(beta, kl_matrix)
 
-        # Residual connection + dropout on means
-        mu_q = mu_q + self.dropout1(mu_attn)
+        # Apply dropout (identity if use_dropout=False)
+        mu_attn = self.dropout1(mu_attn)
+
+        # Residual connection (optional for pure VFE)
+        if self.use_residual:
+            mu_q = mu_q + mu_attn
+        else:
+            # Pure VFE: attention output IS the new belief
+            mu_q = mu_attn
 
         # Update covariances if evolving
         if self.evolve_sigma and sigma_attn is not None:
@@ -290,14 +307,14 @@ class GaugeTransformerBlock(nn.Module):
         # Otherwise sigma_q stays unchanged
 
         # =====================================================================
-        # 2. Feedforward Sublayer with Pre-Norm + Residual
+        # 2. Feedforward Sublayer (with optional Pre-Norm + Residual)
         # =====================================================================
 
-        # Pre-layer normalization
+        # Pre-layer normalization (identity if use_layernorm=False)
         mu_normalized = self.norm2(mu_q)
 
         # VFE_dynamic FFN: β recomputed at each VFE step
-        # Returns (mu, sigma) tuple
+        # Returns (mu, sigma, phi) tuple
         if mu_prior is None:
             raise ValueError("VFE_dynamic mode requires mu_prior argument")
 
@@ -316,8 +333,12 @@ class GaugeTransformerBlock(nn.Module):
         if self.evolve_sigma and sigma_ffn is not None:
             sigma_q = sigma_ffn
 
-        # Residual connection
-        mu_q = mu_q + mu_ffn
+        # Residual connection (optional for pure VFE)
+        if self.use_residual:
+            mu_q = mu_q + mu_ffn
+        else:
+            # Pure VFE: FFN output IS the new belief
+            mu_q = mu_ffn
 
         # phi is updated inside the VFE FFN via gradient descent (when update_phi=True)
         # This is the principled approach: φ evolves via ∂F/∂φ, not a neural network.
@@ -387,6 +408,10 @@ class GaugeTransformerStack(nn.Module):
         # Memory-efficient options
         ffn_irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
         ffn_chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
+        # Pure VFE mode: disable ad-hoc transformer components
+        use_layernorm: bool = False,  # Pure VFE: beliefs evolve freely, no normalization
+        use_dropout: bool = False,    # Pure VFE: uncertainty lives in Σ, not random masking
+        use_residual: bool = False,   # Pure VFE: FFN outputs final belief, not delta
     ):
         """
         Initialize stack of transformer blocks.
@@ -416,6 +441,9 @@ class GaugeTransformerStack(nn.Module):
             ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
             ffn_max_seq_len: Max sequence length for persistent priors (pure FEP mode)
             ffn_prior_lr: Learning rate for prior updates (pure FEP mode)
+            use_layernorm: If True, apply LayerNorm (default False for pure VFE)
+            use_dropout: If True, apply Dropout (default False for pure VFE)
+            use_residual: If True, use residual connections (default False for pure VFE)
         """
         super().__init__()
         self.n_layers = n_layers
@@ -458,12 +486,16 @@ class GaugeTransformerStack(nn.Module):
                 # Memory-efficient options
                 ffn_irrep_dims=ffn_irrep_dims,
                 ffn_chunk_size=ffn_chunk_size,
+                # Pure VFE mode
+                use_layernorm=use_layernorm,
+                use_dropout=use_dropout,
+                use_residual=use_residual,
             )
             for _ in range(n_layers)
         ])
 
-        # Final layer norm
-        self.final_norm = nn.LayerNorm(embed_dim)
+        # Final layer norm (optional for pure VFE)
+        self.final_norm = nn.LayerNorm(embed_dim) if use_layernorm else nn.Identity()
 
     def forward(
         self,

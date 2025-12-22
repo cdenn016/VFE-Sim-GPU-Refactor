@@ -287,6 +287,10 @@ class GaugeTransformerLM(nn.Module):
             # Memory-efficient options
             ffn_irrep_dims=self._compute_irrep_dims(irrep_spec) if config.get('use_block_diagonal_kl', False) else None,
             ffn_chunk_size=config.get('ffn_chunk_size', None),
+            # Pure VFE mode: disable ad-hoc transformer components
+            use_layernorm=config.get('use_layernorm', False),
+            use_dropout=config.get('use_dropout', False),
+            use_residual=config.get('use_residual', False),
         )
 
         # =================================================================
