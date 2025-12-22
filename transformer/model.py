@@ -163,6 +163,10 @@ class GaugeTransformerLM(nn.Module):
         # Negative values create recency bias (attend more to nearby tokens)
         alibi_slope = config.get('alibi_slope', None)
 
+        # Identity transport mode: Ω_ij = I for all pairs (bypasses gauge transport)
+        # Useful for diagnostics or when gauge transport is not desired
+        use_identity_transport = config.get('use_identity_transport', False)
+
         # Store evolve_phi for cross-layer transport caching optimization
         self.evolve_phi = evolve_phi
 
@@ -298,6 +302,8 @@ class GaugeTransformerLM(nn.Module):
             use_residual=config.get('use_residual', False),
             # ALiBi positional bias
             alibi_slope=alibi_slope,
+            # Identity transport mode
+            use_identity_transport=use_identity_transport,
         )
 
         # =================================================================
