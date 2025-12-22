@@ -1905,6 +1905,7 @@ class IrrepMultiHeadAttention(nn.Module):
         gauge_dim: int = 3,        # N for SO(N) - only used when gauge_group='SON'
         global_generators: Optional[torch.Tensor] = None,  # (n_gen, K, K) for SO(N) mode
         self_attention_penalty: float = 1.0,  # Penalty for self-attention (prevents diagonal dominance)
+        alibi_slope: Optional[float] = None,  # ALiBi-style positional bias (negative = recency bias)
     ):
         """
         Initialize irrep-structured multi-head attention.
@@ -1943,6 +1944,7 @@ class IrrepMultiHeadAttention(nn.Module):
         self.use_fast_exp = use_fast_exp
         self.exp_order = exp_order
         self.self_attention_penalty = self_attention_penalty
+        self.alibi_slope = alibi_slope
 
         # Build irrep block structure
         self.irrep_dims = []
@@ -2168,6 +2170,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     diagonal_covariance=self.diagonal_covariance,
                     cached_transport=head_cached_transport,
                     self_attention_penalty=self.self_attention_penalty,
+                    alibi_slope=self.alibi_slope,
                 )  # (B, N, N), (B, N, N)
                 all_attention_weights.append(beta_head)
                 all_kl_matrices.append(kl_head)
@@ -2185,6 +2188,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     diagonal_covariance=self.diagonal_covariance,
                     cached_transport=head_cached_transport,
                     self_attention_penalty=self.self_attention_penalty,
+                    alibi_slope=self.alibi_slope,
                 )  # (B, N, N)
                 kl_head = None  # Not computed
 
