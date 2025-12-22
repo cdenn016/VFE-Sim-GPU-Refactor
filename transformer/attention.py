@@ -234,6 +234,8 @@ def compute_attention_weights(
     # Memory-efficient options (NEW!)
     irrep_dims: Optional[List[int]] = None,  # Block-diagonal structure [d₁, d₂, ...] for principled KL decomposition
     chunk_size: Optional[int] = None,  # Chunk size for memory-efficient computation (None = auto)
+    # ALiBi-style positional bias (NEW!)
+    alibi_slope: Optional[float] = None,  # If set, adds slope * (i-j) to logits for relative position
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Compute attention weights from KL divergences (0D version).
@@ -270,6 +272,13 @@ def compute_attention_weights(
         chunk_size: Optional chunk size for memory-efficient processing.
                    When provided, processes N×N attention in C×C chunks.
                    None = no chunking (fast but memory-hungry)
+        alibi_slope: Optional ALiBi-style positional bias slope.
+                    When set, adds slope * (i - j) to attention logits.
+                    Negative values favor recent tokens (recency bias).
+                    Unlike positional embeddings in μ or φ, this doesn't
+                    affect transport Ω_ij, keeping attention content-based
+                    while adding controlled positional information.
+                    Typical values: -0.1 to -0.01 (for recency bias)
 
     Returns:
         beta: Attention weights, shape (B, N, N)
@@ -362,6 +371,23 @@ def compute_attention_weights(
 
     # Attention logits: -KL / κ (more similar = less KL = higher attention)
     logits = -kl_matrix / kappa  # (B, N, N)
+
+    # ==========================================================================
+    # ALiBi-STYLE POSITIONAL BIAS: Add relative position information
+    # Unlike positional embeddings in μ or φ, this doesn't affect transport Ω_ij.
+    # The bias is purely additive: logits[i,j] += slope * (i - j)
+    # Negative slope encourages attending to recent tokens (recency bias).
+    # This provides explicit, controlled positional information while keeping
+    # the gauge transport purely content-based.
+    # ==========================================================================
+    if alibi_slope is not None and alibi_slope != 0.0:
+        B, N, _ = logits.shape
+        positions = torch.arange(N, device=logits.device, dtype=logits.dtype)
+        # rel_pos[i, j] = i - j (positive for future, negative for past)
+        rel_pos = positions[:, None] - positions[None, :]  # (N, N)
+        # Apply slope (typically negative to favor recent tokens)
+        alibi_bias = alibi_slope * rel_pos  # (N, N)
+        logits = logits + alibi_bias.unsqueeze(0)  # (B, N, N)
 
     # ==========================================================================
     # SELF-ATTENTION PENALTY: Prevent diagonal from dominating
@@ -1879,6 +1905,7 @@ class IrrepMultiHeadAttention(nn.Module):
         gauge_dim: int = 3,        # N for SO(N) - only used when gauge_group='SON'
         global_generators: Optional[torch.Tensor] = None,  # (n_gen, K, K) for SO(N) mode
         self_attention_penalty: float = 1.0,  # Penalty for self-attention (prevents diagonal dominance)
+        alibi_slope: Optional[float] = None,  # ALiBi-style positional bias (negative = recency bias)
     ):
         """
         Initialize irrep-structured multi-head attention.
@@ -1917,6 +1944,7 @@ class IrrepMultiHeadAttention(nn.Module):
         self.use_fast_exp = use_fast_exp
         self.exp_order = exp_order
         self.self_attention_penalty = self_attention_penalty
+        self.alibi_slope = alibi_slope
 
         # Build irrep block structure
         self.irrep_dims = []
@@ -2142,6 +2170,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     diagonal_covariance=self.diagonal_covariance,
                     cached_transport=head_cached_transport,
                     self_attention_penalty=self.self_attention_penalty,
+                    alibi_slope=self.alibi_slope,
                 )  # (B, N, N), (B, N, N)
                 all_attention_weights.append(beta_head)
                 all_kl_matrices.append(kl_head)
@@ -2159,6 +2188,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     diagonal_covariance=self.diagonal_covariance,
                     cached_transport=head_cached_transport,
                     self_attention_penalty=self.self_attention_penalty,
+                    alibi_slope=self.alibi_slope,
                 )  # (B, N, N)
                 kl_head = None  # Not computed
 

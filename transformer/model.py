@@ -159,6 +159,10 @@ class GaugeTransformerLM(nn.Module):
         # Position encoding scale (for φ gauge frame encoding)
         pos_encoding_scale = config.get('pos_encoding_scale', 0.1)
 
+        # ALiBi-style positional bias (adds slope*(i-j) to attention logits)
+        # Negative values create recency bias (attend more to nearby tokens)
+        alibi_slope = config.get('alibi_slope', None)
+
         # Store evolve_phi for cross-layer transport caching optimization
         self.evolve_phi = evolve_phi
 
@@ -292,6 +296,8 @@ class GaugeTransformerLM(nn.Module):
             use_layernorm=config.get('use_layernorm', False),
             use_dropout=config.get('use_dropout', False),
             use_residual=config.get('use_residual', False),
+            # ALiBi positional bias
+            alibi_slope=alibi_slope,
         )
 
         # =================================================================

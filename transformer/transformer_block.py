@@ -109,6 +109,8 @@ class GaugeTransformerBlock(nn.Module):
         use_layernorm: bool = False,  # Pure VFE: beliefs evolve freely, no normalization
         use_dropout: bool = False,    # Pure VFE: uncertainty lives in Σ, not random masking
         use_residual: bool = False,   # Pure VFE: FFN outputs final belief, not delta
+        # ALiBi-style positional bias
+        alibi_slope: Optional[float] = None,  # If set, adds slope*(i-j) to attention logits
     ):
         """
         Initialize gauge transformer block.
@@ -179,6 +181,7 @@ class GaugeTransformerBlock(nn.Module):
             gauge_group=gauge_group,
             gauge_dim=gauge_dim_inferred,
             global_generators=generators,  # Pass for SO(N) mode
+            alibi_slope=alibi_slope,
         )
 
         # Conditionally create LayerNorm and Dropout (disabled for pure VFE)
@@ -412,6 +415,8 @@ class GaugeTransformerStack(nn.Module):
         use_layernorm: bool = False,  # Pure VFE: beliefs evolve freely, no normalization
         use_dropout: bool = False,    # Pure VFE: uncertainty lives in Σ, not random masking
         use_residual: bool = False,   # Pure VFE: FFN outputs final belief, not delta
+        # ALiBi-style positional bias
+        alibi_slope: Optional[float] = None,  # If set, adds slope*(i-j) to attention logits
     ):
         """
         Initialize stack of transformer blocks.
@@ -490,6 +495,8 @@ class GaugeTransformerStack(nn.Module):
                 use_layernorm=use_layernorm,
                 use_dropout=use_dropout,
                 use_residual=use_residual,
+                # ALiBi positional bias
+                alibi_slope=alibi_slope,
             )
             for _ in range(n_layers)
         ])
