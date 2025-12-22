@@ -236,6 +236,8 @@ def compute_attention_weights(
     chunk_size: Optional[int] = None,  # Chunk size for memory-efficient computation (None = auto)
     # ALiBi-style positional bias (NEW!)
     alibi_slope: Optional[float] = None,  # If set, adds slope * (i-j) to logits for relative position
+    # Identity transport mode (diagnostic/simplification)
+    use_identity_transport: bool = False,  # If True, Ω_ij = I (no gauge transport)
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Compute attention weights from KL divergences (0D version).
@@ -279,6 +281,11 @@ def compute_attention_weights(
                     affect transport Ω_ij, keeping attention content-based
                     while adding controlled positional information.
                     Typical values: -0.1 to -0.01 (for recency bias)
+        use_identity_transport: If True, bypass gauge transport entirely.
+                               Sets Ω_ij = I for all pairs, computing raw
+                               KL(q_i || q_j) without any rotation.
+                               Useful for diagnostics or when transport is
+                               not desired.
 
     Returns:
         beta: Attention weights, shape (B, N, N)
@@ -356,7 +363,8 @@ def compute_attention_weights(
     else:
         # GPU path OR CPU fallback: Pure PyTorch (fully vectorized, CUDA-compatible)
         _compute_kl_matrix_torch(
-            mu_q, sigma_q, phi, generators, kl_matrix, cached_transport
+            mu_q, sigma_q, phi, generators, kl_matrix, cached_transport,
+            use_identity_transport=use_identity_transport
         )
 
     # =========================================================================
@@ -478,6 +486,7 @@ def _compute_kl_matrix_torch(
     generators: torch.Tensor,
     kl_matrix: torch.Tensor,
     cached_transport: Optional[dict] = None,  # Precomputed transport operators
+    use_identity_transport: bool = False,  # If True, bypass transport (Ω = I)
 ) -> None:
     """
     VECTORIZED KL matrix computation using pure PyTorch.
@@ -491,6 +500,7 @@ def _compute_kl_matrix_torch(
         generators: (3, K, K) SO(3) generators
         kl_matrix: (B, N, N) output tensor (modified in-place)
         cached_transport: Optional dict with precomputed 'Omega' from compute_transport_operators()
+        use_identity_transport: If True, skip transport and compute raw KL(q_i || q_j)
     """
     B, N, K = mu_q.shape
     device = mu_q.device
@@ -500,31 +510,39 @@ def _compute_kl_matrix_torch(
     # =========================================================================
     # Step 1: Get transport operators (use cached if available)
     # =========================================================================
-    if cached_transport is not None and 'Omega' in cached_transport:
-        # Use precomputed transport operators (saves 2 matrix exponentials!)
-        Omega = cached_transport['Omega']
+    if use_identity_transport:
+        # IDENTITY TRANSPORT: Ω_ij = I for all pairs
+        # Skip expensive matrix exponentials - just use raw beliefs
+        # μ_transported = μ_j (no rotation)
+        # Σ_transported = Σ_j (no rotation)
+        mu_transported = mu_q[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
+        Sigma_transported = sigma_q[:, None, :, :, :].expand(-1, N, -1, -1, -1)  # (B, N, N, K, K)
     else:
-        # Compute transport operators
-        # phi: (B, N, 3) -> phi_matrix: (B, N, K, K)
-        phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)
-        exp_phi = torch.matrix_exp(phi_matrix)       # (B, N, K, K)
-        exp_neg_phi = torch.matrix_exp(-phi_matrix)  # (B, N, K, K)
+        if cached_transport is not None and 'Omega' in cached_transport:
+            # Use precomputed transport operators (saves 2 matrix exponentials!)
+            Omega = cached_transport['Omega']
+        else:
+            # Compute transport operators
+            # phi: (B, N, 3) -> phi_matrix: (B, N, K, K)
+            phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)
+            exp_phi = torch.matrix_exp(phi_matrix)       # (B, N, K, K)
+            exp_neg_phi = torch.matrix_exp(-phi_matrix)  # (B, N, K, K)
 
-        # Omega_ij = exp(φ_i) @ exp(-φ_j)
-        # Result: (B, N, N, K, K)
-        Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
+            # Omega_ij = exp(φ_i) @ exp(-φ_j)
+            # Result: (B, N, N, K, K)
+            Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi, exp_neg_phi)
 
-    # =========================================================================
-    # Step 2: Transport all means and covariances
-    # =========================================================================
-    # μ_j^{→i} = Ω_ij @ μ_j
-    mu_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_q)  # (B, N, N, K)
+        # =========================================================================
+        # Step 2: Transport all means and covariances
+        # =========================================================================
+        # μ_j^{→i} = Ω_ij @ μ_j
+        mu_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_q)  # (B, N, N, K)
 
-    # Σ_j^{→i} = Ω_ij @ Σ_j @ Ω_ij^T
-    Sigma_transported = torch.einsum(
-        'bijkl,bjlm,bijmn->bijkn',
-        Omega, sigma_q, Omega.transpose(-1, -2)
-    )  # (B, N, N, K, K)
+        # Σ_j^{→i} = Ω_ij @ Σ_j @ Ω_ij^T
+        Sigma_transported = torch.einsum(
+            'bijkl,bjlm,bijmn->bijkn',
+            Omega, sigma_q, Omega.transpose(-1, -2)
+        )  # (B, N, N, K, K)
 
     # =========================================================================
     # Step 3: Expand mu_i and Sigma_i for pairwise comparison
@@ -1906,6 +1924,7 @@ class IrrepMultiHeadAttention(nn.Module):
         global_generators: Optional[torch.Tensor] = None,  # (n_gen, K, K) for SO(N) mode
         self_attention_penalty: float = 1.0,  # Penalty for self-attention (prevents diagonal dominance)
         alibi_slope: Optional[float] = None,  # ALiBi-style positional bias (negative = recency bias)
+        use_identity_transport: bool = False,  # If True, Ω_ij = I (no gauge transport)
     ):
         """
         Initialize irrep-structured multi-head attention.
@@ -1945,6 +1964,7 @@ class IrrepMultiHeadAttention(nn.Module):
         self.exp_order = exp_order
         self.self_attention_penalty = self_attention_penalty
         self.alibi_slope = alibi_slope
+        self.use_identity_transport = use_identity_transport
 
         # Build irrep block structure
         self.irrep_dims = []
@@ -2171,6 +2191,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     cached_transport=head_cached_transport,
                     self_attention_penalty=self.self_attention_penalty,
                     alibi_slope=self.alibi_slope,
+                    use_identity_transport=self.use_identity_transport,
                 )  # (B, N, N), (B, N, N)
                 all_attention_weights.append(beta_head)
                 all_kl_matrices.append(kl_head)
@@ -2189,6 +2210,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     cached_transport=head_cached_transport,
                     self_attention_penalty=self.self_attention_penalty,
                     alibi_slope=self.alibi_slope,
+                    use_identity_transport=self.use_identity_transport,
                 )  # (B, N, N)
                 kl_head = None  # Not computed
 
