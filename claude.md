@@ -322,6 +322,78 @@ This implements **predictive coding** in the FEP sense with proper two-timescale
 
 ---
 
+## Pure VFE Mode (Dec 2025)
+
+The VFE-dynamic transformer has been refactored to remove ad-hoc neural network components. All dynamics now derive from variational free energy minimization.
+
+### Neural Networks Removed
+
+| Component | Location | Old Behavior | New Behavior |
+|-----------|----------|--------------|--------------|
+| `phi_ffn` | `transformer_block.py` | 16-unit MLP evolved φ | φ evolves via ∂F/∂φ gradient descent |
+| `out_proj` | `attention.py` | nn.Linear mixed head outputs | Direct belief concatenation |
+
+### Configurable Stabilizers
+
+Standard transformer components are now **disabled by default** for pure VFE:
+
+| Config Flag | Default | Description |
+|-------------|---------|-------------|
+| `use_layernorm` | `False` | LayerNorm on beliefs (has learnable γ/β) |
+| `use_dropout` | `False` | Random masking (uncertainty should be in Σ) |
+| `use_residual` | `False` | x + f(x) pattern (FFN outputs final belief) |
+
+Set all to `True` if you want standard transformer stabilization for comparison.
+
+### Phi Evolution via VFE Gradient
+
+Gauge frame φ now evolves via principled gradient descent on the belief alignment term:
+
+```
+F_align = λ · Σ_ij β_ij · KL(q_i || Ω_ij[q_j])
+
+where Ω_ij = exp(φ_i) · exp(-φ_j) is the transport operator.
+
+∂F/∂φ computed via autograd, then:
+φ ← φ - η_φ · ∂F/∂φ
+```
+
+Config parameters:
+- `evolve_phi: True` — Enable phi evolution
+- `phi_lr: 0.05` — Learning rate for φ updates
+- `phi_max_norm: 3.14159` — Max norm (π radians = 180° rotation)
+
+### Pure VFE Architecture Summary
+
+```
+GaugeTransformerBlock (pure VFE mode):
+  1. Attention sublayer:
+     - [Optional: LayerNorm]
+     - IrrepMultiHeadAttention (KL-based, no out_proj)
+     - [Optional: Dropout]
+     - [Optional: Residual] or direct replacement
+
+  2. FFN sublayer:
+     - [Optional: LayerNorm]
+     - VariationalFFNDynamic (VFE gradient descent)
+       - μ evolves via ∂F/∂μ
+       - σ evolves via ∂F/∂σ (if evolve_sigma=True)
+       - φ evolves via ∂F/∂φ (if evolve_phi=True)
+     - [Optional: Residual] or direct replacement
+```
+
+### What Remains Learned
+
+Only essential components have learnable parameters:
+
+| Component | Parameters | Justification |
+|-----------|------------|---------------|
+| Token embeddings | μ, σ, φ per token | Maps tokens to beliefs |
+| Vocab projection | W (V × K) | Maps beliefs to logits |
+| VFE step size | η (scalar) | Learnable gradient step |
+
+---
+
 ## References
 
 - PyTorch Autograd: https://pytorch.org/docs/stable/autograd.html
