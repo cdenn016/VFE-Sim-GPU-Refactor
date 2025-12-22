@@ -2002,8 +2002,8 @@ class IrrepMultiHeadAttention(nn.Module):
 
             cum_dim += dim
 
-        # Output projection (standard linear layer)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        # No output projection - pure VFE approach returns concatenated beliefs directly
+        # (Removed nn.Linear to avoid neural network mixing between irrep blocks)
 
         # Count scalar (ℓ=0) vs non-scalar heads for gauge frame analysis
         n_scalar_heads = sum(1 for d in self.irrep_dims if d == 1)
@@ -2190,9 +2190,9 @@ class IrrepMultiHeadAttention(nn.Module):
             sigma_concat = None
 
         # =====================================================================
-        # Output projection
+        # Return concatenated beliefs directly (no learned mixing)
         # =====================================================================
-        mu_out = self.out_proj(mu_concat)  # (B, N, K)
+        mu_out = mu_concat  # (B, N, K) - pure VFE, no nn.Linear
 
         # Stack attention weights and KL matrices for loss computation
         if return_attention:
