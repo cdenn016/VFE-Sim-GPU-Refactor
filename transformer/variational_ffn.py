@@ -1962,7 +1962,8 @@ class VariationalFFNDynamic(nn.Module):
         # The belief alignment term F_align = λ·Σ β_ij KL(q_i || Ω_ij[q_j])
         # depends on φ through the transport operator Ω_ij = exp(φ_i)·exp(-φ_j).
         phi_current = phi
-        if self.update_phi:
+        # Only update phi during training (when gradients are enabled)
+        if self.update_phi and torch.is_grad_enabled():
             # Enable gradients for phi
             phi_for_grad = phi.clone().requires_grad_(True)
 
