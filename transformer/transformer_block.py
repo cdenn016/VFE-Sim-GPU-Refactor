@@ -52,12 +52,13 @@ class GaugeTransformerBlock(nn.Module):
 
         2. Feedforward sublayer:
            - LayerNorm on means
-           - FFN (two linear layers + GELU)
+           - VFE-based belief evolution (variational free energy minimization)
            - Residual connection
            - Dropout
 
     Note: We primarily evolve means (μ), while covariances (Σ) and
           gauge frames (φ) can be evolved or kept fixed depending on mode.
+          Phi evolution uses ∂F/∂φ gradient descent, NOT neural networks.
 
     0D Structure:
         - All agents at single point c*
