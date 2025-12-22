@@ -116,23 +116,25 @@ class PriorBank(nn.Module):
     Each vocabulary token v has a prior belief distribution:
         π_v = N(μ_v, Σ_v)
 
+    GAUGE-FIXED PRIORS (default, theoretically principled):
+        All token priors are rotations of a SINGLE base prior:
+            π_v = R_v ▷ π_0   where R_v = exp(φ_v · G)
+
+        This guarantees gauge covariance: π_i = Ω_ij[π_j] for all i,j
+        The model learns:
+        - base_prior_mu (K,): shared base prior mean
+        - phi_embed (V, phi_dim): per-token gauge frames defining rotations
+
+    NON-GAUGE-FIXED (backward compatibility):
+        Each token has independent μ_v, Σ_v - breaks gauge covariance.
+
     ENCODING (replaces nn.Embedding):
         Given input token y_t, initialize belief from prior:
         q(z_t) ← π_{y_t}
 
-        μ_q[t] = μ_v[y_t]
-        Σ_q[t] = Σ_v[y_t]
-
     DECODING (replaces nn.Linear output projection):
         Given belief q = N(μ_q, Σ_q), compute observation likelihood:
-
         p(y = v | q) ∝ exp(-KL(q || π_v) / τ)
-
-        This is the PRINCIPLED observation model from FEP:
-        - The likelihood of token v is high when belief q is close to prior π_v
-        - Temperature τ controls sharpness
-
-    The same prior bank serves both purposes, creating beautiful symmetry!
 
     Learning:
     - In pure FEP mode: Priors evolve via slow VFE pressure
@@ -147,6 +149,10 @@ class PriorBank(nn.Module):
         init_sigma_scale: float = 1.0,  # Scaled to match init_std for O(1) KL
         learnable_sigma: bool = True,
         eps: float = 1e-6,
+        # Gauge-fixed priors (principled approach)
+        gauge_fixed_priors: bool = True,  # Default True for gauge covariance
+        generators: Optional[torch.Tensor] = None,  # (n_gen, K, K) Lie algebra generators
+        phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
     ):
         """
         Initialize the prior bank.
@@ -158,40 +164,129 @@ class PriorBank(nn.Module):
             init_sigma_scale: Initial scale for prior variances
             learnable_sigma: If True, Σ_v evolves during training
             eps: Numerical stability
+            gauge_fixed_priors: If True, use single base prior with per-token rotations
+            generators: Lie algebra generators for computing rotations (required if gauge_fixed_priors=True)
+            phi_dim: Dimension of gauge frame (3 for SO(3))
         """
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.eps = eps
         self.learnable_sigma = learnable_sigma
+        self.gauge_fixed_priors = gauge_fixed_priors
+        self.phi_dim = phi_dim
 
         # Dimension-aware initialization: 1/sqrt(K) keeps ||μ||² = O(1)
         if init_std is None:
             init_std = 1.0 / np.sqrt(embed_dim)
 
-        # Prior means μ_v for each token v
-        self.prior_mu = nn.Parameter(torch.randn(vocab_size, embed_dim) * init_std)
+        if gauge_fixed_priors:
+            # Validate generators
+            if generators is None:
+                raise ValueError("gauge_fixed_priors=True requires generators to be provided")
+            self.register_buffer('generators', generators)
 
-        # Prior variances Σ_v (diagonal) - parameterized as log for positivity
-        if learnable_sigma:
-            self.log_prior_sigma = nn.Parameter(
-                torch.full((vocab_size, embed_dim), math.log(init_sigma_scale))
-            )
+            # Single base prior mean μ_0 - all token priors are rotations of this
+            self.base_prior_mu = nn.Parameter(torch.randn(embed_dim) * init_std)
+
+            # Single base prior variance (diagonal)
+            if learnable_sigma:
+                self.base_log_prior_sigma = nn.Parameter(
+                    torch.full((embed_dim,), math.log(init_sigma_scale))
+                )
+            else:
+                self.register_buffer(
+                    'base_log_prior_sigma',
+                    torch.full((embed_dim,), math.log(init_sigma_scale))
+                )
+
+            # Per-token gauge frames φ_v ∈ so(n) - defines rotation R_v = exp(φ_v · G)
+            self.phi_embed = nn.Embedding(vocab_size, phi_dim)
+            nn.init.zeros_(self.phi_embed.weight)  # Start at identity rotation
         else:
-            self.register_buffer(
-                'log_prior_sigma',
-                torch.full((vocab_size, embed_dim), math.log(init_sigma_scale))
-            )
+            # Standard per-token priors (breaks gauge covariance)
+            self.prior_mu = nn.Parameter(torch.randn(vocab_size, embed_dim) * init_std)
+
+            if learnable_sigma:
+                self.log_prior_sigma = nn.Parameter(
+                    torch.full((vocab_size, embed_dim), math.log(init_sigma_scale))
+                )
+            else:
+                self.register_buffer(
+                    'log_prior_sigma',
+                    torch.full((vocab_size, embed_dim), math.log(init_sigma_scale))
+                )
+
+    @property
+    def base_prior_sigma(self) -> torch.Tensor:
+        """Get base prior variance (always positive). Only for gauge_fixed_priors=True."""
+        return torch.exp(self.base_log_prior_sigma).clamp(min=self.eps)
 
     @property
     def prior_sigma(self) -> torch.Tensor:
-        """Get prior variances (always positive)."""
+        """Get prior variances (always positive). Only for gauge_fixed_priors=False."""
         return torch.exp(self.log_prior_sigma).clamp(min=self.eps)
+
+    def _compute_rotation(self, phi: torch.Tensor) -> torch.Tensor:
+        """
+        Compute rotation matrix R = exp(φ · G) from gauge frame.
+
+        Args:
+            phi: (..., phi_dim) gauge frames
+
+        Returns:
+            R: (..., K, K) rotation matrices
+        """
+        # Compute φ · G = Σ_a φ_a G_a
+        # generators: (n_gen, K, K), phi: (..., phi_dim)
+        # Result: (..., K, K)
+        phi_dot_G = torch.einsum('...a,aij->...ij', phi, self.generators)
+
+        # Matrix exponential
+        R = torch.linalg.matrix_exp(phi_dot_G)
+        return R
+
+    def _get_prior_for_tokens(
+        self,
+        token_ids: torch.Tensor,  # (B, N) or (V,) for all vocab
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get prior (μ, σ, φ) for given tokens.
+
+        Returns:
+            mu_p: prior means
+            sigma_p: prior variances (diagonal)
+            phi_p: gauge frames
+        """
+        if self.gauge_fixed_priors:
+            # Get per-token gauge frames
+            phi = self.phi_embed(token_ids)  # (..., phi_dim)
+
+            # Compute rotation matrices R_v = exp(φ_v · G)
+            R = self._compute_rotation(phi)  # (..., K, K)
+
+            # Rotate base prior: μ_v = R_v @ μ_0
+            mu_p = torch.einsum('...ij,j->...i', R, self.base_prior_mu)
+
+            # Rotate base covariance (diagonal approximation):
+            # For diagonal Σ_0, the rotated diagonal is (R @ diag(σ_0) @ R^T)_kk = Σ_l R_kl² σ_0[l]
+            base_sigma = self.base_prior_sigma  # (K,)
+            R_sq = R ** 2  # (..., K, K)
+            sigma_p = torch.einsum('...kl,l->...k', R_sq, base_sigma)  # (..., K)
+
+            return mu_p, sigma_p, phi
+        else:
+            # Standard per-token lookup
+            mu_p = self.prior_mu[token_ids]
+            sigma_p = self.prior_sigma[token_ids]
+            # Return zero phi for non-gauge-fixed mode
+            phi = torch.zeros(*token_ids.shape, self.phi_dim, device=token_ids.device)
+            return mu_p, sigma_p, phi
 
     def encode(
         self,
         token_ids: torch.Tensor,  # (B, N)
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Encode tokens by looking up their prior beliefs.
 
@@ -203,12 +298,9 @@ class PriorBank(nn.Module):
         Returns:
             mu_q: (B, N, K) belief means initialized from priors
             sigma_q: (B, N, K) belief variances initialized from priors
+            phi: (B, N, phi_dim) gauge frames for tokens
         """
-        # Look up prior means and variances
-        mu_q = self.prior_mu[token_ids]  # (B, N, K)
-        sigma_q = self.prior_sigma[token_ids]  # (B, N, K)
-
-        return mu_q, sigma_q
+        return self._get_prior_for_tokens(token_ids)
 
     def decode(
         self,
@@ -235,10 +327,9 @@ class PriorBank(nn.Module):
         V = self.vocab_size
         device = mu_q.device
 
-        # Get prior means and variances
-        # prior_mu: (V, K), prior_sigma: (V, K)
-        mu_p = self.prior_mu  # (V, K)
-        sigma_p = self.prior_sigma  # (V, K)
+        # Get all token priors
+        all_token_ids = torch.arange(V, device=device)
+        mu_p, sigma_p, _ = self._get_prior_for_tokens(all_token_ids)  # (V, K)
 
         # Expand for broadcasting:
         # mu_q: (B, N, K) -> (B, N, 1, K)
@@ -251,7 +342,6 @@ class PriorBank(nn.Module):
         # Compute KL(q || π_v) for all v
         # For diagonal Gaussians:
         # KL = 0.5 * (Σ_q/Σ_p + (μ_q-μ_p)²/Σ_p - 1 + log(Σ_p/Σ_q))
-        # Use larger floor (1e-4) to prevent numerical issues in KL division
         variance_floor = max(self.eps, 1e-4)
         sigma_q_safe = sigma_q_exp.clamp(min=variance_floor)
         sigma_p_safe = sigma_p_exp.clamp(min=variance_floor)
@@ -298,7 +388,10 @@ class PriorBank(nn.Module):
             raise ValueError(f"Unknown mode: {mode}")
 
     def extra_repr(self) -> str:
-        return f"vocab_size={self.vocab_size}, embed_dim={self.embed_dim}, learnable_sigma={self.learnable_sigma}"
+        return (
+            f"vocab_size={self.vocab_size}, embed_dim={self.embed_dim}, "
+            f"learnable_sigma={self.learnable_sigma}, gauge_fixed_priors={self.gauge_fixed_priors}"
+        )
 
 
 # =============================================================================
@@ -1918,6 +2011,19 @@ class PureFEPTransformer(nn.Module):
         self.config = config
 
         # =====================================================================
+        # GENERATORS: Create before PriorBank (needed for gauge-fixed priors)
+        # =====================================================================
+        if config.gauge_group == 'SO3':
+            if config.use_multi_irrep:
+                gen_np = generate_multi_irrep_generators(config.irrep_spec, validate=True)
+            else:
+                gen_np = generate_so3_generators(config.embed_dim)
+        else:  # SON
+            N = config.gauge_dim
+            gen_np = generate_multi_irrep_soN_generators(config.irrep_spec, N, validate=True)
+        self.register_buffer('generators', torch.from_numpy(gen_np).float())
+
+        # =====================================================================
         # EMBEDDING: Token → Belief Initialization
         # =====================================================================
         if config.embedding_mode == 'prior_bank':
@@ -1929,6 +2035,9 @@ class PureFEPTransformer(nn.Module):
                 init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
                 learnable_sigma=True,
                 eps=config.eps,
+                gauge_fixed_priors=True,  # Use gauge-covariant priors
+                generators=self.generators,
+                phi_dim=config.phi_dim,
             )
             self.embedding = None  # Not used
         elif config.embedding_mode == 'hybrid':
@@ -1941,6 +2050,9 @@ class PureFEPTransformer(nn.Module):
                 init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
                 learnable_sigma=True,
                 eps=config.eps,
+                gauge_fixed_priors=True,  # Use gauge-covariant priors
+                generators=self.generators,
+                phi_dim=config.phi_dim,
             )
         else:  # 'learned'
             # AD HOC: Standard nn.Embedding
@@ -1989,6 +2101,9 @@ class PureFEPTransformer(nn.Module):
                     init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
                     learnable_sigma=True,
                     eps=config.eps,
+                    gauge_fixed_priors=True,  # Use gauge-covariant priors
+                    generators=self.generators,
+                    phi_dim=config.phi_dim,
                 )
         else:  # 'both'
             # Blend of linear and KL
@@ -1997,6 +2112,9 @@ class PureFEPTransformer(nn.Module):
                 self.prior_bank = PriorBank(
                     vocab_size=config.vocab_size,
                     embed_dim=config.embed_dim,
+                    gauge_fixed_priors=True,  # Use gauge-covariant priors
+                    generators=self.generators,
+                    phi_dim=config.phi_dim,
                 )
 
         # =====================================================================
@@ -2069,25 +2187,29 @@ class PureFEPTransformer(nn.Module):
         # =====================================================================
         # EMBEDDING: Token → Initial Belief
         # =====================================================================
+        # phi_dim = 3 for SO(3), N(N-1)/2 for SO(N)
+        phi_dim = self.config.phi_dim
+
         if self.config.embedding_mode == 'prior_bank':
             # PRINCIPLED: Initialize beliefs from token priors
-            x, sigma_init = self.prior_bank.encode(input_ids)  # (B, N, K), (B, N, K)
+            # Returns (mu, sigma, phi) - token phi from gauge-fixed priors
+            x, sigma_init, phi_token = self.prior_bank.encode(input_ids)
         elif self.config.embedding_mode == 'hybrid':
             # HYBRID: Learned embedding for μ
             x = self.embedding(input_ids)  # (B, N, K)
             sigma_init = torch.ones(B, N, K, device=device) * 0.1
+            phi_token = torch.zeros(B, N, phi_dim, device=device)
         else:  # 'learned'
             # AD HOC: Standard embedding
             x = self.embedding(input_ids)  # (B, N, K)
             sigma_init = torch.ones(B, N, K, device=device) * 0.1
+            phi_token = torch.zeros(B, N, phi_dim, device=device)
 
         # =====================================================================
         # POSITION ENCODING: Add to μ and/or φ
         # =====================================================================
-        # Initialize gauge frames (will be modified by position encoder)
-        # phi_dim = 3 for SO(3), N(N-1)/2 for SO(N)
-        phi_dim = self.config.phi_dim
-        phi = torch.zeros(B, N, phi_dim, device=device)
+        # Start with token phi (from gauge-fixed priors or zeros)
+        phi = phi_token
 
         if self.config.position_mode in ['sinusoidal_mu', 'both']:
             # AD HOC: Add sinusoidal to μ
@@ -2798,19 +2920,28 @@ if __name__ == '__main__':
     print("=" * 70)
 
     # =========================================================================
-    # Test 1: PriorBank (standalone)
+    # Test 1: PriorBank (standalone with gauge-fixed priors)
     # =========================================================================
     print("\n" + "=" * 70)
-    print("[TEST 1] PriorBank: Unified Embedding & Output")
+    print("[TEST 1] PriorBank: Unified Embedding & Output (Gauge-Fixed)")
     print("=" * 70)
 
-    prior_bank = PriorBank(vocab_size=100, embed_dim=32)
-    print(f"    Created PriorBank: {prior_bank.vocab_size} tokens × {prior_bank.embed_dim} dims")
+    # Create generators for testing (using odd dim for SO(3))
+    test_embed_dim = 33  # Must be odd for SO(3)
+    test_generators = torch.from_numpy(generate_so3_generators(test_embed_dim)).float()
+    prior_bank = PriorBank(
+        vocab_size=100,
+        embed_dim=test_embed_dim,
+        gauge_fixed_priors=True,
+        generators=test_generators,
+        phi_dim=3,
+    )
+    print(f"    Created PriorBank: {prior_bank.vocab_size} tokens × {prior_bank.embed_dim} dims (gauge-fixed)")
 
-    # Test encoding
+    # Test encoding - now returns (mu, sigma, phi)
     test_tokens = torch.randint(0, 100, (2, 10))  # (B=2, N=10)
-    mu_q, sigma_q = prior_bank.encode(test_tokens)
-    print(f"    Encode: tokens {test_tokens.shape} → μ {mu_q.shape}, σ {sigma_q.shape}")
+    mu_q, sigma_q, phi_q = prior_bank.encode(test_tokens)
+    print(f"    Encode: tokens {test_tokens.shape} → μ {mu_q.shape}, σ {sigma_q.shape}, φ {phi_q.shape}")
 
     # Test decoding
     logits = prior_bank.decode(mu_q, sigma_q, tau=1.0)
