@@ -74,6 +74,9 @@ class GaugeTransformerBlock(nn.Module):
         dropout: float = 0.1,
         evolve_sigma: bool = False,
         evolve_phi: bool = False,
+        # Phi evolution parameters
+        phi_ffn_hidden_dim: Optional[int] = None,  # Hidden dim for phi FFN (default: embed_dim)
+        phi_max_norm: float = 3.14159,  # Max phi norm (π radians = 180° rotation)
         # Variational FFN parameters
         generators: Optional[torch.Tensor] = None,  # (3, K, K)
         ffn_mode: str = 'VFE_dynamic',  # VFE_dynamic is the only supported mode
@@ -207,16 +210,21 @@ class GaugeTransformerBlock(nn.Module):
         # Optional: Gauge Frame Evolution
         # =====================================================================
         self.phi_dim = phi_dim
+        self.phi_max_norm = phi_max_norm
         if evolve_phi:
-            # Small FFN for φ evolution (phi_dim output in so(n))
+            # FFN for φ evolution (phi_dim output in so(n))
+            # Use larger hidden dim for expressiveness (default: embed_dim)
+            phi_hidden = phi_ffn_hidden_dim if phi_ffn_hidden_dim is not None else embed_dim
             self.phi_ffn = nn.Sequential(
-                nn.Linear(embed_dim, 16),
-                nn.Tanh(),
-                nn.Linear(16, phi_dim),
+                nn.Linear(embed_dim, phi_hidden),
+                nn.GELU(),  # GELU instead of Tanh for better gradient flow
+                nn.Linear(phi_hidden, phi_hidden // 2),
+                nn.GELU(),
+                nn.Linear(phi_hidden // 2, phi_dim),
             )
-            # Initialize to near-zero to start with identity frames
-            nn.init.zeros_(self.phi_ffn[2].weight)
-            nn.init.zeros_(self.phi_ffn[2].bias)
+            # Initialize output layer to small values (not zeros!) for gradient flow
+            nn.init.normal_(self.phi_ffn[-1].weight, std=0.01)
+            nn.init.zeros_(self.phi_ffn[-1].bias)
         else:
             self.phi_ffn = None
 
@@ -324,15 +332,14 @@ class GaugeTransformerBlock(nn.Module):
         if self.evolve_phi and self.phi_ffn is not None:
             # Evolve gauge frames based on current means
             # φ_new = φ + Δφ(μ)
-            delta_phi = self.phi_ffn(mu_q)  # (B, N, 3)
+            delta_phi = self.phi_ffn(mu_q)  # (B, N, phi_dim)
             phi = phi + delta_phi
 
-            # Optional: retract to principal ball (keep ||φ|| small)
+            # Retract to principal ball (configurable max norm)
             phi_norm = torch.norm(phi, dim=-1, keepdim=True)
-            max_phi_norm = 2.0  # Keep gauge frames moderate
             phi = torch.where(
-                phi_norm > max_phi_norm,
-                phi * (max_phi_norm / phi_norm),
+                phi_norm > self.phi_max_norm,
+                phi * (self.phi_max_norm / phi_norm),
                 phi
             )
         return mu_q, sigma_q, phi
@@ -372,6 +379,9 @@ class GaugeTransformerStack(nn.Module):
         dropout: float = 0.1,
         evolve_sigma: bool = False,
         evolve_phi: bool = False,
+        # Phi evolution parameters
+        phi_ffn_hidden_dim: Optional[int] = None,  # Hidden dim for phi FFN (default: embed_dim)
+        phi_max_norm: float = 3.14159,  # Max phi norm (π radians = 180° rotation)
         # Variational FFN parameters
         generators: Optional[torch.Tensor] = None,
         ffn_mode: str = 'VFE_dynamic',
@@ -440,6 +450,9 @@ class GaugeTransformerStack(nn.Module):
                 dropout=dropout,
                 evolve_sigma=evolve_sigma,
                 evolve_phi=evolve_phi,
+                # Phi evolution
+                phi_ffn_hidden_dim=phi_ffn_hidden_dim,
+                phi_max_norm=phi_max_norm,
                 # VFE FFN
                 generators=generators,
                 ffn_mode=ffn_mode,
