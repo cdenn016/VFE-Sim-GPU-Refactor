@@ -362,13 +362,10 @@ def compute_attention_weights(
         )
     else:
         # GPU path OR CPU fallback: Pure PyTorch (fully vectorized, CUDA-compatible)
-        kl_result = _compute_kl_matrix_torch(
+        _compute_kl_matrix_torch(
             mu_q, sigma_q, phi, generators, kl_matrix, cached_transport,
             use_identity_transport=use_identity_transport
         )
-        # Use returned tensor to preserve gradients (critical for training!)
-        if kl_result is not None:
-            kl_matrix = kl_result
 
     # =========================================================================
     # Convert KL distances to attention weights
@@ -490,7 +487,7 @@ def _compute_kl_matrix_torch(
     kl_matrix: torch.Tensor,
     cached_transport: Optional[dict] = None,  # Precomputed transport operators
     use_identity_transport: bool = False,  # If True, bypass transport (Ω = I)
-) -> Optional[torch.Tensor]:
+) -> None:
     """
     VECTORIZED KL matrix computation using pure PyTorch.
 
@@ -501,13 +498,9 @@ def _compute_kl_matrix_torch(
         sigma_q: (B, N, K, K) belief covariances
         phi: (B, N, 3) gauge fields
         generators: (3, K, K) SO(3) generators
-        kl_matrix: (B, N, N) output tensor (modified in-place for legacy paths)
+        kl_matrix: (B, N, N) output tensor (modified in-place)
         cached_transport: Optional dict with precomputed 'Omega' from compute_transport_operators()
         use_identity_transport: If True, skip transport and compute raw KL(q_i || q_j)
-
-    Returns:
-        kl_all: (B, N, N) KL divergence matrix with gradients (when use_identity_transport=True)
-                None for legacy in-place paths (gradients may not flow)
     """
     B, N, K = mu_q.shape
     device = mu_q.device
@@ -595,12 +588,11 @@ def _compute_kl_matrix_torch(
         kl_all = 0.5 * (trace_term + mahal_term - K + logdet_term)  # (B, N, N)
         kl_all = torch.clamp(kl_all, min=0.0)
 
-        # Return with gradients preserved (don't use in-place copy!)
-        return kl_all
+        # Copy to output (in-place)
+        kl_matrix.copy_(kl_all)
 
     except RuntimeError:
         # Fallback to loop-based computation if Cholesky fails
-        # NOTE: This path has limited gradient flow
         for b in range(B):
             for i in range(N):
                 for j in range(N):
@@ -613,7 +605,6 @@ def _compute_kl_matrix_torch(
                         mu_j_transported, sigma_j_transported
                     )
                     kl_matrix[b, i, j] = kl_ij
-        return kl_matrix  # Fallback path - gradients may not flow
 
 
 def _transport_gaussian_torch(
