@@ -168,16 +168,16 @@ class GaugeTokenEmbedding(nn.Module):
         # Zero init would make ALL tokens identical - must use random init!
 
         if learnable_phi or gauge_fixed_priors:
-            # Per-token gauge frame (required for gauge_fixed_priors)
+            # Per-token gauge frame
             self.phi_embed = nn.Embedding(vocab_size, phi_dim)  # so(n) has phi_dim components
-            if gauge_fixed_priors:
-                # RANDOM init so tokens are distinguishable from the start!
-                # Scale ~0.1 gives small rotations (~6 degrees) - stable but diverse
-                # (Previous std=0.5 caused numerical instability in transport/KL)
-                nn.init.normal_(self.phi_embed.weight, mean=0.0, std=0.1)
-            else:
-                # Without gauge_fixed_priors, zero init is fine (mu_embed provides diversity)
-                nn.init.zeros_(self.phi_embed.weight)
+            # RANDOM init for non-trivial gauge structure from the start!
+            # Scale ~0.1 gives small rotations (~6 degrees) - stable but diverse
+            # (Previous std=0.5 caused numerical instability in transport/KL)
+            # NOTE: Random init is required BOTH for gauge_fixed_priors=True (where phi
+            # defines token identity) AND for gauge_fixed_priors=False (where phi
+            # provides gauge structure via transport Ω_ij). Zero init makes Ω=I,
+            # completely disabling the gauge-theoretic attention mechanism!
+            nn.init.normal_(self.phi_embed.weight, mean=0.0, std=0.1)
         else:
             # All tokens start at identity frame
             self.register_buffer('phi_base', torch.zeros(phi_dim))
@@ -413,9 +413,9 @@ class GaugePositionalEncoding(nn.Module):
     def __init__(
         self,
         max_seq_len: int,
-        mode: str = 'learned',
+        mode: str = 'none',  # Default: no positional encoding in gauge space
         scale: float = 0.1,
-        composition: str = 'bch1',
+        composition: str = 'exact',  # Default: full SO(3) composition (most accurate)
         phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
     ):
         """
