@@ -1911,7 +1911,8 @@ def aggregate_messages(
             )  # (B, N, N, K, K)
 
             # Extract diagonal of transported covariance: (B, N, N, K)
-            sigma_transported_diag = torch.diagonal(Sigma_transported_full, dim1=-2, dim2=-1)
+            # Use .clone() to avoid view-related gradient issues
+            sigma_transported_diag = torch.diagonal(Sigma_transported_full, dim1=-2, dim2=-1).clone()
 
             # Second moment: E[x²] = diag(Σ_transported) + μ²
             second_moment = sigma_transported_diag + mu_transported ** 2  # (B, N, N, K)
@@ -2368,7 +2369,8 @@ class IrrepMultiHeadAttention(nn.Module):
         if self.diagonal_covariance and not sigma_is_diagonal:
             # Attention expects diagonal (B, N, K) but got full covariance (B, N, K, K)
             # Extract diagonal from full covariance matrix
-            sigma = torch.diagonal(sigma, dim1=-2, dim2=-1)  # (B, N, K, K) -> (B, N, K)
+            # Use .clone() to avoid view-related gradient issues (diagonal returns a view)
+            sigma = torch.diagonal(sigma, dim1=-2, dim2=-1).clone()  # (B, N, K, K) -> (B, N, K)
         elif not self.diagonal_covariance and sigma_is_diagonal:
             # Attention expects full (B, N, K, K) but got diagonal (B, N, K)
             # Convert diagonal to full covariance

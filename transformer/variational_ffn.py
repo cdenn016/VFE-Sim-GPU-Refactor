@@ -377,7 +377,8 @@ def _compute_vfe_gradients_chunked(
 
             # Sigma alignment gradient
             if compute_sigma_align_grad:
-                sigma_j_inv_diag = torch.diagonal(sigma_j_inv, dim1=-2, dim2=-1)
+                # Use .clone() to avoid view-related gradient issues
+                sigma_j_inv_diag = torch.diagonal(sigma_j_inv, dim1=-2, dim2=-1).clone()
                 sigma_i_inv = 1.0 / sigma_i
                 sigma_i_inv_exp = sigma_i_inv[:, :, None, :].expand(-1, -1, n_j, -1)
                 grad_sigma_pair = 0.5 * (sigma_j_inv_diag - sigma_i_inv_exp)
@@ -638,7 +639,8 @@ def compute_vfe_gradients_gpu(
         # =================================================================
         if compute_sigma_align_grad:
             # Diagonal of inverse of transported covariance: diag(Σ_j_transported^{-1})
-            sigma_j_inv_diag = torch.diagonal(sigma_j_inv, dim1=-2, dim2=-1)  # (B, N, N, K)
+            # Use .clone() to avoid view-related gradient issues
+            sigma_j_inv_diag = torch.diagonal(sigma_j_inv, dim1=-2, dim2=-1).clone()  # (B, N, N, K)
 
             # Inverse of diagonal Σ_i: 1/σ_i expanded for all pairs
             sigma_i_inv = 1.0 / sigma_q.clamp(min=eps)  # (B, N, K)
@@ -791,7 +793,8 @@ def compute_natural_gradient_gpu(
         # Full covariance: matrix multiplication
         nat_grad_mu = torch.einsum('bnij,bnj->bni', sigma_q, grad_mu)
         # For sigma, use diagonal approximation for simplicity
-        sigma_diag = torch.diagonal(sigma_q, dim1=-2, dim2=-1)
+        # Use .clone() after diagonal to avoid view-related gradient issues
+        sigma_diag = torch.diagonal(sigma_q, dim1=-2, dim2=-1).clone()
         nat_grad_sigma = 0.5 * sigma_diag.unsqueeze(-1) * sigma_diag.unsqueeze(-2) * grad_sigma
 
     return nat_grad_mu, nat_grad_sigma
@@ -844,7 +847,8 @@ def retract_spd_torch(
     # This approximates full whitening B = Σ^{-1/2} ΔΣ Σ^{-1/2}
     # For diagonal-dominant covariances (common case), this is accurate
     # Key insight: whitening normalizes out the σ² scaling in natural gradients
-    diag_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1)  # (batch, K)
+    # Use .clone() after diagonal to avoid view-related gradient issues
+    diag_sigma = torch.diagonal(Sigma, dim1=-2, dim2=-1).clone()  # (batch, K)
     diag_sigma = diag_sigma.clamp(min=eps)
     inv_sqrt_diag = 1.0 / torch.sqrt(diag_sigma)  # (batch, K)
 
@@ -873,7 +877,8 @@ def retract_spd_torch(
     eye_K = torch.eye(K, device=device, dtype=dtype)
 
     # Compute scale for adaptive regularization (based on diagonal magnitude)
-    diag_mean = torch.diagonal(Sigma_new, dim1=-2, dim2=-1).abs().mean(dim=-1, keepdim=True)  # (batch, 1)
+    # Use .clone() after diagonal to avoid view-related gradient issues
+    diag_mean = torch.diagonal(Sigma_new, dim1=-2, dim2=-1).clone().abs().mean(dim=-1, keepdim=True)  # (batch, 1)
     base_reg = torch.clamp(diag_mean, min=eps).unsqueeze(-1)  # (batch, 1, 1)
 
     # Try with minimal regularization first
@@ -1538,7 +1543,8 @@ class VariationalFFNDynamic(nn.Module):
                 sigma_sqrt = torch.sqrt(sigma_current.clamp(min=eps))
                 whitened_delta = delta_mu / sigma_sqrt
             else:
-                sigma_diag = torch.diagonal(sigma_current, dim1=-2, dim2=-1).clamp(min=eps)
+                # Use .clone() after diagonal to avoid view-related gradient issues
+                sigma_diag = torch.diagonal(sigma_current, dim1=-2, dim2=-1).clone().clamp(min=eps)
                 whitened_delta = delta_mu / torch.sqrt(sigma_diag)
 
             whitened_norm = torch.linalg.norm(whitened_delta, dim=-1, keepdim=True)
