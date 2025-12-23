@@ -82,10 +82,6 @@ class GaugeTransformerBlock(nn.Module):
         generators: Optional[torch.Tensor] = None,  # (3, K, K)
         ffn_mode: str = 'VFE_dynamic',  # VFE_dynamic is the only supported mode
         ffn_alpha: float = 0.001,
-        # Dynamic VFE specific parameters
-        ffn_vfe_dynamic_m_step_interval: int = 0,  # M-step every N steps (0 = disabled)
-        ffn_vfe_dynamic_m_step_rate: float = 0.01,  # Prior update rate
-        # AD-HOC stabilization (default OFF for first-principles)
         ffn_kappa: float = 1.0,
         ffn_n_iterations: int = 1,
         ffn_learnable_lr: bool = True,
@@ -207,9 +203,6 @@ class GaugeTransformerBlock(nn.Module):
             learnable_lr=ffn_learnable_lr,
             lambda_belief=ffn_lambda_belief,
             update_sigma=ffn_update_sigma,
-            # Dynamic VFE parameters
-            vfe_dynamic_m_step_interval=ffn_vfe_dynamic_m_step_interval,
-            vfe_dynamic_m_step_rate=ffn_vfe_dynamic_m_step_rate,
             # Diagonal covariance mode
             diagonal_covariance=diagonal_covariance,
             # Pure FEP mode parameters
@@ -397,9 +390,6 @@ class GaugeTransformerStack(nn.Module):
         ffn_learnable_lr: bool = True,
         ffn_lambda_belief: float = 1.0,
         ffn_update_sigma: bool = True,
-        # Dynamic VFE specific parameters
-        ffn_vfe_dynamic_m_step_interval: int = 0,  # M-step every N steps (0 = disabled)
-        ffn_vfe_dynamic_m_step_rate: float = 0.01,  # Prior update rate
         # Diagonal covariance mode
         diagonal_covariance: bool = False,
         # Sparse attention
@@ -444,8 +434,6 @@ class GaugeTransformerStack(nn.Module):
             ffn_learnable_lr: Learn step size for variational descent
             ffn_lambda_belief: Belief alignment weight
             ffn_update_sigma: Update covariances in FFN
-            ffn_vfe_dynamic_m_step_interval: M-step every N iterations (0=disabled)
-            ffn_vfe_dynamic_m_step_rate: Prior update rate in M-step
             attention_pattern: 'full', 'local', or 'sparse' for efficient attention
             attention_window: Window size for local attention pattern
             ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
@@ -479,9 +467,6 @@ class GaugeTransformerStack(nn.Module):
                 ffn_learnable_lr=ffn_learnable_lr,
                 ffn_lambda_belief=ffn_lambda_belief,
                 ffn_update_sigma=ffn_update_sigma,
-                # Dynamic VFE
-                ffn_vfe_dynamic_m_step_interval=ffn_vfe_dynamic_m_step_interval,
-                ffn_vfe_dynamic_m_step_rate=ffn_vfe_dynamic_m_step_rate,
                 # Diagonal covariance mode
                 diagonal_covariance=diagonal_covariance,
                 # Sparse attention
