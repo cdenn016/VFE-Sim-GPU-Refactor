@@ -163,14 +163,20 @@ class GaugeTokenEmbedding(nn.Module):
         # =================================================================
         # Gauge Frame Embeddings φ_i ∈ so(n)
         # =================================================================
-        # Initialize at zero (identity frame exp(0) = I)
-        # When gauge_fixed_priors=True, these define both the gauge frame
-        # AND the rotation R_i for computing p_i = R_i ▷ p_0
+        # CRITICAL: With gauge_fixed_priors=True, φ defines the token embedding!
+        # μ_i = R(φ_i) @ μ_base, so different φ = different embeddings.
+        # Zero init would make ALL tokens identical - must use random init!
 
         if learnable_phi or gauge_fixed_priors:
             # Per-token gauge frame (required for gauge_fixed_priors)
             self.phi_embed = nn.Embedding(vocab_size, phi_dim)  # so(n) has phi_dim components
-            nn.init.zeros_(self.phi_embed.weight)
+            if gauge_fixed_priors:
+                # RANDOM init so tokens are distinguishable from the start!
+                # Scale ~0.5 gives rotations up to ~30 degrees, good diversity
+                nn.init.normal_(self.phi_embed.weight, mean=0.0, std=0.5)
+            else:
+                # Without gauge_fixed_priors, zero init is fine (mu_embed provides diversity)
+                nn.init.zeros_(self.phi_embed.weight)
         else:
             # All tokens start at identity frame
             self.register_buffer('phi_base', torch.zeros(phi_dim))
