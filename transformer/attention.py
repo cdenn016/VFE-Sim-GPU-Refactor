@@ -419,20 +419,34 @@ def compute_attention_weights(
         diag_idx = torch.arange(N, device=logits.device)
         logits[:, diag_idx, diag_idx] = logits[:, diag_idx, diag_idx] - self_attention_penalty
 
+    # Apply causal mask if provided (BEFORE self-attention masking)
+    if mask is not None:
+        # mask[b, i, j] = 0 means agent i CANNOT attend to agent j
+        logits = logits.masked_fill(mask == 0, float('-inf'))
+
     # ==========================================================================
     # SELF-ATTENTION MASKING: Force model to attend to other tokens
     # KL(q_i||q_i)=0 always, making diagonal dominant. Masking diagonal forces
     # the model to learn meaningful attention patterns over other tokens.
+    #
+    # IMPORTANT: Only mask diagonal where there are OTHER valid targets!
+    # With causal masking, position 0 can only attend to itself - masking it
+    # would leave no valid targets, causing NaN in softmax.
     # ==========================================================================
     if mask_self_attention:
         B, N, _ = logits.shape
         diag_idx = torch.arange(N, device=logits.device)
-        logits[:, diag_idx, diag_idx] = float('-inf')
-
-    # Apply causal mask if provided
-    if mask is not None:
-        # mask[b, i, j] = 0 means agent i CANNOT attend to agent j
-        logits = logits.masked_fill(mask == 0, float('-inf'))
+        # Check which positions have at least one other valid target
+        # A position has other targets if any off-diagonal element is not -inf
+        has_other_targets = (logits != float('-inf')).sum(dim=-1) > 1  # (B, N)
+        # Create mask: only mask diagonal where there are other targets
+        mask_diag = has_other_targets  # (B, N)
+        # Apply masking only where safe
+        logits[:, diag_idx, diag_idx] = torch.where(
+            mask_diag,
+            torch.full_like(logits[:, diag_idx, diag_idx], float('-inf')),
+            logits[:, diag_idx, diag_idx]
+        )
 
     # Softmax over keys (dimension 2)
     beta = F.softmax(logits, dim=-1)  # (B, N, N)
