@@ -2327,11 +2327,15 @@ class IrrepMultiHeadAttention(nn.Module):
         return mu_out, sigma_concat, attention_weights, kl_matrices
 
     def _split_irreps(self, mu: torch.Tensor) -> List[torch.Tensor]:
-        """Split embedding into irrep blocks."""
+        """Split embedding into irrep blocks.
+
+        Returns contiguous copies to avoid inplace modification issues during backward.
+        """
         blocks = []
         start_idx = 0
         for dim in self.irrep_dims:
-            blocks.append(mu[..., start_idx:start_idx+dim])
+            # Use .contiguous() to create a copy, avoiding inplace modification issues
+            blocks.append(mu[..., start_idx:start_idx+dim].contiguous())
             start_idx += dim
         return blocks
 
@@ -2366,11 +2370,13 @@ class IrrepMultiHeadAttention(nn.Module):
         for dim in self.irrep_dims:
             if self.diagonal_covariance:
                 # Diagonal mode: sigma is (B, N, K), just slice
-                blocks.append(sigma[..., start_idx:start_idx+dim])
+                # Use .contiguous() to create a copy, avoiding inplace modification issues
+                blocks.append(sigma[..., start_idx:start_idx+dim].contiguous())
             else:
                 # Full mode: sigma is (B, N, K, K), extract diagonal block
+                # Use .contiguous() to create a copy, avoiding inplace modification issues
                 blocks.append(
-                    sigma[..., start_idx:start_idx+dim, start_idx:start_idx+dim]
+                    sigma[..., start_idx:start_idx+dim, start_idx:start_idx+dim].contiguous()
                 )
             start_idx += dim
         return blocks
