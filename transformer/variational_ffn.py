@@ -306,19 +306,22 @@ def _compute_vfe_gradients_chunked(
         i_end = min(i_start + chunk_size, N)
         n_i = i_end - i_start
 
-        exp_phi_i = exp_phi[:, i_start:i_end]  # (B, n_i, K, K)
-        mu_i = mu_q[:, i_start:i_end]
-        sigma_i = sigma_q_safe[:, i_start:i_end]
-        beta_i = beta[:, i_start:i_end, :]  # (B, n_i, N)
+        # Use .contiguous() to create copies and avoid inplace modification errors
+        # during backward pass (same pattern as _compute_kl_matrix_diagonal_chunked)
+        exp_phi_i = exp_phi[:, i_start:i_end].contiguous()  # (B, n_i, K, K)
+        mu_i = mu_q[:, i_start:i_end].contiguous()
+        sigma_i = sigma_q_safe[:, i_start:i_end].contiguous()
+        beta_i = beta[:, i_start:i_end, :].contiguous()  # (B, n_i, N)
 
         for j_start in range(0, N, chunk_size):
             j_end = min(j_start + chunk_size, N)
             n_j = j_end - j_start
 
-            exp_neg_phi_j = exp_neg_phi[:, j_start:j_end]
-            mu_j = mu_q[:, j_start:j_end]
-            sigma_j_diag_chunk = sigma_j_diag[:, j_start:j_end]
-            beta_chunk = beta_i[:, :, j_start:j_end]  # (B, n_i, n_j)
+            # Use .contiguous() to create copies and avoid inplace modification errors
+            exp_neg_phi_j = exp_neg_phi[:, j_start:j_end].contiguous()
+            mu_j = mu_q[:, j_start:j_end].contiguous()
+            sigma_j_diag_chunk = sigma_j_diag[:, j_start:j_end].contiguous()
+            beta_chunk = beta_i[:, :, j_start:j_end].contiguous()  # (B, n_i, n_j)
 
             # Compute Omega for this chunk
             Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi_i, exp_neg_phi_j)
