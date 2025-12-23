@@ -106,7 +106,7 @@ class GaugeTransformerLM(nn.Module):
         max_seq_len = config['max_seq_len']
         kappa_beta = config['kappa_beta']
         dropout = config.get('dropout', 0.1)
-        pos_mode = config.get('pos_encoding_mode', 'learned')
+        pos_mode = config.get('pos_encoding_mode', 'none')  # Default: no position in gauge space
         evolve_sigma = config.get('evolve_sigma', False)
         evolve_phi = config.get('evolve_phi', False)
         tie_embeddings = config.get('tie_embeddings', True)
@@ -154,7 +154,9 @@ class GaugeTransformerLM(nn.Module):
         self.diagonal_covariance = diagonal_covariance
 
         # Positional embedding added to μ (like standard transformers)
-        use_positional_embedding = config.get('use_positional_embedding', False)
+        # DEFAULT: True - position in μ, not gauge frame φ. This is more principled
+        # because it keeps transport Ω_ij content-based (not position-based).
+        use_positional_embedding = config.get('use_positional_embedding', True)
 
         # Position encoding scale (for φ gauge frame encoding)
         pos_encoding_scale = config.get('pos_encoding_scale', 0.1)
@@ -229,7 +231,7 @@ class GaugeTransformerLM(nn.Module):
             init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
             init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
             learnable_sigma=False,  # Keep simple for now
-            learnable_phi=evolve_phi or gauge_fixed_priors,  # Enable phi if evolving OR gauge_fixed
+            learnable_phi=True,  # Always learn phi for gauge structure. Required for non-trivial transport Ω_ij.
             gauge_fixed_priors=gauge_fixed_priors,
             generators=self.generators,  # Always pass generators for gauge transport
             diagonal_covariance=diagonal_covariance,

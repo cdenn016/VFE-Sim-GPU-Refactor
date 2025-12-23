@@ -230,7 +230,7 @@ def compute_attention_weights(
     return_kl: bool = False,   # Return KL matrix for loss computation
     diagonal_covariance: bool = False,  # Use diagonal sigma (B,N,K) instead of full (B,N,K,K)
     cached_transport: Optional[dict] = None,  # Precomputed transport operators (from compute_transport_operators)
-    self_attention_penalty: float = 1.0,  # Penalty for self-attention (prevents diagonal dominance)
+    self_attention_penalty: float = 0.0,  # DEPRECATED: Ad-hoc penalty removed. Use kappa instead.
     # Memory-efficient options (NEW!)
     irrep_dims: Optional[List[int]] = None,  # Block-diagonal structure [d₁, d₂, ...] for principled KL decomposition
     chunk_size: Optional[int] = None,  # Chunk size for memory-efficient computation (None = auto)
@@ -1846,16 +1846,31 @@ def aggregate_messages(
         B, N, K = mu_q.shape
         if diagonal_covariance:
             # DIAGONAL MODE: sigma_q is (B, N, K)
-            # For diagonal, transport doesn't change variance (approximation)
-            # Just weighted average of variances
+            # IMPORTANT: Transport DOES change diagonal covariance!
+            # Σ_j^{→i} = Ω_ij @ diag(σ_j) @ Ω_ij^T is generally FULL, but we
+            # take its diagonal for the output to stay in diagonal mode.
+            # This is the CORRECT approximation: diag(Ω @ diag(σ) @ Ω^T)
+
             # Squeeze trailing singleton dimensions for robustness
             sigma_q_diag = sigma_q
             while sigma_q_diag.dim() > 3 and sigma_q_diag.shape[-1] == 1:
                 sigma_q_diag = sigma_q_diag.squeeze(-1)
-            sigma_j = sigma_q_diag[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
 
-            # Second moment: E[x²] = σ + μ²
-            second_moment = sigma_j + mu_transported ** 2  # (B, N, N, K)
+            # Expand diagonal to full covariance for transport: (B, N, K, K)
+            sigma_full = torch.diag_embed(sigma_q_diag)  # (B, N, K, K)
+
+            # Transport covariances: Σ_j^{→i} = Ω_ij @ Σ_j @ Ω_ij^T
+            # Omega: (B, N, N, K, K), sigma_full: (B, N, K, K)
+            Sigma_transported_full = torch.einsum(
+                'bijkl,bjlm,bijmn->bijkn',
+                Omega, sigma_full, Omega.transpose(-1, -2)
+            )  # (B, N, N, K, K)
+
+            # Extract diagonal of transported covariance: (B, N, N, K)
+            sigma_transported_diag = torch.diagonal(Sigma_transported_full, dim1=-2, dim2=-1)
+
+            # Second moment: E[x²] = diag(Σ_transported) + μ²
+            second_moment = sigma_transported_diag + mu_transported ** 2  # (B, N, N, K)
 
             # Weighted sum
             sigma_aggregated = torch.einsum('bij,bijk->bik', beta, second_moment)
@@ -1935,7 +1950,7 @@ class IrrepMultiHeadAttention(nn.Module):
         gauge_group: str = 'SO3',  # 'SO3' or 'SON'
         gauge_dim: int = 3,        # N for SO(N) - only used when gauge_group='SON'
         global_generators: Optional[torch.Tensor] = None,  # (n_gen, K, K) for SO(N) mode
-        self_attention_penalty: float = 1.0,  # Penalty for self-attention (prevents diagonal dominance)
+        self_attention_penalty: float = 0.0,  # DEPRECATED: Ad-hoc penalty removed. Use kappa instead.
         alibi_slope: Optional[float] = None,  # ALiBi-style positional bias (negative = recency bias)
         use_identity_transport: bool = False,  # If True, Ω_ij = I (no gauge transport)
     ):
