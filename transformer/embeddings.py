@@ -172,8 +172,9 @@ class GaugeTokenEmbedding(nn.Module):
             self.phi_embed = nn.Embedding(vocab_size, phi_dim)  # so(n) has phi_dim components
             if gauge_fixed_priors:
                 # RANDOM init so tokens are distinguishable from the start!
-                # Scale ~0.5 gives rotations up to ~30 degrees, good diversity
-                nn.init.normal_(self.phi_embed.weight, mean=0.0, std=0.5)
+                # Scale ~0.1 gives small rotations (~6 degrees) - stable but diverse
+                # (Previous std=0.5 caused numerical instability in transport/KL)
+                nn.init.normal_(self.phi_embed.weight, mean=0.0, std=0.1)
             else:
                 # Without gauge_fixed_priors, zero init is fine (mu_embed provides diversity)
                 nn.init.zeros_(self.phi_embed.weight)
