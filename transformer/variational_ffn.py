@@ -1278,6 +1278,8 @@ class VariationalFFNDynamic(nn.Module):
         # Memory-efficient options (NEW!)
         irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
         chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
+        # Self-attention masking (prevents attention collapse)
+        mask_self_attention: bool = False,  # If True, mask out diagonal (no self-attention)
     ):
         """
         Initialize dynamic-β VFE FFN.
@@ -1299,12 +1301,15 @@ class VariationalFFNDynamic(nn.Module):
             irrep_dims: Block dimensions [d₁, d₂, ...] for memory-efficient block-diagonal KL.
                        When provided, exploits O(N² × Σᵢdᵢ²) vs O(N² × K²) - massive savings!
             chunk_size: Chunk size for memory-efficient processing. Processes N×N in C×C chunks.
+            mask_self_attention: If True, mask out diagonal (no self-attention).
+                                Prevents attention collapse since KL(q_i||q_i)=0 always.
         """
         super().__init__()
 
         self.embed_dim = embed_dim
         self.register_buffer('generators', generators)
         self.n_iterations = n_iterations
+        self.mask_self_attention = mask_self_attention
         self.update_sigma = update_sigma
         self.diagonal_covariance = diagonal_covariance
         self.compute_sigma_align_grad = compute_sigma_align_grad
@@ -1461,6 +1466,8 @@ class VariationalFFNDynamic(nn.Module):
                 # Memory-efficient options
                 irrep_dims=self.irrep_dims,
                 chunk_size=self.chunk_size,
+                # Self-attention masking
+                mask_self_attention=self.mask_self_attention,
             )  # (B, N, N)
 
             if return_beta_history:
@@ -1488,17 +1495,19 @@ class VariationalFFNDynamic(nn.Module):
             )
 
             # Add FRESH observation gradient (recomputed from current beliefs)
+            # NOTE: Previously used torch.no_grad() which BLOCKED gradient flow to embeddings!
+            # The observation gradient guides VFE descent AND must train embeddings.
+            # Removing no_grad() allows embeddings to learn from VFE dynamics.
             if has_observations:
-                with torch.no_grad():
-                    logits = torch.matmul(mu_current, W_out.T)
-                    probs = F.softmax(logits, dim=-1)
-                    targets_valid = targets.clone()
-                    targets_valid[targets == -1] = 0
-                    one_hot = F.one_hot(targets_valid, num_classes=W_out.shape[0]).float()
-                    mask_obs = (targets != -1).unsqueeze(-1).float()
-                    one_hot = one_hot * mask_obs
-                    grad_error = (probs - one_hot) * mask_obs
-                    discrete_obs_grad = torch.matmul(grad_error, W_out)
+                logits = torch.matmul(mu_current, W_out.T)
+                probs = F.softmax(logits, dim=-1)
+                targets_valid = targets.clone()
+                targets_valid[targets == -1] = 0
+                one_hot = F.one_hot(targets_valid, num_classes=W_out.shape[0]).float()
+                mask_obs = (targets != -1).unsqueeze(-1).float()
+                one_hot = one_hot * mask_obs
+                grad_error = (probs - one_hot) * mask_obs
+                discrete_obs_grad = torch.matmul(grad_error, W_out)
                 grad_mu = grad_mu + discrete_obs_grad
 
             # Clip for stability
@@ -1579,6 +1588,7 @@ class VariationalFFNDynamic(nn.Module):
                 diagonal_covariance=is_diagonal,
                 irrep_dims=self.irrep_dims,
                 chunk_size=self.chunk_size,
+                mask_self_attention=self.mask_self_attention,
             )
 
             # beta_for_phi is (beta, kl_matrix) when return_kl=True
@@ -1598,6 +1608,7 @@ class VariationalFFNDynamic(nn.Module):
                     use_numba=False,
                     return_kl=True,
                     diagonal_covariance=is_diagonal,
+                    mask_self_attention=self.mask_self_attention,
                 )[1]
 
             # Belief alignment loss: F_align = λ·Σ_ij β_ij · KL_ij

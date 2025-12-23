@@ -306,6 +306,8 @@ class GaugeTransformerLM(nn.Module):
             alibi_slope=alibi_slope,
             # Identity transport mode
             use_identity_transport=use_identity_transport,
+            # Self-attention masking (prevents attention collapse)
+            mask_self_attention=config.get('mask_self_attention', False),
         )
 
         # =================================================================

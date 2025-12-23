@@ -60,6 +60,8 @@ class GaugeFFN(nn.Module):
         # Memory-efficient options (NEW!)
         irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
         chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
+        # Self-attention masking (prevents attention collapse)
+        mask_self_attention: bool = False,  # If True, mask out diagonal (no self-attention)
         # Legacy parameters (ignored, kept for API compatibility)
         **kwargs,
     ):
@@ -86,6 +88,8 @@ class GaugeFFN(nn.Module):
             irrep_dims: Block dimensions [d₁, d₂, ...] for memory-efficient block-diagonal KL.
                        Exploits O(N² × Σᵢdᵢ²) vs O(N² × K²) - massive savings for multi-irrep!
             chunk_size: Chunk size for memory-efficient processing. Processes N×N in C×C chunks.
+            mask_self_attention: If True, mask out diagonal (no self-attention).
+                                Prevents attention collapse since KL(q_i||q_i)=0 always.
         """
         super().__init__()
 
@@ -120,6 +124,8 @@ class GaugeFFN(nn.Module):
             # Memory-efficient options
             irrep_dims=irrep_dims,
             chunk_size=chunk_size,
+            # Self-attention masking
+            mask_self_attention=mask_self_attention,
         )
 
     def forward(

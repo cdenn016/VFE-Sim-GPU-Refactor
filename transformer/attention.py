@@ -238,6 +238,8 @@ def compute_attention_weights(
     alibi_slope: Optional[float] = None,  # If set, adds slope * (i-j) to logits for relative position
     # Identity transport mode (diagnostic/simplification)
     use_identity_transport: bool = False,  # If True, Ω_ij = I (no gauge transport)
+    # Self-attention masking (prevents attention collapse)
+    mask_self_attention: bool = False,  # If True, mask out diagonal (no self-attention)
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Compute attention weights from KL divergences (0D version).
@@ -286,6 +288,11 @@ def compute_attention_weights(
                                KL(q_i || q_j) without any rotation.
                                Useful for diagnostics or when transport is
                                not desired.
+        mask_self_attention: If True, mask out diagonal of attention matrix.
+                            This prevents the model from attending to itself,
+                            forcing it to attend to other tokens. Critical for
+                            preventing attention collapse since KL(q_i||q_i)=0
+                            always makes self-attention the most attractive.
 
     Returns:
         beta: Attention weights, shape (B, N, N)
@@ -411,6 +418,16 @@ def compute_attention_weights(
         B, N, _ = logits.shape
         diag_idx = torch.arange(N, device=logits.device)
         logits[:, diag_idx, diag_idx] = logits[:, diag_idx, diag_idx] - self_attention_penalty
+
+    # ==========================================================================
+    # SELF-ATTENTION MASKING: Force model to attend to other tokens
+    # KL(q_i||q_i)=0 always, making diagonal dominant. Masking diagonal forces
+    # the model to learn meaningful attention patterns over other tokens.
+    # ==========================================================================
+    if mask_self_attention:
+        B, N, _ = logits.shape
+        diag_idx = torch.arange(N, device=logits.device)
+        logits[:, diag_idx, diag_idx] = float('-inf')
 
     # Apply causal mask if provided
     if mask is not None:
@@ -1953,6 +1970,7 @@ class IrrepMultiHeadAttention(nn.Module):
         self_attention_penalty: float = 0.0,  # DEPRECATED: Ad-hoc penalty removed. Use kappa instead.
         alibi_slope: Optional[float] = None,  # ALiBi-style positional bias (negative = recency bias)
         use_identity_transport: bool = False,  # If True, Ω_ij = I (no gauge transport)
+        mask_self_attention: bool = False,  # If True, mask out diagonal (no self-attention)
     ):
         """
         Initialize irrep-structured multi-head attention.
@@ -1978,6 +1996,9 @@ class IrrepMultiHeadAttention(nn.Module):
             gauge_dim: N for SO(N) mode - determines generator structure
             global_generators: Pre-computed generators for SO(N) mode (n_gen, K, K)
                               Required when gauge_group='SON'
+            mask_self_attention: If True, mask out diagonal (no self-attention).
+                                This prevents attention collapse since KL(q_i||q_i)=0
+                                always makes self-attention the most attractive.
         """
         super().__init__()
         self.diagonal_covariance = diagonal_covariance
@@ -1993,6 +2014,7 @@ class IrrepMultiHeadAttention(nn.Module):
         self.self_attention_penalty = self_attention_penalty
         self.alibi_slope = alibi_slope
         self.use_identity_transport = use_identity_transport
+        self.mask_self_attention = mask_self_attention
 
         # Build irrep block structure
         self.irrep_dims = []
@@ -2220,6 +2242,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     self_attention_penalty=self.self_attention_penalty,
                     alibi_slope=self.alibi_slope,
                     use_identity_transport=self.use_identity_transport,
+                    mask_self_attention=self.mask_self_attention,
                 )  # (B, N, N), (B, N, N)
                 all_attention_weights.append(beta_head)
                 all_kl_matrices.append(kl_head)
@@ -2239,6 +2262,7 @@ class IrrepMultiHeadAttention(nn.Module):
                     self_attention_penalty=self.self_attention_penalty,
                     alibi_slope=self.alibi_slope,
                     use_identity_transport=self.use_identity_transport,
+                    mask_self_attention=self.mask_self_attention,
                 )  # (B, N, N)
                 kl_head = None  # Not computed
 
