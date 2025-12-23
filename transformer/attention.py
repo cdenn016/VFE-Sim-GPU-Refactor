@@ -716,6 +716,11 @@ def _compute_kl_matrix_diagonal(
         kl_matrix: (B, N, N) output tensor (modified in-place)
         cached_transport: Optional dict with precomputed 'Omega' from compute_transport_operators()
     """
+    # Squeeze trailing singleton dimensions for robustness
+    # (handles case where sigma_q comes in as (B, N, K, 1) instead of (B, N, K))
+    while sigma_q.dim() > 3 and sigma_q.shape[-1] == 1:
+        sigma_q = sigma_q.squeeze(-1)
+
     B, N, K = mu_q.shape
     device = mu_q.device
     dtype = mu_q.dtype
@@ -972,6 +977,10 @@ def _compute_kl_matrix_diagonal_chunked(
         kl_matrix: (B, N, N) output tensor (modified in-place)
         chunk_size: Size of chunks to process
     """
+    # Squeeze trailing singleton dimensions for robustness
+    while sigma_q.dim() > 3 and sigma_q.shape[-1] == 1:
+        sigma_q = sigma_q.squeeze(-1)
+
     B, N, K = mu_q.shape
     device = mu_q.device
     dtype = mu_q.dtype
@@ -1839,7 +1848,11 @@ def aggregate_messages(
             # DIAGONAL MODE: sigma_q is (B, N, K)
             # For diagonal, transport doesn't change variance (approximation)
             # Just weighted average of variances
-            sigma_j = sigma_q[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
+            # Squeeze trailing singleton dimensions for robustness
+            sigma_q_diag = sigma_q
+            while sigma_q_diag.dim() > 3 and sigma_q_diag.shape[-1] == 1:
+                sigma_q_diag = sigma_q_diag.squeeze(-1)
+            sigma_j = sigma_q_diag[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
 
             # Second moment: E[x²] = σ + μ²
             second_moment = sigma_j + mu_transported ** 2  # (B, N, N, K)
