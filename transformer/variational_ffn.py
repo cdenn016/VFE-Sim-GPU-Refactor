@@ -247,77 +247,6 @@ def _compute_vfe_gradients_block_diagonal(
     return grad_mu, grad_sigma
 
 
-def _robust_matrix_inverse(sigma: torch.Tensor, eps: float = 1e-6, min_diag: float = 1e-4) -> torch.Tensor:
-    """
-    Robustly invert a batch of matrices with numerical stability safeguards.
-
-    Ensures the matrix is well-conditioned before inversion by:
-    1. Clamping diagonal elements to a minimum value
-    2. Replacing NaN/Inf values with identity
-    3. Using increased regularization if needed
-
-    Args:
-        sigma: Batch of matrices (..., K, K)
-        eps: Base regularization epsilon
-        min_diag: Minimum diagonal value to ensure positive definiteness
-
-    Returns:
-        sigma_inv: Inverse matrices (..., K, K)
-    """
-    K = sigma.shape[-1]
-    device = sigma.device
-    dtype = sigma.dtype
-    I = torch.eye(K, device=device, dtype=dtype)
-
-    # Check for NaN/Inf and replace with identity
-    is_bad = torch.isnan(sigma).any(dim=(-2, -1)) | torch.isinf(sigma).any(dim=(-2, -1))
-    if is_bad.any():
-        # Replace bad matrices with identity
-        sigma = torch.where(
-            is_bad.unsqueeze(-1).unsqueeze(-1).expand_as(sigma),
-            I.expand_as(sigma),
-            sigma
-        )
-
-    # Ensure minimum diagonal values for positive definiteness
-    diag = torch.diagonal(sigma, dim1=-2, dim2=-1)
-    diag_clamped = diag.clamp(min=min_diag)
-    # Only modify diagonal if needed
-    if (diag < min_diag).any():
-        sigma = sigma.clone()
-        sigma.diagonal(dim1=-2, dim2=-1).copy_(diag_clamped)
-
-    # Add regularization
-    sigma_reg = sigma + eps * I
-
-    # Try Cholesky-based solve (more stable than direct inversion)
-    try:
-        L = torch.linalg.cholesky(sigma_reg)
-        sigma_inv = torch.cholesky_inverse(L)
-    except RuntimeError:
-        # Fallback: increase regularization and try direct inversion
-        sigma_reg = sigma + 0.01 * I  # Much larger regularization
-        try:
-            sigma_inv = torch.linalg.inv(sigma_reg)
-        except RuntimeError:
-            # Last resort: return identity (will result in zero gradient contribution)
-            sigma_inv = I.expand_as(sigma)
-
-    # Clamp output to prevent extreme values
-    sigma_inv = sigma_inv.clamp(min=-1e6, max=1e6)
-
-    # Replace any remaining NaN/Inf with identity
-    is_bad_inv = torch.isnan(sigma_inv).any(dim=(-2, -1)) | torch.isinf(sigma_inv).any(dim=(-2, -1))
-    if is_bad_inv.any():
-        sigma_inv = torch.where(
-            is_bad_inv.unsqueeze(-1).unsqueeze(-1).expand_as(sigma_inv),
-            I.expand_as(sigma_inv),
-            sigma_inv
-        )
-
-    return sigma_inv
-
-
 def _compute_vfe_gradients_chunked(
     mu_q: torch.Tensor,        # (B, N, K) belief means
     sigma_q: torch.Tensor,     # (B, N, K) diagonal variances
@@ -337,12 +266,10 @@ def _compute_vfe_gradients_chunked(
     Chunked VFE gradient computation for diagonal covariance mode.
 
     Processes N×N pairs in C×C chunks to reduce peak memory.
-    Uses a two-pass approach:
-    - Pass 1: Compute direct gradient and accumulate avg_grad (weighted sum over all j)
-    - Pass 2: Compute softmax coupling using the FULL avg_grad
 
-    This is necessary because the softmax coupling term requires the full weighted
-    average across ALL j, not just the j values seen so far in the loop.
+    Uses single-pass with incremental avg_grad and normalization by beta sum.
+    This matches the original stable algorithm - only the inplace modification
+    issue is fixed by using non-inplace operations (= ... + instead of +=).
     """
     B, N, K = mu_q.shape
     device = mu_q.device
@@ -359,7 +286,7 @@ def _compute_vfe_gradients_chunked(
     grad_sigma_self = alpha * 0.5 * (1.0 / sigma_p_safe - 1.0 / sigma_q_safe)
 
     # =================================================================
-    # 2. Alignment Gradient (chunked processing with TWO PASSES)
+    # 2. Alignment Gradient (chunked processing)
     # =================================================================
     # Precompute matrix exponentials for all positions
     phi_matrix = torch.einsum('bna,aij->bnij', phi, generators)
@@ -370,26 +297,23 @@ def _compute_vfe_gradients_chunked(
     # Expand diagonal to full for transport
     sigma_j_diag = torch.diag_embed(sigma_q_safe)  # (B, N, K, K)
 
-    # Accumulators
+    # Accumulators - use non-inplace operations throughout
     grad_mu_direct = torch.zeros_like(mu_q)
     grad_mu_softmax = torch.zeros_like(mu_q)
     grad_sigma_align = torch.zeros_like(sigma_q)
 
-    # For the full weighted sum: avg_grad = Σ_j β_ij · ∂KL_ij/∂μ_i
-    avg_grad = torch.zeros_like(mu_q)
-
-    # =================================================================
-    # PASS 1: Compute direct gradient, sigma gradient, and avg_grad sum
-    # =================================================================
     for i_start in range(0, N, chunk_size):
         i_end = min(i_start + chunk_size, N)
         n_i = i_end - i_start
 
-        # Use .contiguous() to create copies and avoid inplace modification errors
+        # Use .contiguous() to create copies and avoid view-related gradient errors
         exp_phi_i = exp_phi[:, i_start:i_end].contiguous()
         mu_i = mu_q[:, i_start:i_end].contiguous()
         sigma_i = sigma_q_safe[:, i_start:i_end].contiguous()
         beta_i = beta[:, i_start:i_end, :].contiguous()
+
+        # Per i-chunk accumulator for incremental avg_grad (reset each i iteration)
+        chunk_beta_grad_kl_sum = torch.zeros(B, n_i, K, device=device, dtype=dtype)
 
         for j_start in range(0, N, chunk_size):
             j_end = min(j_start + chunk_size, N)
@@ -407,7 +331,7 @@ def _compute_vfe_gradients_chunked(
             # Transport means
             mu_j_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_j)
 
-            # Transport covariances
+            # Transport covariances (diagonal -> full -> for grad computation)
             sigma_j_transported = torch.einsum(
                 'bijkl,bjlm,bijmn->bijkn',
                 Omega, sigma_j_diag_chunk, Omega.transpose(-1, -2)
@@ -415,27 +339,47 @@ def _compute_vfe_gradients_chunked(
 
             del Omega
 
-            # Robust matrix inversion with numerical stability safeguards
-            sigma_j_inv = _robust_matrix_inverse(sigma_j_transported, eps=eps)
+            # Regularize and invert
+            sigma_j_reg = sigma_j_transported + eps * torch.eye(K, device=device, dtype=dtype)
+            sigma_j_inv = torch.linalg.inv(sigma_j_reg)
 
-            # Delta mu - clamp to prevent extreme values
+            # Delta mu
             delta_mu_ij = mu_i[:, :, None, :] - mu_j_transported
-            delta_mu_ij = delta_mu_ij.clamp(min=-1e3, max=1e3)
 
             # ∂KL/∂μ_i
             grad_kl = torch.einsum('bijkl,bijl->bijk', sigma_j_inv, delta_mu_ij)
-            # Clamp gradients to prevent explosion
-            grad_kl = grad_kl.clamp(min=-1e3, max=1e3)
 
-            # Direct term contribution
-            grad_mu_direct[:, i_start:i_end] = grad_mu_direct[:, i_start:i_end] + lambda_belief * torch.einsum(
-                'bij,bijk->bik', beta_chunk, grad_kl
-            )
+            # Direct term contribution (non-inplace)
+            direct_contrib = lambda_belief * torch.einsum('bij,bijk->bik', beta_chunk, grad_kl)
+            grad_mu_direct[:, i_start:i_end] = grad_mu_direct[:, i_start:i_end] + direct_contrib
 
-            # Accumulate for avg_grad (weighted sum over all j)
-            avg_grad[:, i_start:i_end] = avg_grad[:, i_start:i_end] + torch.einsum(
-                'bij,bijk->bik', beta_chunk, grad_kl
-            )
+            # For softmax coupling, compute KL values
+            mahal = torch.einsum('bijk,bijk->bij', delta_mu_ij, grad_kl)
+
+            # Use .clone() after expand to avoid view-related gradient issues
+            sigma_i_diag_exp = torch.diag_embed(sigma_i)[:, :, None, :, :].expand(-1, -1, n_j, -1, -1).clone()
+            trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_diag_exp))
+
+            try:
+                L_p = torch.linalg.cholesky(sigma_j_reg)
+                logdet_p = 2.0 * torch.sum(torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1) + eps), dim=-1)
+            except RuntimeError:
+                logdet_p = torch.zeros(B, n_i, n_j, device=device, dtype=dtype)
+
+            logdet_q = torch.sum(torch.log(sigma_i), dim=-1)[:, :, None].expand(-1, -1, n_j).clone()
+
+            kl_chunk = 0.5 * (trace_term + mahal - K + logdet_p - logdet_q).clamp(min=0.0)
+
+            # Accumulate weighted gradient for avg_grad (non-inplace)
+            chunk_beta_grad_kl_sum = chunk_beta_grad_kl_sum + torch.einsum('bij,bijk->bik', beta_chunk, grad_kl)
+
+            # Softmax coupling: use incremental sum normalized by beta sum
+            # This division provides numerical stability
+            avg_grad_i = chunk_beta_grad_kl_sum / (beta_i.sum(dim=-1, keepdim=True) + eps)
+            grad_deviation = grad_kl - avg_grad_i.unsqueeze(2)
+            d_beta_d_mu = beta_chunk.unsqueeze(-1) * grad_deviation / kappa
+            softmax_contrib = lambda_belief * torch.einsum('bij,bijk->bik', kl_chunk, d_beta_d_mu)
+            grad_mu_softmax[:, i_start:i_end] = grad_mu_softmax[:, i_start:i_end] + softmax_contrib
 
             # Sigma alignment gradient
             if compute_sigma_align_grad:
@@ -443,93 +387,8 @@ def _compute_vfe_gradients_chunked(
                 sigma_i_inv = 1.0 / sigma_i
                 sigma_i_inv_exp = sigma_i_inv[:, :, None, :].expand(-1, -1, n_j, -1).clone()
                 grad_sigma_pair = 0.5 * (sigma_j_inv_diag - sigma_i_inv_exp)
-                # Clamp sigma gradients
-                grad_sigma_pair = grad_sigma_pair.clamp(min=-1e3, max=1e3)
-                grad_sigma_align[:, i_start:i_end] = grad_sigma_align[:, i_start:i_end] + lambda_belief * torch.einsum(
-                    'bij,bijk->bik', beta_chunk, grad_sigma_pair
-                )
-
-            del sigma_j_transported, sigma_j_inv, mu_j_transported
-
-    # =================================================================
-    # PASS 2: Compute softmax coupling using the FULL avg_grad
-    # =================================================================
-    for i_start in range(0, N, chunk_size):
-        i_end = min(i_start + chunk_size, N)
-        n_i = i_end - i_start
-
-        # Use .contiguous() to create copies
-        exp_phi_i = exp_phi[:, i_start:i_end].contiguous()
-        mu_i = mu_q[:, i_start:i_end].contiguous()
-        sigma_i = sigma_q_safe[:, i_start:i_end].contiguous()
-        beta_i = beta[:, i_start:i_end, :].contiguous()
-        avg_grad_i = avg_grad[:, i_start:i_end].contiguous()  # Full avg_grad for this i chunk
-
-        for j_start in range(0, N, chunk_size):
-            j_end = min(j_start + chunk_size, N)
-            n_j = j_end - j_start
-
-            # Use .contiguous() to create copies
-            exp_neg_phi_j = exp_neg_phi[:, j_start:j_end].contiguous()
-            mu_j = mu_q[:, j_start:j_end].contiguous()
-            sigma_j_diag_chunk = sigma_j_diag[:, j_start:j_end].contiguous()
-            beta_chunk = beta_i[:, :, j_start:j_end].contiguous()
-
-            # Recompute Omega for this chunk
-            Omega = torch.einsum('bikl,bjlm->bijkm', exp_phi_i, exp_neg_phi_j)
-
-            # Transport means
-            mu_j_transported = torch.einsum('bijkl,bjl->bijk', Omega, mu_j)
-
-            # Transport covariances
-            sigma_j_transported = torch.einsum(
-                'bijkl,bjlm,bijmn->bijkn',
-                Omega, sigma_j_diag_chunk, Omega.transpose(-1, -2)
-            )
-
-            del Omega
-
-            # Robust matrix inversion with numerical stability safeguards
-            sigma_j_inv = _robust_matrix_inverse(sigma_j_transported, eps=eps)
-
-            # Delta mu - clamp to prevent extreme values
-            delta_mu_ij = mu_i[:, :, None, :] - mu_j_transported
-            delta_mu_ij = delta_mu_ij.clamp(min=-1e3, max=1e3)
-
-            # ∂KL/∂μ_i
-            grad_kl = torch.einsum('bijkl,bijl->bijk', sigma_j_inv, delta_mu_ij)
-            grad_kl = grad_kl.clamp(min=-1e3, max=1e3)
-
-            # Compute KL values for softmax coupling
-            mahal = torch.einsum('bijk,bijk->bij', delta_mu_ij, grad_kl)
-            mahal = mahal.clamp(min=0.0, max=1e6)  # Mahalanobis must be non-negative
-
-            sigma_i_diag_exp = torch.diag_embed(sigma_i)[:, :, None, :, :].expand(-1, -1, n_j, -1, -1).clone()
-            trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_diag_exp))
-            trace_term = trace_term.clamp(min=0.0, max=1e6)  # Trace must be non-negative
-
-            # Regularize sigma_j_transported for Cholesky (add eps * I)
-            sigma_j_reg = sigma_j_transported + eps * torch.eye(K, device=device, dtype=dtype)
-            try:
-                L_p = torch.linalg.cholesky(sigma_j_reg)
-                logdet_p = 2.0 * torch.sum(torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1).clamp(min=eps) + eps), dim=-1)
-            except RuntimeError:
-                # Use sum of log of clamped diagonal as fallback
-                diag_vals = torch.diagonal(sigma_j_reg, dim1=-2, dim2=-1).clamp(min=eps)
-                logdet_p = torch.sum(torch.log(diag_vals), dim=-1)
-
-            logdet_q = torch.sum(torch.log(sigma_i.clamp(min=eps)), dim=-1)[:, :, None].expand(-1, -1, n_j).clone()
-
-            kl_chunk = 0.5 * (trace_term + mahal - K + logdet_p - logdet_q).clamp(min=0.0, max=1e6)
-
-            # Softmax coupling using FULL avg_grad
-            # grad_deviation = ∂KL_ij/∂μ_i - avg_grad_i (where avg is over ALL j)
-            grad_deviation = grad_kl - avg_grad_i[:, :, None, :]
-            grad_deviation = grad_deviation.clamp(min=-1e3, max=1e3)
-            d_beta_d_mu = beta_chunk.unsqueeze(-1) * grad_deviation / kappa
-            grad_mu_softmax[:, i_start:i_end] = grad_mu_softmax[:, i_start:i_end] + lambda_belief * torch.einsum(
-                'bij,bijk->bik', kl_chunk, d_beta_d_mu
-            )
+                sigma_contrib = lambda_belief * torch.einsum('bij,bijk->bik', beta_chunk, grad_sigma_pair)
+                grad_sigma_align[:, i_start:i_end] = grad_sigma_align[:, i_start:i_end] + sigma_contrib
 
             del sigma_j_transported, sigma_j_inv, mu_j_transported
 
