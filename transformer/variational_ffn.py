@@ -1495,11 +1495,13 @@ class VariationalFFNDynamic(nn.Module):
             )
 
             # Add FRESH observation gradient (recomputed from current beliefs)
-            # NOTE: Previously used torch.no_grad() which BLOCKED gradient flow to embeddings!
-            # The observation gradient guides VFE descent AND must train embeddings.
-            # Removing no_grad() allows embeddings to learn from VFE dynamics.
+            # Use .detach() on mu_current to avoid second-order gradients through the
+            # observation gradient computation. Gradients still flow through VFE dynamics
+            # (the natural gradient update), just not through how the obs grad was computed.
+            # This is more stable than full gradient flow while still allowing embeddings
+            # to learn from VFE dynamics via the mu_current → mu_new update chain.
             if has_observations:
-                logits = torch.matmul(mu_current, W_out.T)
+                logits = torch.matmul(mu_current.detach(), W_out.T)
                 probs = F.softmax(logits, dim=-1)
                 targets_valid = targets.clone()
                 targets_valid[targets == -1] = 0
