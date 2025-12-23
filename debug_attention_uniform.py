@@ -18,20 +18,23 @@ def diagnose():
     print("=" * 80)
 
     # Create model with settings the user claims to have
+    # embed_dim = 32 = 8*1 + 4*3 + 2*5 = 8 + 12 + 10 = 30... let's use 64
+    # embed_dim = 64 = 16*1 + 8*3 + 4*5 = 16 + 24 + 20 = 60... pad to 64
     config = {
         'vocab_size': 100,
-        'embed_dim': 32,  # Small for debugging
+        'embed_dim': 64,
         'n_layers': 1,
-        'hidden_dim': 64,
+        'hidden_dim': 128,
         'max_seq_len': 16,
         'kappa_beta': 1.0,
         'dropout': 0.0,
+        'irrep_spec': [('l0', 16, 1), ('l1', 8, 3), ('l2', 4, 5)],  # Total: 16+24+20=60, padded to 64
 
         # The "fixes" that should help
         'mask_self_attention': True,
         'evolve_sigma': True,
         'alibi_slope': -0.1,
-        'gauge_fixed_priors': True,  # This might be the issue!
+        'gauge_fixed_priors': True,  # THIS IS THE ISSUE!
 
         # Disable other position sources for clarity
         'use_positional_embedding': False,
@@ -50,7 +53,7 @@ def diagnose():
     # Simple test sequence
     token_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
     B, N = token_ids.shape
-    K = config['embed_dim']
+    K = config['embed_dim']  # 64
 
     print(f"\n[INPUT] Sequence shape: {token_ids.shape}, K={K}")
 
