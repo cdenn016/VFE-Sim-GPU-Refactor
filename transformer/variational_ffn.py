@@ -221,9 +221,10 @@ def _compute_vfe_gradients_block_diagonal(
             # Sigma alignment gradient for this block
             if compute_sigma_align_grad:
                 sigma_i_inv_block = torch.linalg.inv(sigma_i_block_diag)  # (B, C, d, d)
-                sigma_i_inv_exp = sigma_i_inv_block[:, :, None, :, :].expand(-1, -1, N, -1, -1)
+                # Use .clone() after expand to avoid view-related gradient issues
+                sigma_i_inv_exp = sigma_i_inv_block[:, :, None, :, :].expand(-1, -1, N, -1, -1).clone()
                 grad_sigma_block = 0.5 * (sigma_j_inv - sigma_i_inv_exp)
-                beta_chunk = beta[:, i_start:i_end, :]  # (B, C, N)
+                beta_chunk = beta[:, i_start:i_end, :].contiguous()  # (B, C, N)
                 grad_sigma_block_weighted = lambda_belief * torch.einsum('bij,bijkl->bikl', beta_chunk, grad_sigma_block)
                 grad_sigma_align[:, i_start:i_end, block_start:block_end, block_start:block_end] += grad_sigma_block_weighted
 
@@ -351,7 +352,8 @@ def _compute_vfe_gradients_chunked(
             # For softmax coupling, we need full KL values
             mahal = torch.einsum('bijk,bijk->bij', delta_mu_ij, grad_kl)
 
-            sigma_i_diag_exp = torch.diag_embed(sigma_i)[:, :, None, :, :].expand(-1, -1, n_j, -1, -1)
+            # Use .clone() after expand to avoid view-related gradient issues
+            sigma_i_diag_exp = torch.diag_embed(sigma_i)[:, :, None, :, :].expand(-1, -1, n_j, -1, -1).clone()
             trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_diag_exp))
 
             try:
@@ -360,7 +362,8 @@ def _compute_vfe_gradients_chunked(
             except RuntimeError:
                 logdet_p = torch.zeros(B, n_i, n_j, device=device, dtype=dtype)
 
-            logdet_q = torch.sum(torch.log(sigma_i), dim=-1)[:, :, None].expand(-1, -1, n_j)
+            # Use .clone() after expand to avoid view-related gradient issues
+            logdet_q = torch.sum(torch.log(sigma_i), dim=-1)[:, :, None].expand(-1, -1, n_j).clone()
 
             kl_chunk = 0.5 * (trace_term + mahal - K + logdet_p - logdet_q).clamp(min=0.0)
 
@@ -380,7 +383,8 @@ def _compute_vfe_gradients_chunked(
                 # Use .clone() to avoid view-related gradient issues
                 sigma_j_inv_diag = torch.diagonal(sigma_j_inv, dim1=-2, dim2=-1).clone()
                 sigma_i_inv = 1.0 / sigma_i
-                sigma_i_inv_exp = sigma_i_inv[:, :, None, :].expand(-1, -1, n_j, -1)
+                # Use .clone() after expand to avoid view-related gradient issues
+                sigma_i_inv_exp = sigma_i_inv[:, :, None, :].expand(-1, -1, n_j, -1).clone()
                 grad_sigma_pair = 0.5 * (sigma_j_inv_diag - sigma_i_inv_exp)
                 grad_sigma_align[:, i_start:i_end] += lambda_belief * torch.einsum(
                     'bij,bijk->bik', beta_chunk, grad_sigma_pair
@@ -584,7 +588,8 @@ def compute_vfe_gradients_gpu(
         # Trace term: tr(Σ_j_transported^{-1} @ Σ_i)
         # Σ_i is diagonal: diag(σ_q[i]) expanded to all pairs
         sigma_i_diag = torch.diag_embed(sigma_q.clamp(min=eps))  # (B, N, K, K)
-        sigma_i_expanded = sigma_i_diag[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
+        # Use .clone() after expand to avoid view-related gradient issues
+        sigma_i_expanded = sigma_i_diag[:, :, None, :, :].expand(-1, -1, N, -1, -1).clone()  # (B, N, N, K, K)
         trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_expanded))
 
         # Log-determinant terms
@@ -599,7 +604,8 @@ def compute_vfe_gradients_gpu(
             logdet_j_t = torch.sum(torch.log(eigvals.clamp(min=eps)), dim=-1)  # (B, N, N)
         # For source covariance (diagonal): log|diag(σ)| = sum(log(σ))
         logdet_i = torch.sum(torch.log(sigma_q.clamp(min=eps)), dim=-1)  # (B, N)
-        logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
+        # Use .clone() after expand to avoid view-related gradient issues
+        logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N).clone()  # (B, N, N)
 
         # Full KL divergence
         kl_values = 0.5 * (trace_term + mahal_term - K + logdet_j_t - logdet_i_expanded)
@@ -644,7 +650,8 @@ def compute_vfe_gradients_gpu(
 
             # Inverse of diagonal Σ_i: 1/σ_i expanded for all pairs
             sigma_i_inv = 1.0 / sigma_q.clamp(min=eps)  # (B, N, K)
-            sigma_i_inv_expanded = sigma_i_inv[:, :, None, :].expand(-1, -1, N, -1)  # (B, N, N, K)
+            # Use .clone() after expand to avoid view-related gradient issues
+            sigma_i_inv_expanded = sigma_i_inv[:, :, None, :].expand(-1, -1, N, -1).clone()  # (B, N, N, K)
 
             # Gradient per pair: 0.5 * (Σ_j_transported^{-1}_kk - 1/σ_i[k])
             grad_sigma_per_pair = 0.5 * (sigma_j_inv_diag - sigma_i_inv_expanded)  # (B, N, N, K)
@@ -689,7 +696,8 @@ def compute_vfe_gradients_gpu(
         mahal_term = torch.einsum('bijk,bijk->bij', delta_mu_ij, grad_kl_per_pair)  # (B, N, N)
 
         # Trace term: tr(Σ_j_transported^{-1} @ Σ_i)
-        sigma_i_expanded = sigma_q[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
+        # Use .clone() after expand to avoid view-related gradient issues
+        sigma_i_expanded = sigma_q[:, :, None, :, :].expand(-1, -1, N, -1, -1).clone()  # (B, N, N, K, K)
         trace_term = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_expanded))
 
         # Log-determinant terms using Cholesky with fallback
@@ -707,7 +715,8 @@ def compute_vfe_gradients_gpu(
         except RuntimeError:
             eigvals = torch.linalg.eigvalsh(sigma_i_reg)
             logdet_i = torch.sum(torch.log(eigvals.clamp(min=eps)), dim=-1)
-        logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N)  # (B, N, N)
+        # Use .clone() after expand to avoid view-related gradient issues
+        logdet_i_expanded = logdet_i[:, :, None].expand(-1, -1, N).clone()  # (B, N, N)
 
         # Full KL divergence
         kl_values = 0.5 * (trace_term + mahal_term - K + logdet_j_t - logdet_i_expanded)
@@ -731,7 +740,8 @@ def compute_vfe_gradients_gpu(
         # =================================================================
         if compute_sigma_align_grad:
             # Use Σ_i^{-1} computed earlier in self-coupling section (sigma_q_inv)
-            sigma_i_inv_expanded = sigma_q_inv[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
+            # Use .clone() after expand to avoid view-related gradient issues
+            sigma_i_inv_expanded = sigma_q_inv[:, :, None, :, :].expand(-1, -1, N, -1, -1).clone()  # (B, N, N, K, K)
 
             # Gradient per pair: 0.5 * (Σ_j_transported^{-1} - Σ_i^{-1})
             grad_sigma_per_pair = 0.5 * (sigma_j_inv - sigma_i_inv_expanded)  # (B, N, N, K, K)
@@ -1703,9 +1713,9 @@ class VariationalFFNDynamic(nn.Module):
 
         N = min(seq_len, self.max_seq_len)
 
-        # Expand priors across batch
-        mu_prior = self.prior_mu[:N].unsqueeze(0).expand(batch_size, -1, -1)
-        sigma_prior = self.prior_sigma[:N].unsqueeze(0).expand(batch_size, -1, -1)
+        # Expand priors across batch - use .clone() to avoid view issues
+        mu_prior = self.prior_mu[:N].unsqueeze(0).expand(batch_size, -1, -1).clone()
+        sigma_prior = self.prior_sigma[:N].unsqueeze(0).expand(batch_size, -1, -1).clone()
 
         # Handle sequences longer than max_seq_len (pad with defaults)
         if seq_len > self.max_seq_len:
