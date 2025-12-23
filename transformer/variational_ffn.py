@@ -1265,8 +1265,6 @@ class VariationalFFNDynamic(nn.Module):
         n_iterations: int = 10,    # VFE descent steps (more steps = deeper equilibration)
         learnable_lr: bool = True, # Learn step size?
         update_sigma: bool = True, # Update covariances?
-        m_step_interval: int = 0,  # M-step every N steps (0 = no M-step)
-        m_step_rate: float = 0.01, # Prior update rate toward beliefs
         diagonal_covariance: bool = False,  # Use diagonal Σ for efficiency
         compute_sigma_align_grad: bool = True,  # Compute sigma gradient from alignment term
         # Phi (gauge frame) evolution via VFE gradients
@@ -1293,8 +1291,6 @@ class VariationalFFNDynamic(nn.Module):
             n_iterations: Number of VFE descent iterations per forward pass
             learnable_lr: If True, step size η is a learnable parameter
             update_sigma: If True, also update covariance matrices Σ
-            m_step_interval: Run M-step every N iterations (0 = disabled)
-            m_step_rate: How fast priors move toward beliefs in M-step
             diagonal_covariance: Use diagonal Σ for O(K) instead of O(K²)
             compute_sigma_align_grad: If True, compute sigma gradient from alignment term
             max_seq_len: Maximum sequence length for persistent priors (pure FEP mode)
@@ -1326,10 +1322,6 @@ class VariationalFFNDynamic(nn.Module):
         self.alpha = alpha
         self.lambda_belief = lambda_belief
         self.kappa = kappa
-
-        # M-step configuration
-        self.m_step_interval = m_step_interval
-        self.m_step_rate = m_step_rate
 
         # Pure FEP mode: learning via prior evolution
         self.pure_fep_mode = pure_fep_mode
@@ -1561,15 +1553,8 @@ class VariationalFFNDynamic(nn.Module):
                         eps=eps,
                     )
 
-            # =================================================================
-            # STEP 5: Optional M-step (prior update)
-            # =================================================================
-            if self.m_step_interval > 0 and (iteration + 1) % self.m_step_interval == 0:
-                # Move priors toward beliefs
-                mu_p_current = mu_p_current + self.m_step_rate * (mu_current.detach() - mu_p_current)
-
         # =================================================================
-        # STEP 6: Optional Phi Evolution via VFE Gradient
+        # STEP 5: Optional Phi Evolution via VFE Gradient
         # =================================================================
         # This is the PRINCIPLED approach: φ evolves via ∂F/∂φ, not a neural net.
         # The belief alignment term F_align = λ·Σ β_ij KL(q_i || Ω_ij[q_j])
@@ -1806,8 +1791,7 @@ class VariationalFFNDynamic(nn.Module):
     def extra_repr(self) -> str:
         base = (
             f"embed_dim={self.embed_dim}, n_iterations={self.n_iterations}, "
-            f"alpha={self.alpha}, lambda_belief={self.lambda_belief}, kappa={self.kappa}, "
-            f"m_step_interval={self.m_step_interval}"
+            f"alpha={self.alpha}, lambda_belief={self.lambda_belief}, kappa={self.kappa}"
         )
         if self.pure_fep_mode:
             base += f", pure_fep_mode=True, prior_lr={self.prior_lr}"

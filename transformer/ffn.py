@@ -39,9 +39,6 @@ class GaugeFFN(nn.Module):
         generators: Optional[torch.Tensor] = None,  # (3, K, K)
         dropout: float = 0.1,
         mode: Literal['VFE_dynamic'] = 'VFE_dynamic',
-        # Dynamic VFE specific parameters
-        vfe_dynamic_m_step_interval: int = 0,  # M-step every N steps (0 = disabled)
-        vfe_dynamic_m_step_rate: float = 0.01,  # Prior update rate
         # Variational parameters
         alpha: float = 0.001,
         kappa: float = 1.0,
@@ -75,8 +72,6 @@ class GaugeFFN(nn.Module):
             generators: SO(3) generators (3, K, K) - required
             dropout: Dropout rate (unused, kept for API compatibility)
             mode: FFN mode - only 'VFE_dynamic' is supported
-            vfe_dynamic_m_step_interval: M-step every N steps (0 = disabled)
-            vfe_dynamic_m_step_rate: Prior update rate for M-step
             alpha: Prior weight
             kappa: Softmax temperature for attention
             n_iterations: VFE inference steps per forward pass
@@ -112,8 +107,6 @@ class GaugeFFN(nn.Module):
             n_iterations=n_iterations,
             learnable_lr=learnable_lr,
             update_sigma=update_sigma,
-            m_step_interval=vfe_dynamic_m_step_interval,
-            m_step_rate=vfe_dynamic_m_step_rate,
             diagonal_covariance=diagonal_covariance,
             compute_sigma_align_grad=compute_sigma_align_grad,
             # Pure FEP mode parameters
