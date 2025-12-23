@@ -2283,7 +2283,27 @@ class IrrepMultiHeadAttention(nn.Module):
 
         For full covariance (B, N, K, K): extracts diagonal blocks
         For diagonal (B, N, K): extracts slices
+
+        Handles mismatches between expected and actual sigma format by converting
+        between diagonal and full covariance representations.
         """
+        # Squeeze trailing singleton dimensions first
+        while sigma.dim() > 3 and sigma.shape[-1] == 1:
+            sigma = sigma.squeeze(-1)
+
+        # Detect actual sigma format based on shape
+        sigma_is_diagonal = sigma.dim() == 3
+
+        # Handle format mismatches
+        if self.diagonal_covariance and not sigma_is_diagonal:
+            # Attention expects diagonal (B, N, K) but got full covariance (B, N, K, K)
+            # Extract diagonal from full covariance matrix
+            sigma = torch.diagonal(sigma, dim1=-2, dim2=-1)  # (B, N, K, K) -> (B, N, K)
+        elif not self.diagonal_covariance and sigma_is_diagonal:
+            # Attention expects full (B, N, K, K) but got diagonal (B, N, K)
+            # Convert diagonal to full covariance
+            sigma = torch.diag_embed(sigma)  # (B, N, K) -> (B, N, K, K)
+
         blocks = []
         start_idx = 0
         for dim in self.irrep_dims:
