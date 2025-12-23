@@ -157,13 +157,14 @@ def _compute_vfe_gradients_block_diagonal(
         for block_idx, d in enumerate(irrep_dims):
             block_end = block_start + d
 
-            # Extract block beliefs
-            mu_block = mu_q[:, :, block_start:block_end]  # (B, N, d)
-            sigma_block = sigma_q[:, :, block_start:block_end, block_start:block_end]  # (B, N, d, d)
+            # Extract block beliefs - use .contiguous() to create copies and avoid
+            # inplace modification errors during backward pass
+            mu_block = mu_q[:, :, block_start:block_end].contiguous()  # (B, N, d)
+            sigma_block = sigma_q[:, :, block_start:block_end, block_start:block_end].contiguous()  # (B, N, d, d)
 
-            # Get chunked exponentials for query positions
-            exp_phi_i = block_exp_phi[block_idx][:, i_start:i_end]  # (B, C, d, d)
-            exp_neg_phi_j = block_exp_neg_phi[block_idx]  # (B, N, d, d)
+            # Get chunked exponentials for query positions - use .contiguous() for same reason
+            exp_phi_i = block_exp_phi[block_idx][:, i_start:i_end].contiguous()  # (B, C, d, d)
+            exp_neg_phi_j = block_exp_neg_phi[block_idx].contiguous()  # (B, N, d, d)
 
             # Compute Omega for this chunk: (B, C, N, d, d)
             Omega_chunk = torch.einsum(
@@ -185,8 +186,8 @@ def _compute_vfe_gradients_block_diagonal(
             sigma_j_reg = sigma_j_transported + eps * I_d
             sigma_j_inv = torch.linalg.inv(sigma_j_reg)  # (B, C, N, d, d)
 
-            # Delta mu for this block (query chunk)
-            mu_block_i = mu_block[:, i_start:i_end]  # (B, C, d)
+            # Delta mu for this block (query chunk) - contiguous to avoid view issues
+            mu_block_i = mu_block[:, i_start:i_end].contiguous()  # (B, C, d)
             delta_mu_block = mu_block_i[:, :, None, :] - mu_j_transported  # (B, C, N, d)
 
             # ∂KL_ij/∂μ_i for this block
@@ -196,7 +197,9 @@ def _compute_vfe_gradients_block_diagonal(
             # KL terms for this block
             mahal_block = torch.einsum('bijk,bijk->bij', delta_mu_block, grad_kl_block)  # (B, C, N)
 
-            sigma_i_block = sigma_block[:, i_start:i_end, None, :, :].expand(-1, -1, N, -1, -1)  # (B, C, N, d, d)
+            # Use contiguous slice and clone for expand to avoid view issues
+            sigma_i_block_slice = sigma_block[:, i_start:i_end].contiguous()  # (B, C, d, d)
+            sigma_i_block = sigma_i_block_slice[:, :, None, :, :].expand(-1, -1, N, -1, -1).clone()  # (B, C, N, d, d)
             trace_block = torch.einsum('bijkk->bij', torch.einsum('bijkl,bijlm->bijkm', sigma_j_inv, sigma_i_block))
 
             try:
@@ -205,7 +208,7 @@ def _compute_vfe_gradients_block_diagonal(
             except RuntimeError:
                 logdet_j = torch.zeros(B, C_actual, N, device=device, dtype=dtype)
 
-            sigma_i_block_diag = sigma_block[:, i_start:i_end] + eps * I_d  # (B, C, d, d)
+            sigma_i_block_diag = sigma_i_block_slice + eps * I_d  # (B, C, d, d)
             try:
                 L_i = torch.linalg.cholesky(sigma_i_block_diag)
                 logdet_i = 2.0 * torch.sum(torch.log(torch.diagonal(L_i, dim1=-2, dim2=-1) + eps), dim=-1)

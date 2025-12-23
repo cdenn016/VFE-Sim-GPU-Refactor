@@ -550,8 +550,9 @@ def _compute_kl_matrix_torch(
         # Skip expensive matrix exponentials - just use raw beliefs
         # μ_transported = μ_j (no rotation)
         # Σ_transported = Σ_j (no rotation)
-        mu_transported = mu_q[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
-        Sigma_transported = sigma_q[:, None, :, :, :].expand(-1, N, -1, -1, -1)  # (B, N, N, K, K)
+        # Use .clone() after expand to avoid view-related gradient issues
+        mu_transported = mu_q[:, None, :, :].expand(-1, N, -1, -1).clone()  # (B, N, N, K)
+        Sigma_transported = sigma_q[:, None, :, :, :].expand(-1, N, -1, -1, -1).clone()  # (B, N, N, K, K)
     else:
         if cached_transport is not None and 'Omega' in cached_transport:
             # Use precomputed transport operators (saves 2 matrix exponentials!)
@@ -581,9 +582,10 @@ def _compute_kl_matrix_torch(
 
     # =========================================================================
     # Step 3: Expand mu_i and Sigma_i for pairwise comparison
+    # Use .clone() after expand to avoid view-related gradient issues
     # =========================================================================
-    mu_i = mu_q[:, :, None, :].expand(-1, -1, N, -1)  # (B, N, N, K)
-    Sigma_i = sigma_q[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, K, K)
+    mu_i = mu_q[:, :, None, :].expand(-1, -1, N, -1).clone()  # (B, N, N, K)
+    Sigma_i = sigma_q[:, :, None, :, :].expand(-1, -1, N, -1, -1).clone()  # (B, N, N, K, K)
 
     # =========================================================================
     # Step 4: Compute all KL divergences
@@ -791,9 +793,9 @@ def _compute_kl_matrix_diagonal(
     # diag(Σ_j_transported)_k = Σ_l Ω_kl² * σ_j[l]
     # This is more accurate than just using σ_j, especially for non-identity Ω
     # =========================================================================
-    # σ_j expanded for all pairs: (B, N, N, K)
-    sigma_j_orig = sigma_q[:, None, :, :].expand(-1, N, -1, -1)  # (B, N, N, K)
-    sigma_i = sigma_q[:, :, None, :].expand(-1, -1, N, -1)  # (B, N, N, K)
+    # σ_j expanded for all pairs - use .clone() after expand to avoid view issues
+    sigma_j_orig = sigma_q[:, None, :, :].expand(-1, N, -1, -1).clone()  # (B, N, N, K)
+    sigma_i = sigma_q[:, :, None, :].expand(-1, -1, N, -1).clone()  # (B, N, N, K)
 
     # Compute diagonal of transported covariance: diag(Ω @ diag(σ_j) @ Ω^T)_k = Σ_l Ω_kl² * σ_j[l]
     # Omega: (B, N, N, K, K), sigma_j_orig: (B, N, N, K)
@@ -809,7 +811,7 @@ def _compute_kl_matrix_diagonal(
     # KL(q_i || transported q_j) where q_i ~ N(μ_i, diag(σ_i))
     # transported q_j ~ N(μ_j^{→i}, diag(σ_j_transported))
     # =========================================================================
-    mu_i = mu_q[:, :, None, :].expand(-1, -1, N, -1)  # (B, N, N, K)
+    mu_i = mu_q[:, :, None, :].expand(-1, -1, N, -1).clone()  # (B, N, N, K)
 
     # Trace term: sum(σ_i / σ_j_transported)
     trace_term = (sigma_i / sigma_j_transported_diag).sum(dim=-1)  # (B, N, N)
@@ -891,21 +893,21 @@ def _compute_kl_matrix_chunked(
         i_end = min(i_start + chunk_size, N)
         n_i = i_end - i_start
 
-        # Get exp_phi for i-chunk: (B, n_i, K, K)
-        exp_phi_i = exp_phi[:, i_start:i_end]
+        # Get exp_phi for i-chunk - use .contiguous() to avoid inplace modification errors
+        exp_phi_i = exp_phi[:, i_start:i_end].contiguous()  # (B, n_i, K, K)
 
-        # Get query beliefs for i-chunk
-        mu_i = mu_q[:, i_start:i_end]          # (B, n_i, K)
-        sigma_i = sigma_q[:, i_start:i_end]    # (B, n_i, K, K)
+        # Get query beliefs for i-chunk - use .contiguous() to create copies
+        mu_i = mu_q[:, i_start:i_end].contiguous()          # (B, n_i, K)
+        sigma_i = sigma_q[:, i_start:i_end].contiguous()    # (B, n_i, K, K)
         sigma_i_reg = sigma_i + eps * I
-        logdet_q_i = logdet_q_all[:, i_start:i_end]  # (B, n_i)
+        logdet_q_i = logdet_q_all[:, i_start:i_end].contiguous()  # (B, n_i)
 
         for j_start in range(0, N, chunk_size):
             j_end = min(j_start + chunk_size, N)
             n_j = j_end - j_start
 
-            # Get exp_neg_phi for j-chunk: (B, n_j, K, K)
-            exp_neg_phi_j = exp_neg_phi[:, j_start:j_end]
+            # Get exp_neg_phi for j-chunk - use .contiguous() to avoid inplace modification errors
+            exp_neg_phi_j = exp_neg_phi[:, j_start:j_end].contiguous()  # (B, n_j, K, K)
 
             # =================================================================
             # Compute Omega for this chunk only: (B, n_i, n_j, K, K)
@@ -915,9 +917,9 @@ def _compute_kl_matrix_chunked(
                 exp_phi_i, exp_neg_phi_j
             )  # (B, n_i, n_j, K, K)
 
-            # Get key beliefs for j-chunk
-            mu_j = mu_q[:, j_start:j_end]        # (B, n_j, K)
-            sigma_j = sigma_q[:, j_start:j_end]  # (B, n_j, K, K)
+            # Get key beliefs for j-chunk - use .contiguous() to create copies
+            mu_j = mu_q[:, j_start:j_end].contiguous()        # (B, n_j, K)
+            sigma_j = sigma_q[:, j_start:j_end].contiguous()  # (B, n_j, K, K)
 
             # =================================================================
             # Transport j's beliefs to i's frame
@@ -938,9 +940,9 @@ def _compute_kl_matrix_chunked(
             # =================================================================
             # Compute KL divergence for this chunk
             # =================================================================
-            # Expand mu_i and sigma_i for pairwise comparison
-            mu_i_exp = mu_i[:, :, None, :].expand(-1, -1, n_j, -1)  # (B, n_i, n_j, K)
-            sigma_i_exp = sigma_i_reg[:, :, None, :, :].expand(-1, -1, n_j, -1, -1)
+            # Expand mu_i and sigma_i for pairwise comparison - use .clone() after expand
+            mu_i_exp = mu_i[:, :, None, :].expand(-1, -1, n_j, -1).clone()  # (B, n_i, n_j, K)
+            sigma_i_exp = sigma_i_reg[:, :, None, :, :].expand(-1, -1, n_j, -1, -1).clone()
 
             Sigma_transported_reg = Sigma_transported + eps * I
 
@@ -1039,17 +1041,19 @@ def _compute_kl_matrix_diagonal_chunked(
         i_end = min(i_start + chunk_size, N)
         n_i = i_end - i_start
 
-        exp_phi_i = exp_phi[:, i_start:i_end]  # (B, n_i, K, K)
-        mu_i = mu_q[:, i_start:i_end]          # (B, n_i, K)
-        sigma_i = sigma_q[:, i_start:i_end]    # (B, n_i, K)
+        # Use .contiguous() to create copies and avoid inplace modification errors
+        exp_phi_i = exp_phi[:, i_start:i_end].contiguous()  # (B, n_i, K, K)
+        mu_i = mu_q[:, i_start:i_end].contiguous()          # (B, n_i, K)
+        sigma_i = sigma_q[:, i_start:i_end].contiguous()    # (B, n_i, K)
 
         for j_start in range(0, N, chunk_size):
             j_end = min(j_start + chunk_size, N)
             n_j = j_end - j_start
 
-            exp_neg_phi_j = exp_neg_phi[:, j_start:j_end]  # (B, n_j, K, K)
-            mu_j = mu_q[:, j_start:j_end]                   # (B, n_j, K)
-            sigma_j = sigma_q[:, j_start:j_end]             # (B, n_j, K)
+            # Use .contiguous() to create copies and avoid inplace modification errors
+            exp_neg_phi_j = exp_neg_phi[:, j_start:j_end].contiguous()  # (B, n_j, K, K)
+            mu_j = mu_q[:, j_start:j_end].contiguous()                   # (B, n_j, K)
+            sigma_j = sigma_q[:, j_start:j_end].contiguous()             # (B, n_j, K)
 
             # =================================================================
             # Compute Omega for this chunk: (B, n_i, n_j, K, K)
@@ -1070,7 +1074,8 @@ def _compute_kl_matrix_diagonal_chunked(
             # Compute diagonal of transported covariance
             # diag(Ω @ diag(σ_j) @ Ω^T)_k = Σ_l Ω_kl² * σ_j[l]
             # =================================================================
-            sigma_j_exp = sigma_j[:, None, :, :].expand(-1, n_i, -1, -1)  # (B, n_i, n_j, K)
+            # Use .clone() after expand to create copies and avoid view issues
+            sigma_j_exp = sigma_j[:, None, :, :].expand(-1, n_i, -1, -1).clone()  # (B, n_i, n_j, K)
             Omega_sq = Omega_chunk ** 2
             sigma_j_transported = torch.einsum(
                 'bijkl,bijl->bijk', Omega_sq, sigma_j_exp
@@ -1081,8 +1086,9 @@ def _compute_kl_matrix_diagonal_chunked(
             # =================================================================
             # Diagonal KL computation
             # =================================================================
-            mu_i_exp = mu_i[:, :, None, :].expand(-1, -1, n_j, -1)  # (B, n_i, n_j, K)
-            sigma_i_exp = sigma_i[:, :, None, :].expand(-1, -1, n_j, -1)  # (B, n_i, n_j, K)
+            # Use .clone() after expand to create copies and avoid view issues
+            mu_i_exp = mu_i[:, :, None, :].expand(-1, -1, n_j, -1).clone()  # (B, n_i, n_j, K)
+            sigma_i_exp = sigma_i[:, :, None, :].expand(-1, -1, n_j, -1).clone()  # (B, n_i, n_j, K)
 
             # Trace term: sum(σ_i / σ_j_transported)
             trace_term = (sigma_i_exp / sigma_j_transported).sum(dim=-1)
@@ -1212,12 +1218,13 @@ def _compute_kl_matrix_block_diagonal(
     for block_idx, d in enumerate(irrep_dims):
         block_end = block_start + d
 
-        # Extract block from beliefs
-        mu_block = mu_q[:, :, block_start:block_end]  # (B, N, d)
-        sigma_block = sigma_q[:, :, block_start:block_end, block_start:block_end]  # (B, N, d, d)
+        # Extract block from beliefs - use .contiguous() to create copies and avoid
+        # inplace modification errors during backward pass
+        mu_block = mu_q[:, :, block_start:block_end].contiguous()  # (B, N, d)
+        sigma_block = sigma_q[:, :, block_start:block_end, block_start:block_end].contiguous()  # (B, N, d, d)
 
-        # Extract block from generators
-        gen_block = generators[:, block_start:block_end, block_start:block_end]  # (n_gen, d, d)
+        # Extract block from generators - contiguous for consistency
+        gen_block = generators[:, block_start:block_end, block_start:block_end].contiguous()  # (n_gen, d, d)
 
         # =====================================================================
         # Compute block-wise transport operators
@@ -1256,9 +1263,10 @@ def _compute_kl_matrix_block_diagonal(
         # =====================================================================
         I_block = torch.eye(d, device=device, dtype=dtype)
 
-        # Expand for pairwise comparison
-        mu_block_i = mu_block[:, :, None, :].expand(-1, -1, N, -1)  # (B, N, N, d)
-        sigma_block_i = sigma_block[:, :, None, :, :].expand(-1, -1, N, -1, -1)  # (B, N, N, d, d)
+        # Expand for pairwise comparison - use .clone() after expand to create copies
+        # and avoid view-related gradient issues
+        mu_block_i = mu_block[:, :, None, :].expand(-1, -1, N, -1).clone()  # (B, N, N, d)
+        sigma_block_i = sigma_block[:, :, None, :, :].expand(-1, -1, N, -1, -1).clone()  # (B, N, N, d, d)
 
         sigma_block_i_reg = sigma_block_i + eps * I_block
         sigma_block_transported_reg = sigma_block_transported + eps * I_block
@@ -1382,18 +1390,19 @@ def _compute_kl_matrix_block_diagonal_chunked(
             for block_idx, d in enumerate(irrep_dims):
                 block_end = block_start + d
 
-                # Get precomputed exponentials for this chunk
-                exp_phi_i = block_exp_phi[block_idx][:, i_start:i_end]      # (B, n_i, d, d)
-                exp_neg_phi_j = block_exp_neg_phi[block_idx][:, j_start:j_end]  # (B, n_j, d, d)
+                # Get precomputed exponentials for this chunk - use .contiguous() to avoid
+                # inplace modification errors during backward pass
+                exp_phi_i = block_exp_phi[block_idx][:, i_start:i_end].contiguous()      # (B, n_i, d, d)
+                exp_neg_phi_j = block_exp_neg_phi[block_idx][:, j_start:j_end].contiguous()  # (B, n_j, d, d)
 
                 # Compute Omega for this block-chunk: (B, n_i, n_j, d, d)
                 Omega_block = torch.einsum('bikl,bjlm->bijkm', exp_phi_i, exp_neg_phi_j)
 
-                # Extract beliefs for this block-chunk
-                mu_i = mu_q[:, i_start:i_end, block_start:block_end]  # (B, n_i, d)
-                mu_j = mu_q[:, j_start:j_end, block_start:block_end]  # (B, n_j, d)
-                sigma_i = sigma_q[:, i_start:i_end, block_start:block_end, block_start:block_end]
-                sigma_j = sigma_q[:, j_start:j_end, block_start:block_end, block_start:block_end]
+                # Extract beliefs for this block-chunk - use .contiguous() to create copies
+                mu_i = mu_q[:, i_start:i_end, block_start:block_end].contiguous()  # (B, n_i, d)
+                mu_j = mu_q[:, j_start:j_end, block_start:block_end].contiguous()  # (B, n_j, d)
+                sigma_i = sigma_q[:, i_start:i_end, block_start:block_end, block_start:block_end].contiguous()
+                sigma_j = sigma_q[:, j_start:j_end, block_start:block_end, block_start:block_end].contiguous()
 
                 # Transport
                 mu_transported = torch.einsum('bijkl,bjl->bijk', Omega_block, mu_j)
@@ -1404,10 +1413,10 @@ def _compute_kl_matrix_block_diagonal_chunked(
 
                 del Omega_block
 
-                # Compute KL for this block
+                # Compute KL for this block - use .clone() after expand to create copies
                 I_d = torch.eye(d, device=device, dtype=dtype)
-                mu_i_exp = mu_i[:, :, None, :].expand(-1, -1, n_j, -1)
-                sigma_i_exp = sigma_i[:, :, None, :, :].expand(-1, -1, n_j, -1, -1)
+                mu_i_exp = mu_i[:, :, None, :].expand(-1, -1, n_j, -1).clone()
+                sigma_i_exp = sigma_i[:, :, None, :, :].expand(-1, -1, n_j, -1, -1).clone()
 
                 sigma_i_reg = sigma_i_exp + eps * I_d
                 sigma_transported_reg = sigma_transported + eps * I_d
