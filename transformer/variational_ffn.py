@@ -453,6 +453,12 @@ def compute_vfe_gradients_gpu(
         grad_mu: Gradient w.r.t. μ_q, shape (B, N, K)
         grad_sigma: Gradient w.r.t. σ_q, shape (B, N, K) for diagonal
     """
+    # Squeeze trailing singleton dimensions for robustness
+    while sigma_q.dim() > 3 and sigma_q.shape[-1] == 1:
+        sigma_q = sigma_q.squeeze(-1)
+    while sigma_p.dim() > 3 and sigma_p.shape[-1] == 1:
+        sigma_p = sigma_p.squeeze(-1)
+
     B, N, K = mu_q.shape
     device = mu_q.device
     dtype = mu_q.dtype
@@ -767,6 +773,10 @@ def compute_natural_gradient_gpu(
         nat_grad_mu: Natural gradient for μ
         nat_grad_sigma: Natural gradient for σ
     """
+    # Squeeze trailing singleton dimensions for robustness
+    while sigma_q.dim() > 3 and sigma_q.shape[-1] == 1:
+        sigma_q = sigma_q.squeeze(-1)
+
     is_diagonal = sigma_q.dim() == 3
 
     if is_diagonal:
@@ -1793,6 +1803,10 @@ class VariationalFFNDynamic(nn.Module):
             else:
                 sigma = 0.1 * torch.eye(K, device=device, dtype=dtype).unsqueeze(0).unsqueeze(0).expand(B, N, -1, -1).clone()
 
+        # Squeeze trailing singleton dimensions for robustness
+        while sigma.dim() > 3 and sigma.shape[-1] == 1:
+            sigma = sigma.squeeze(-1)
+
         is_diagonal = sigma.dim() == 3
 
         # =====================================================================
@@ -2406,6 +2420,10 @@ class VariationalFFNDynamicStable(nn.Module):
                 sigma = torch.ones(B, N, K, device=device, dtype=dtype) * 0.1
             else:
                 sigma = 0.1 * torch.eye(K, device=device, dtype=dtype).unsqueeze(0).unsqueeze(0).expand(B, N, -1, -1).clone()
+
+        # Squeeze trailing singleton dimensions for robustness
+        while sigma.dim() > 3 and sigma.shape[-1] == 1:
+            sigma = sigma.squeeze(-1)
 
         is_diagonal = sigma.dim() == 3
         sigma_p = sigma.clone()
