@@ -417,6 +417,8 @@ def compute_attention_weights(
         # instead of 0, equivalent to having KL = penalty * kappa for self-attention
         B, N, _ = logits.shape
         diag_idx = torch.arange(N, device=logits.device)
+        # Clone to avoid inplace modification (needed for gradient computation)
+        logits = logits.clone()
         logits[:, diag_idx, diag_idx] = logits[:, diag_idx, diag_idx] - self_attention_penalty
 
     # Apply causal mask if provided (BEFORE self-attention masking)
@@ -439,14 +441,16 @@ def compute_attention_weights(
         # Check which positions have at least one other valid target
         # A position has other targets if any off-diagonal element is not -inf
         has_other_targets = (logits != float('-inf')).sum(dim=-1) > 1  # (B, N)
-        # Create mask: only mask diagonal where there are other targets
-        mask_diag = has_other_targets  # (B, N)
-        # Apply masking only where safe
-        logits[:, diag_idx, diag_idx] = torch.where(
-            mask_diag,
-            torch.full_like(logits[:, diag_idx, diag_idx], float('-inf')),
-            logits[:, diag_idx, diag_idx]
+        # Clone to avoid inplace modification (needed for gradient computation)
+        logits = logits.clone()
+        # Apply masking only where safe (where there are other targets)
+        diag_vals = logits[:, diag_idx, diag_idx]  # (B, N)
+        masked_diag_vals = torch.where(
+            has_other_targets,
+            torch.full_like(diag_vals, float('-inf')),
+            diag_vals
         )
+        logits[:, diag_idx, diag_idx] = masked_diag_vals
 
     # Softmax over keys (dimension 2)
     beta = F.softmax(logits, dim=-1)  # (B, N, N)
