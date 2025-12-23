@@ -109,6 +109,8 @@ class GaugeTransformerBlock(nn.Module):
         alibi_slope: Optional[float] = None,  # If set, adds slope*(i-j) to attention logits
         # Identity transport mode
         use_identity_transport: bool = False,  # If True, Ω_ij = I (no gauge transport)
+        # Self-attention masking (prevents attention collapse)
+        mask_self_attention: bool = False,  # If True, mask out diagonal (no self-attention)
     ):
         """
         Initialize gauge transformer block.
@@ -134,6 +136,8 @@ class GaugeTransformerBlock(nn.Module):
             ffn_pure_fep_mode: If True, use persistent priors for backprop-free learning
             ffn_max_seq_len: Max sequence length for persistent priors (pure FEP mode)
             ffn_prior_lr: Learning rate for prior updates (pure FEP mode)
+            mask_self_attention: If True, mask out diagonal (no self-attention).
+                                Prevents attention collapse since KL(q_i||q_i)=0 always.
         """
         super().__init__()
         self.embed_dim = embed_dim
@@ -181,6 +185,7 @@ class GaugeTransformerBlock(nn.Module):
             global_generators=generators,  # Pass for SO(N) mode
             alibi_slope=alibi_slope,
             use_identity_transport=use_identity_transport,
+            mask_self_attention=mask_self_attention,
         )
 
         # Conditionally create LayerNorm and Dropout (disabled for pure VFE)
@@ -216,6 +221,8 @@ class GaugeTransformerBlock(nn.Module):
             # Memory-efficient options
             irrep_dims=ffn_irrep_dims,
             chunk_size=ffn_chunk_size,
+            # Self-attention masking (same as attention)
+            mask_self_attention=mask_self_attention,
         )
 
         self.norm2 = nn.LayerNorm(embed_dim) if use_layernorm else nn.Identity()
@@ -412,6 +419,8 @@ class GaugeTransformerStack(nn.Module):
         alibi_slope: Optional[float] = None,  # If set, adds slope*(i-j) to attention logits
         # Identity transport mode
         use_identity_transport: bool = False,  # If True, Ω_ij = I (no gauge transport)
+        # Self-attention masking (prevents attention collapse)
+        mask_self_attention: bool = False,  # If True, mask out diagonal (no self-attention)
     ):
         """
         Initialize stack of transformer blocks.
@@ -442,6 +451,8 @@ class GaugeTransformerStack(nn.Module):
             use_layernorm: If True, apply LayerNorm (default False for pure VFE)
             use_dropout: If True, apply Dropout (default False for pure VFE)
             use_residual: If True, use residual connections (default False for pure VFE)
+            mask_self_attention: If True, mask out diagonal (no self-attention).
+                                Prevents attention collapse since KL(q_i||q_i)=0 always.
         """
         super().__init__()
         self.n_layers = n_layers
@@ -489,6 +500,8 @@ class GaugeTransformerStack(nn.Module):
                 alibi_slope=alibi_slope,
                 # Identity transport
                 use_identity_transport=use_identity_transport,
+                # Self-attention masking
+                mask_self_attention=mask_self_attention,
             )
             for _ in range(n_layers)
         ])
