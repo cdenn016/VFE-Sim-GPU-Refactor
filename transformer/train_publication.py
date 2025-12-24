@@ -308,7 +308,6 @@ GPU_OPTIMIZED_CONFIG = {
     'kappa_beta_auto_scale': True,   # Enable automatic κ scaling with K
     'kappa_beta_base': 1.0,          # Base temperature at K=K_ref
     'kappa_beta_k_ref': 11,          # Reference dimension (K=11 works with κ=1)
-    'epsilon': 1e-8,
     'pos_encoding_mode': 'learned',   #'learned' or 'sinusoidal'
     'evolve_sigma': True,     # Full geometric learning
     'evolve_phi': True,       # Full geometric learning
@@ -329,23 +328,6 @@ GPU_OPTIMIZED_CONFIG = {
     'attention_window': 24,
     
     # =========================================================================
-    # SIGMA GRADIENT FROM ALIGNMENT (theoretical correctness vs legacy)
-    # True (default): Compute ∂KL/∂Σ = 0.5*(Σ_transported^{-1} - Σ^{-1})
-    # False:  zero sigma gradient from alignment term
-    # Setting True enables proper uncertainty propagation through gauge transport.
-    # =========================================================================
-    'compute_sigma_align_grad': True,
-    
-    # =========================================================================
-    # FAST MATRIX EXPONENTIAL (speed optimization)
-    # True:  Use Taylor series approximation for exp(φ·G) - faster but approximate
-    # False: Use torch.matrix_exp - accurate but slower
-    # Taylor is accurate for small angles |φ| < 0.5, use with phi_scale < 0.3
-    # =========================================================================
-    'use_fast_exp': True,
-    'exp_order': 4,  # Taylor series order when use_fast_exp=True
-
-    # =========================================================================
     # DIAGONAL COVARIANCE MODE (memory optimization)
     # True:  Σ is (B,N,K) diagonal - O(N²×K) memory - can scale to Vaswani size?
     # False: Σ is (B,N,K,K) full   - O(N²×K²) memory - limited to small K,N
@@ -353,17 +335,6 @@ GPU_OPTIMIZED_CONFIG = {
     # =========================================================================
     'diagonal_covariance': False,
     'use_positional_embedding': True,
-
-    # =========================================================================
-    # BLOCK-DIAGONAL KL COMPUTATION (Principled Memory Optimization)
-    # When use_block_diagonal_kl=True, exploits the irrep structure:
-    # - Generators are block-diagonal → Omega is block-diagonal
-    # - KL decomposes additively across blocks
-    # - Memory: O(N² × Σᵢdᵢ²) instead of O(N² × K²)
-    # For K=255 with 75×ℓ₀ + 30×ℓ₁ + 18×ℓ₂: ~82× memory savings!
-    # This is the PRINCIPLED approach that respects gauge structure.
-    # =========================================================================
-    'use_block_diagonal_kl': True,  # Enable block-diagonal KL (recommended!)
 
     # =========================================================================
     # CHUNKED KL COMPUTATION (Additional Memory Optimization)

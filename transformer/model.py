@@ -299,7 +299,7 @@ class GaugeTransformerLM(nn.Module):
             ffn_max_seq_len=ffn_max_seq_len,
             ffn_prior_lr=ffn_prior_lr,
             # Memory-efficient options
-            ffn_irrep_dims=self._compute_irrep_dims(irrep_spec) if config.get('use_block_diagonal_kl', False) else None,
+            ffn_irrep_dims=self._compute_irrep_dims(irrep_spec) if config.get('use_block_diagonal_kl', True) else None,
             ffn_chunk_size=config.get('ffn_chunk_size', None),
             # Pure VFE mode: disable ad-hoc transformer components
             use_layernorm=config.get('use_layernorm', False),
