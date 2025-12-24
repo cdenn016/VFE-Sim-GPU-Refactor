@@ -2900,7 +2900,7 @@ class PureFEPTrainer:
             total_tokens += targets.numel()
 
         avg_loss = total_loss / total_tokens
-        ppl = math.exp(avg_loss)
+        ppl = math.exp(min(avg_loss, 20))  # Clamp to prevent overflow
 
         return {'loss': avg_loss, 'perplexity': ppl}
 

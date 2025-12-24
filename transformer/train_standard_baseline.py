@@ -108,7 +108,7 @@ class StandardMetricsTracker:
 
         # Bits per character
         train_bpc = train_ce / math.log(2)
-        train_ppl = math.exp(train_ce)
+        train_ppl = math.exp(min(train_ce, 20))  # Clamp to prevent overflow
 
         entry = {
             'step': step,
@@ -159,7 +159,7 @@ class StandardMetricsTracker:
             if entry['step'] == step:
                 entry['val_loss'] = val_loss
                 entry['val_ce'] = val_ce
-                entry['val_ppl'] = math.exp(val_ce)
+                entry['val_ppl'] = math.exp(min(val_ce, 20))  # Clamp to prevent overflow
                 entry['val_bpc'] = val_ce / math.log(2)
                 break
 

@@ -735,7 +735,7 @@ class PublicationTrainer(FastTrainer):
             'train_loss_belief_align': full_metrics.get('loss/belief_align', 0),
             'train_loss_self_consistency': full_metrics.get('loss/self_consistency', 0),
             'train_loss_model_align': full_metrics.get('loss/model_align', 0),
-            'train_ppl': math.exp(full_metrics['loss/ce']),
+            'train_ppl': math.exp(min(full_metrics['loss/ce'], 20)),  # Clamp to prevent overflow
             'beta_mean': full_metrics.get('attention/beta_mean', 0),
             'beta_std': 0,  # Could compute if needed
             'kl_mean': full_metrics.get('attention/kl_mean', 0),
