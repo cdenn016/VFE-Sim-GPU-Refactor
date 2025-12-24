@@ -313,7 +313,17 @@ GPU_OPTIMIZED_CONFIG = {
     'evolve_sigma': True,     # Full geometric learning
     'evolve_phi': True,       # Full geometric learning
     'tie_embeddings': False,
-  
+
+    # =========================================================================
+    # EMBEDDING MEAN (μ) INITIALIZATION
+    # Controls the scale and normalization of belief mean embeddings.
+    # Larger init_std creates more variance in pairwise distances, enabling
+    # sharper KL-based attention. Normalization projects to unit sphere.
+    # =========================================================================
+    'mu_init_std': 2.0,       # Embedding init std (None = use default 1/√K)
+    'mu_normalize': False,    # If True, normalize μ to unit sphere after lookup
+    'mu_max_norm': None,      # If set, clamp ||μ|| ≤ max_norm (e.g., 20.0)
+
     # Attention pattern
     'attention_pattern': 'full',   #'full', 'local', 'sparse' 
     'attention_window': 24,

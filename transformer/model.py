@@ -228,9 +228,9 @@ class GaugeTransformerLM(nn.Module):
             vocab_size=vocab_size,
             embed_dim=embed_dim,
             irrep_spec=irrep_spec,
-            init_std=None,  # Use default 1/sqrt(embed_dim) for O(1) KL
+            init_std=config.get('mu_init_std', None),  # Embedding init std (None = default 2.0)
             init_sigma_scale=1.0,  # Scaled to match init_std for O(1) KL
-            learnable_sigma=False,  # Keep simple for now
+            learnable_sigma=config.get('evolve_sigma', False),  # Learn per-token covariances
             learnable_phi=True,  # Always learn phi for gauge structure. Required for non-trivial transport Ω_ij.
             gauge_fixed_priors=gauge_fixed_priors,
             generators=self.generators,  # Always pass generators for gauge transport
@@ -238,6 +238,9 @@ class GaugeTransformerLM(nn.Module):
             max_seq_len=max_seq_len,
             use_positional_embedding=use_positional_embedding,
             phi_dim=self.phi_dim,  # SO(3): 3, SO(N): N(N-1)/2
+            # Mean embedding normalization options
+            mu_normalize=config.get('mu_normalize', False),
+            mu_max_norm=config.get('mu_max_norm', None),
         )
 
         # =================================================================

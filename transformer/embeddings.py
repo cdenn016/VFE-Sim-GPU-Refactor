@@ -52,7 +52,7 @@ class GaugeTokenEmbedding(nn.Module):
         vocab_size: int,
         embed_dim: int,
         irrep_spec: list = None,
-        init_std: float = None,  # Default: 1/sqrt(embed_dim) for O(1) KL
+        init_std: float = None,  # Default: 2.0 for sharper attention
         init_sigma_scale: float = 1.0,  # Scaled to match init_std for O(1) KL
         learnable_sigma: bool = False,
         learnable_phi: bool = False,
@@ -62,6 +62,9 @@ class GaugeTokenEmbedding(nn.Module):
         max_seq_len: int = 2048,
         use_positional_embedding: bool = False,
         phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
+        # Mean embedding normalization options
+        mu_normalize: bool = False,  # If True, project μ to unit sphere
+        mu_max_norm: Optional[float] = None,  # If set, clamp ||μ|| ≤ max_norm
     ):
         """
         Initialize gauge token embedding.
@@ -102,6 +105,10 @@ class GaugeTokenEmbedding(nn.Module):
         if init_std is None:
             init_std = 2.0  # Was: 1.0 / np.sqrt(embed_dim) ≈ 0.15 for K=40
         self.init_std = init_std
+
+        # Mean embedding normalization options
+        self.mu_normalize = mu_normalize
+        self.mu_max_norm = mu_max_norm
 
         # CRITICAL: diagonal_covariance is incompatible with gauge_fixed_priors!
         # When gauge_fixed_priors=True, Σ_i = R_i Σ_0 R_i^T produces a FULL matrix
@@ -285,6 +292,18 @@ class GaugeTokenEmbedding(nn.Module):
             positions = torch.arange(num_agents, device=token_ids.device)  # (N,)
             pos_emb = self.pos_embed(positions)  # (N, K)
             mu = mu + pos_emb.unsqueeze(0)  # (B, N, K) + (1, N, K) -> (B, N, K)
+
+        # =================================================================
+        # Apply μ normalization/clamping (for sharper KL-based attention)
+        # =================================================================
+        if self.mu_normalize:
+            # Project to unit sphere: ||μ|| = 1
+            mu = torch.nn.functional.normalize(mu, dim=-1)
+        elif self.mu_max_norm is not None:
+            # Clamp norm: ||μ|| ≤ max_norm (like gradient clipping for embeddings)
+            mu_norm = mu.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            scale = torch.clamp(self.mu_max_norm / mu_norm, max=1.0)
+            mu = mu * scale
 
         return mu, sigma, phi
 
