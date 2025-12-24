@@ -95,10 +95,12 @@ class GaugeTokenEmbedding(nn.Module):
         self.learnable_phi = learnable_phi
         self.gauge_fixed_priors = gauge_fixed_priors
 
-        # Dimension-aware initialization: 1/sqrt(K) keeps ||μ||² = O(1)
-        # This ensures KL divergence is O(1) regardless of embed_dim
+        # Embedding initialization scale
+        # OLD: 1/sqrt(K) keeps ||μ||² = O(1) but makes all embeddings equidistant!
+        # NEW: Larger init_std creates more variance in pairwise distances,
+        #      enabling sharper KL-based attention from the start.
         if init_std is None:
-            init_std = 1.0 / np.sqrt(embed_dim)
+            init_std = 2.0  # Was: 1.0 / np.sqrt(embed_dim) ≈ 0.15 for K=40
         self.init_std = init_std
 
         # CRITICAL: diagonal_covariance is incompatible with gauge_fixed_priors!
