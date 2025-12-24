@@ -129,7 +129,7 @@ def create_attention_mask(
 def compute_transport_operators(
     phi: torch.Tensor,         # (B, N, n_gen) gauge frames where n_gen is # of generators
     generators: torch.Tensor,  # (n_gen, K, K) Lie algebra generators
-    use_fast_exp: bool = False,  # Use Taylor approximation for small angles
+    use_fast_exp: bool = True,   # Use Taylor approximation for small angles (default True)
     exp_order: int = 4,          # Order of Taylor expansion (if use_fast_exp=True)
 ) -> dict:
     """
@@ -1990,7 +1990,7 @@ class IrrepMultiHeadAttention(nn.Module):
         diagonal_covariance: bool = False,
         attention_pattern: str = 'full',
         attention_window: int = 64,
-        use_fast_exp: bool = False,
+        use_fast_exp: bool = True,   # Default True for speed
         exp_order: int = 4,
         gauge_group: str = 'SO3',  # 'SO3' or 'SON'
         gauge_dim: int = 3,        # N for SO(N) - only used when gauge_group='SON'
