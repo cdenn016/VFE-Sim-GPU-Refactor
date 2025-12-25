@@ -744,15 +744,40 @@ class PublicationMetrics:
             input_ids, _ = sample_batch
             input_ids = input_ids.to(device)
 
+            # IMPORTANT: Show what sequence we're visualizing!
+            print(f"\n[PublicationMetrics] Generating interpretability outputs")
+            print(f"  Sequence shape: {input_ids.shape}")
+            print(f"  Token IDs (first 20): {input_ids[0, :20].tolist()}")
+
+            # Decode tokens if tokenizer available
+            tokens = None
+            if tokenizer is not None:
+                try:
+                    decoded_text = tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
+                    tokens = [tokenizer.decode([t]) for t in input_ids[0].tolist()]
+                    print(f"  Decoded text: {decoded_text[:200]}{'...' if len(decoded_text) > 200 else ''}")
+                except Exception as e:
+                    print(f"  [WARN] Could not decode tokens: {e}")
+            else:
+                print(f"  [WARN] No tokenizer provided - cannot decode sequence")
+
             model.eval()
             with torch.no_grad():
                 if hasattr(model, 'forward_with_attention'):
                     _, attn_info = model.forward_with_attention(input_ids, targets=None)
                     beta = attn_info.get('beta')
                     if beta is not None:
+                        # Plot with tokens if available
+                        if hasattr(self.figures, 'plot_attention_heatmap'):
+                            self.figures.plot_attention_heatmap(
+                                beta,
+                                tokens=tokens,
+                                save_name="attention_heatmap",
+                                title="KL-Divergence Attention"
+                            )
                         self.generate_figures(attention_weights=beta)
             model.train()
-            print(f"[PublicationMetrics] Generated interpretability outputs")
+            print(f"[PublicationMetrics] ✓ Generated interpretability outputs")
         except Exception as e:
             print(f"[WARN] Could not generate interpretability outputs: {e}")
 
