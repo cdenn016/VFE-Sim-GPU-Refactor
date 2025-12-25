@@ -100,30 +100,62 @@ def get_sequence(mode, tokenizer, args):
         print(f"  Tokens: {' | '.join(token_strs[:15])}{'...' if N > 15 else ''}")
 
     elif mode == 'validation':
-        # Load from actual validation data
-        if not args.data_path or not Path(args.data_path).exists():
-            print(f"[ERROR] --data-path required for validation mode")
+        # Load REAL validation data from WikiText
+        try:
+            from transformer.data import create_dataloaders
+
+            dataset_name = args.dataset if hasattr(args, 'dataset') else 'wikitext-2'
+            print(f"Loading REAL validation data from {dataset_name}...")
+
+            # Use existing data loader
+            train_loader, val_loader, vocab_size = create_dataloaders(
+                max_seq_len=args.seq_len if hasattr(args, 'seq_len') else 128,
+                batch_size=8,
+                vocab_size=50257,
+                dataset=dataset_name,
+            )
+
+            # Get validation dataset
+            val_dataset = val_loader.dataset
+
+            # Get first batch, first sequence
+            for batch_idx, (input_ids, target_ids) in enumerate(val_loader):
+                if batch_idx == 0:
+                    token_ids = input_ids[0:1]  # (1, N)
+                    break
+
+            # Get tokenizer from dataset
+            if hasattr(val_dataset, 'tokenizer'):
+                tokenizer = val_dataset.tokenizer
+            elif hasattr(val_dataset, 'enc'):  # tiktoken
+                tokenizer = val_dataset.enc
+
+            description = f"REAL VALIDATION DATA: {dataset_name.upper()}"
+
+            # Decode tokens
+            try:
+                if hasattr(tokenizer, 'decode'):
+                    decoded_text = tokenizer.decode(token_ids[0].tolist(), skip_special_tokens=True)
+                    token_strs = [tokenizer.decode([t]) for t in token_ids[0].tolist()]
+                else:
+                    decoded_text = tokenizer.decode(token_ids[0].tolist())
+                    token_strs = [tokenizer.decode([t]) for t in token_ids[0].tolist()]
+
+                print(f"\n[SEQUENCE] {description}")
+                print(f"  Decoded text: {decoded_text[:200]}{'...' if len(decoded_text) > 200 else ''}")
+            except Exception as e:
+                print(f"[WARN] Could not decode: {e}")
+                token_strs = [f"tok{i}" for i in token_ids[0].tolist()]
+
+        except Exception as e:
+            # Fallback to example text if data loading fails
+            print(f"[ERROR] Could not load validation data: {e}")
             print(f"  Falling back to example text...")
 
             text = "The transformer uses attention mechanisms to process sequences."
             token_ids = tokenizer.encode(text)
             token_ids = torch.tensor([token_ids])
-            description = f"EXAMPLE TEXT: \"{text}\""
-
-            try:
-                token_strs = [tokenizer.decode([t]) for t in token_ids[0].tolist()]
-            except:
-                token_strs = [f"tok{i}" for i in token_ids[0].tolist()]
-        else:
-            # TODO: Load from actual dataset
-            # This would load from your WikiText-103 or other dataset
-            print(f"[TODO] Loading from {args.data_path}")
-            print(f"  For now, using example text...")
-
-            text = "Natural language processing models learn statistical patterns."
-            token_ids = tokenizer.encode(text)
-            token_ids = torch.tensor([token_ids])
-            description = f"VALIDATION EXAMPLE: \"{text}\""
+            description = f"EXAMPLE TEXT (fallback): \"{text}\""
 
             try:
                 token_strs = [tokenizer.decode([t]) for t in token_ids[0].tolist()]
@@ -131,7 +163,6 @@ def get_sequence(mode, tokenizer, args):
                 token_strs = [f"tok{i}" for i in token_ids[0].tolist()]
 
         N = token_ids.shape[1]
-        print(f"\n[SEQUENCE] {description}")
         print(f"  Length: {N} tokens")
         print(f"  Tokens: {' | '.join(token_strs[:15])}{'...' if N > 15 else ''}")
 
@@ -349,10 +380,13 @@ def main():
     parser.add_argument('--text', type=str,
                        default='The quick brown fox jumps over the lazy dog',
                        help='Text to visualize (for --mode text)')
+    parser.add_argument('--dataset', type=str, choices=['wikitext-2', 'wikitext-103'],
+                       default='wikitext-2',
+                       help='Which WikiText dataset to use (for --mode validation)')
     parser.add_argument('--data-path', type=str, default=None,
-                       help='Path to validation data (for --mode validation)')
-    parser.add_argument('--seq-len', type=int, default=32,
-                       help='Sequence length for random mode')
+                       help='DEPRECATED: Dataset auto-downloads now')
+    parser.add_argument('--seq-len', type=int, default=128,
+                       help='Sequence length')
     parser.add_argument('--save-path', type=str, default='attention_with_context.png',
                        help='Where to save the figure')
 
