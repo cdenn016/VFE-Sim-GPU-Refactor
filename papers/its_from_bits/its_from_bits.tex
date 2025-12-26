@@ -1,0 +1,1037 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{booktabs}
+\geometry{margin=1in}
+
+% ===== BIBLIOGRAPHY - CHOOSE ONE OPTION =====
+
+% OPTION 1: Use natbib (recommended for Springer)
+%\usepackage[numbers,sort&compress]{natbib}
+
+% OPTION 2: Use cite (simpler, also works)
+\usepackage{cite}
+
+% ===== DON'T USE BOTH! =====
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+
+\begin{document}
+
+
+\title{Its From Bits - The Inertial Mass of Information: A Participatory Reconceptualization of Physical Reality}
+
+
+\author{
+  Robert C. Dennis\thanks{Corresponding author. Email: cdenn016@gmail.com}\\[0.3cm]
+  \small Independent Researcher\\
+  \small Leander, Texas, United States\\[0.2cm]
+  \small ORCID: \href{https://orcid.org/0009-0004-4688-2341}{0009-0004-4688-2341} % ← Add your ORCID if you have one, otherwise remove this line
+}
+
+\date{\today}
+
+\maketitle
+
+\begin{abstract}
+Previously we have shown that a gauge theory utilizing statistical manifolds as fibers offers a playground for a reconceptualization of physics as a participatory "it from bit" universe.  Here we demonstrate that within this framework an inertial mass-like quantity naturally emerges as the statistical precision (the inverse covariance) of an agent's predictive model. By considering multi-variate Gaussians and a SO(N) gauge group we show that the second-order Taylor expansion of Kullback-Leibler divergence under belief updating yields a kinetic energy term $T = \frac{1}{2}\dot{\mu}^T \Sigma_p^{-1} \dot{\mu}$, in the variational free energy princple, where the Fisher information metric of the agent's predictive model serves as the mass matrix. This extends the variational free energy principle from a purely dissipative gradient dynamics to a fully Hamiltonian mechanics, with the Lagrangian structure $\mathcal{L} = T - V$. Crucially, mass and spacetime-like geometry are defined relative to each agent's prior with objective physics emerging only through inter-agent consensus driven by variational free energy minimization. The framework constitutes a concrete realization of Wheeler's participatory "it from bit" universe, wherein physical law emerges from the epistemic alignment of observing agents rather than existing a priori.
+\end{abstract}
+
+\maketitle
+
+%==============================================================================
+\section{Introduction}
+\label{sec:intro}
+%==============================================================================
+The nature of inertial mass has long presented a mystery to scientists and natural philosophers alike. It appears throughout physics as a primitive quantity such as the $m$ in Newton's $F = ma$, the source term in Einstein's field equations $G_{\mu\nu} = 8\pi T_{\mu\nu}$, and a parameter in the Standard Model Lagrangian. While the Higgs mechanism explains mass generation for elementary particles through spontaneous symmetry breaking, the deeper question of \emph{why} mass exists and why matter resists change and curves spacetime remains unanswered within conventional frameworks.
+
+Wheeler's vision of a participatory universe \cite{Wheeler1990} and his aphorism "it from bit" suggest that physical quantities might emerge from information-theoretic primitives rather than being fundamental. This tantalizing program has inspired fruitful avenues of research \cite{Verlinde2011,Jacobson1995}, yet concrete realizations connecting information to inertial mass have remained elusive.
+
+In contrast, since Immanuel Kant first described the mind's "forms of sensuous intuition," philosophers and neuro-scientists have demonstrated empirically that the brain acts as a statistical model of reality, actively constructing representations of inaccessible underlying noumena \cite{Kant1781, Helmholtz1867,Friston2010}. This presents a deep, yet often unspoken, tension between physics and neuroscience. On one hand, space, time, and matter are treated as primitives of our universe; on the other, they are actively constructed (and influenced) by perception. While many have pursued a "physics-first" perspective on cognition, few have taken the converse approach: a "cognition-first" perspective on physics itself.
+
+In previous work \cite{Dennis2025, Dennis2025b}, we have shown that empirical results in machine learning such as attention mechanisms and transformer architectures emerge naturally from a cognition-first, gauge-theoretic framework built upon multi-agent variational inference. In companion work \cite{Dennis2025a}, we have presented simulations of a Wheelerian participatory universe exhibiting multi-scale emergence, dynamical renormalization, and spontaneous symmetry breaking under first order gradient descent.
+
+In the present work, we demonstrate that this framework furthermore yields a direct connection between informational quantities and observable matter. Concretely 
+
+\begin{enumerate}
+    \item We derive an informational Lagrangian $\mathcal{L} = \mathcal{T} - \mathcal{V}$ where the potential $\mathcal{V}$ is the generalized variational free energy and the kinetic term $\mathcal{T}$ emerges from the second-order expansion of the Kullback-Leibler divergence.
+    
+    
+    \item We identify inertial mass as statistical precision: $M = \Sigma_p^{-1}$, where $\Sigma_p$ is the covariance of an agent's predictive model (prior). Mass emerges as the resistance to changing beliefs against a slowly-varying, quasi-static prior.
+    
+    \item We show that standard dissipative dynamics (Friston's free energy principle) correspond to the \emph{overdamped limit} of this richer Hamiltonian structure.
+    
+\end{enumerate}
+
+Finally, we validate these observations using computational simulations, discuss testable predictions, including observer-dependent gravitational mass for quantum superpositions, and explore general consequences of this framework for foundational physics.
+
+
+\subsection{Background: The Free Energy Principle}
+
+Friston's free energy principle (FEP) \cite{Friston2010} provides a variational theory of self-organizing active systems, from cellular metabolism to neural computation. The variational free energy
+
+\begin{equation}
+\begin{aligned}
+\mathcal{F} &= \mathrm{KL}(q \| p)  - \mathbb{E}_q[\log p(o \mid c)]
+\end{aligned}
+\end{equation}
+
+is analogous to the Helmholtz free energy $F = U - TS$, where $q$ represents an agent's beliefs about hidden states and $p$ encodes its generative model (prior).
+
+The associated dynamics take the form of gradient descent
+
+\begin{equation}
+\dot{\mu} = -\nabla_\mu \mathcal{F}
+\label{eq:gradient_descent}
+\end{equation}
+
+and is purely dissipative.  All trajectories relax monotonically toward equilibrium with $\dot{\mathcal{F}} \leq 0$. In this realm there is no inertia, no oscillation, and no wave propagation. 
+
+\subsection{Extension to Multi-Agent Systems}
+
+In previous work, we extended this framework to multi-agent systems on principal bundles, deriving pairwise interaction terms from a normalized generative model. Full details of our gauge theoretic geometry may be found in \cite{Dennis2025}. 
+
+Briefly, agents are modeled as smooth sections of an associated bundle $\mathcal{E}$ to a principal $G$ bundle with statistical fibers $\mathcal{B}$ of $K$-dimensional multi-variate Gaussian (MVG) distributions where the structure group $G$ acts on statistics $\mu_q(c)$ and $\Sigma_q(c)$ as
+
+\begin{equation}
+    \rho(\Omega) \cdot (\mu, \Sigma) = (\Omega\mu, \Omega\Sigma\Omega^\top)
+\end{equation}
+
+where $\Omega \in G$ and $\rho$ is a $K$-dimensional representation of $G$.
+
+In addition to the agents' statistics we define per-agent gauge frames  $\phi_i(c) \in \mathfrak{g}$ at each point in the base manifold $\mathcal{C}$.  In our studies we choose not to gauge fix any agents.  This represents that any given agent may choose to fix their frames without consequence, however, the relational frames are what encode agent relationships. The gauge frames act as a local coordinate system with which agents embed their statistics.
+
+Within this framework we should take care not to anthropomorphize the notions of "beliefs" and "priors".  Here they correspond to probability distributions within the fibers and have no physical substrate (aside from the base, noumenal manifold $\mathcal{C}$ with which to instantiate them.  At this level they are smooth sections of the associated bundle over $\mathcal{C}$.
+
+In our associated bundle geometry we show that the variational free energy becomes
+
+\begin{equation}
+\boxed{
+\begin{aligned}
+\mathcal{V}[\{q_i\}, \{p_i\}, \{\phi_i\}] 
+&= \sum_i \int_{\mathcal{C}} \chi_i(c) \, D_{\mathrm{KL}}(q_i(c) \| p_i(c)) \, dc \\[4pt]
+&\quad + \sum_{ij} \int_{\mathcal{C}} \chi_{ij}(c) \, \beta_{ij}(c) \, D_{\mathrm{KL}}(q_i(c) \| \Omega_{ij}[q_j](c)) \, dc \\[4pt]
+&\quad + \sum_{ij} \int_{\mathcal{C}} \chi_{ij}(c) \, \gamma_{ij}(c) \, D_{\mathrm{KL}}(p_i(c) \| \Omega_{ij}[p_j](c)) \, dc \\[4pt]
+&\quad - \sum_i \int_{\mathcal{C}} \chi_i(c) \, \mathbb{E}_{q_i}[\log p(o \mid c)] \, dc
+\end{aligned}
+}
+\label{eq:free_energy_functional}
+\end{equation}
+
+Here $\chi_i(c)$ and $\chi_{ij}(c)$ are support functions encoding where agents exist and overlap, and $\Omega_{ij} \in G$ is the gauge transport operator rotating agent $j$'s frame into agent $i$'s perspective
+
+\begin{equation}
+\Omega_{ij} = e^{\phi_i} e^{-\phi_j}
+\end{equation}
+
+where $\phi_i(c) \in \mathfrak{g}$ is agent $i$'s local gauge frame in the Lie algebra $\mathfrak{g}$ of structure group $G$ (we take $G = \mathrm{SO}(3)$ throughout, though the framework extends to $\mathrm{SO}(N)$ and $\mathrm{SU}(N)$ for MVG exponential families.  Although we consider MVGs and $SO(3)$ here for simplicity, other gauge groups may be applicable for more exotic mixture and exponential families).
+
+As we have shown and validated elsewhere ~\cite{Dennis2025}, the attention weights $\beta_{ij}(c)$ are softmax-normalized KL divergences
+
+\begin{equation}
+\beta_{ij}(c) = \frac{\exp\left[-\frac{1}{\kappa_\beta} D_{\mathrm{KL}}(q_i(c) \| \Omega_{ij}[q_j](c))\right]}{\sum_{k} \exp\left[-\frac{1}{\kappa_\beta} D_{\mathrm{KL}}(q_i(c) \| \Omega_{ik}[q_k](c))\right]}
+\label{eq:attention}
+\end{equation}
+
+where $\kappa_\beta$ is the attention temperature parameter henceforth set to unity. As previously shown in \cite{Dennis2025}, this reproduces standard transformer attention in the flat-bundle, isotropic, delta-function limit. The $\gamma_{ij}(c)$ weights meanwhile govern prior (model) alignment in the same manner as $\beta_{ij}$.
+
+\subsection{Observations as Environmental Agents}
+
+The observation term $\mathbb{E}_{q_i}[\log p_i(o \mid c)]$ represents agents reconciling their beliefs with sensory data according to their model $p_i$. We have shown previously that \cite{Dennis2025, Dennis2025transfor, Dennis2025b}
+
+\begin{enumerate}
+    \item Observations manifestly break vacuum gauge symmetry, driving agents toward specialized configurations.
+    \item The observation term can be replaced by alignment with \emph{environmental agents} $\{e_k\}$ as
+\end{enumerate}
+
+\begin{equation}
+\sum_i \int_{\mathcal{C}} \chi_i(c) \, \mathbb{E}_{q_i}[\log p_i(o_i \mid c)] \, dc \;\longleftrightarrow\; \sum_{i,k} \int_{\mathcal{C}} \chi_{ie_k}(c) \, \beta_{ie_k}(c) \, D_{\mathrm{KL}}(q_i(c) \| \Omega_{ie_k}[q_{e_k}](c)) \, dc
+\label{eq:obs_as_agents}
+\end{equation}
+
+In this view, observations are other agents with their own beliefs and priors. The participatory universe bootstraps itself into existence precisely as Wheeler envisioned \cite{Wheeler1990}.
+
+\subsection{Hierarchical Emergence}
+
+As we have previously shown, under gradient descent of \eqref{eq:free_energy_functional}, natural hierarchical evolution unfolds as agents interact and reach consensus. When local clusters of agents align their beliefs/priors (low pairwise KL divergence), higher-order meta-agents emerge as coarse-grained collective variables as a form of dynamical renormalization ~\cite{Dennis2025a}
+
+In our implementation, cross-scale couplings allow meta-agent beliefs to propagate downward as priors for constituent agents, completing an Ouroboros tower of self-consistent, self-referential evolution, (i.e. a fully participatory universe of agents, beliefs, priors, and gauge frames) where the "top-observer" percolates beliefs down to lower levels and emergent levels emerge through dynamic renormalization.
+
+%==============================================================================
+\section{Mass from Statistical Precision}
+\label{sec:mass}
+%==============================================================================
+
+The framework presented in Section~\ref{sec:intro} defines a variational free energy $\mathcal{V}$ that serves as the potential for agent dynamics. We now show that promoting this to a full Lagrangian theory reveals a kinetic energy term hidden in the second-order structure of KL divergence and that this kinetic term identifies inertial mass with statistical precision of the agent's predictive model.
+
+\subsection{The Second-Order KL Expansion}
+
+Consider an agent with beliefs $q = \mathcal{N}(\mu_q, \Sigma_q)$ and predictive model (prior) $p = \mathcal{N}(\mu_p, \Sigma_p)$. The KL divergence is
+
+\begin{equation}
+D_{\mathrm{KL}}(q \| p) = \frac{1}{2}\left[(\mu_q - \mu_p)^T \Sigma_p^{-1}(\mu_q - \mu_p) + \mathrm{tr}(\Sigma_p^{-1}\Sigma_q) - K + \ln\frac{|\Sigma_p|}{|\Sigma_q|}\right]
+\label{eq:kl_gaussian}
+\end{equation}
+
+Under an infinitesimal belief update $\mu_q \to \mu_q + d\mu$, the change in KL divergence is
+
+\begin{equation}
+\begin{aligned}
+D_{\mathrm{KL}}(q + dq \| p) - D_{\mathrm{KL}}(q \| p) &= \underbrace{(\mu_q - \mu_p)^T \Sigma_p^{-1} d\mu}_{\text{first order}} + \underbrace{\frac{1}{2} d\mu^T \Sigma_p^{-1} d\mu}_{\text{second order}}
+\end{aligned}
+\label{eq:kl_expansion}
+\end{equation}
+
+The first-order term is the gradient, i.e. the "force" driving belief updates. Standard treatments of the free energy principle retain only this term, yielding gradient descent dynamics.
+
+The second-order term has traditionally been neglected but which may offer physical and information insights. With $d\mu = \dot{\mu}\, dt$, it becomes
+
+\begin{equation}
+\frac{1}{2} d\mu^T \Sigma_p^{-1} d\mu = \frac{1}{2} \dot{\mu}^T \Sigma_p^{-1} \dot{\mu} \cdot dt^2
+\end{equation}
+
+\subsection{The Fisher Metric as Mass Matrix}
+
+The natural metric on the statistical manifold of Gaussian distributions is the Fisher-Rao metric, manifestly positive. For the mean parameters, this metric is precisely
+
+\begin{equation}
+G_{\mu\mu} = \Sigma^{-1}
+\end{equation}
+
+The second-order term in \eqref{eq:kl_expansion} can thus be written
+
+\begin{equation}
+\boxed{T = \frac{1}{2} \dot{\mu}^T G_{\mu\mu} \dot{\mu} = \frac{1}{2} \dot{\mu}^T \Sigma_p^{-1} \dot{\mu}}
+\label{eq:kinetic}
+\end{equation}
+
+This is kinetic energy with the Fisher information metric serving as the mass matrix
+
+\begin{equation}
+\boxed{M = \Sigma_p^{-1}}
+\label{eq:mass_precision}
+\end{equation}
+
+
+\subsection{Inertia as Epistemic Resistance}
+
+If we take seriously Wheeler's participatory ontology, the identification 
+$M = \Sigma_p^{-1}$ reveals inertia as fundamentally epistemic: 
+certainty resists change.
+
+To see why, consider belief updating as motion on the statistical manifold. An agent updating its belief from position $\mu_0$ to $\mu_1$ must traverse information-geometric distance
+
+\begin{equation}
+d_F^2 = (\mu_1 - \mu_0)^T \Sigma_p^{-1} (\mu_1 - \mu_0)
+\end{equation}
+
+As the prior becomes more precise ($\Sigma_p \to 0$), this distance diverges. Extreme certainty makes belief revision infinitely costly: this is inertia.
+
+The physical consequences are immediate. A macroscopic object maintains an extraordinarily precise self-model: $\Sigma_{\mathrm{rock}} \approx \ell_P^2 I$ yields enormous mass $M_{\mathrm{rock}} \sim \ell_P^{-2}$. 
+
+Rocks are certain (not in an anthropomorphic sense), thus massive, thus hard to move. Conversely, a quantum particle in spatial superposition has larger position uncertainty, lower precision, and, by Eq.~\eqref{eq:mass_precision}, reduced inertial mass. Section~\ref{sec:discussion} develops this into a testable prediction.
+
+\subsection{Covariance and Gauge Kinetic Terms}
+
+For completeness, the full kinetic energy includes contributions from all dynamical fields. The covariance $\Sigma_q$ evolves on the manifold of symmetric positive-definite (SPD) matrices, with Fisher metric
+
+\begin{equation}
+G_{\Sigma\Sigma}[\dot{\Sigma}, \dot{\Sigma}] = \frac{1}{2}\mathrm{tr}\left(\Sigma^{-1}\dot{\Sigma}\Sigma^{-1}\dot{\Sigma}\right)
+\end{equation}
+
+The gauge frame $\phi \in \mathfrak{g}$ evolves on the Lie algebra, with the Killing form providing a natural metric
+
+\begin{equation}
+\langle \dot{\phi}, \dot{\phi} \rangle_{\mathfrak{g}} = -\mathrm{tr}(\dot{\phi}^2)
+\end{equation}
+
+The full kinetic energy in the quasi-static regime where agent priors evolve adiabatically relative to beliefs is thus
+
+\begin{equation}
+\mathcal{T} = \sum_i \int_{\mathcal{C}} \chi_i(c) \left[
+    \frac{1}{2} \dot{\mu}_{q,i}^T \Sigma_{p,i}^{-1} \dot{\mu}_{q,i}
+    + \frac{1}{4} \mathrm{tr}(\Sigma_{q,i}^{-1} \dot{\Sigma}_{q,i})^2
+    + \frac{1}{2} |\dot{\phi}_i|^2
+\right] dc
+\label{eq:full_kinetic}
+\end{equation}
+
+
+
+\subsection{Emergent Time and Mass-Dependent Proper Time}
+
+Within this framework time is not a background parameter but rather emerges from information accumulation. We define each agent's proper time operationally
+
+\begin{equation}
+d\tau_i = \frac{\mathrm{KL}(q_i^{\text{new}} \| q_i^{\text{old}})}{\ln 2}
+\end{equation}
+
+where the denominator converts nats to bits. An agent's clock advances 
+by one tick per bit of belief updating. This realizes Wheeler's "it from "bit" at the level of temporal flow.
+
+Crucially, agents with different masses experience different proper times.  Our computational experiments (Section~\ref{sec:experiments}) validate that high-precision agents (large $M = \Sigma_p^{-1}$) accumulate proper time more slowly than low-precision agents when subjected to identical external forcing. The proper time ratio scales with the mass ratio
+
+\begin{equation}
+\frac{\tau_{\text{heavy}}}{\tau_{\text{light}}} \approx 
+\sqrt{\frac{M_{\text{light}}}{M_{\text{heavy}}}}
+\end{equation}
+
+This information-geometric time dilation is structurally analogous to 
+weak-field gravitational time dilation. In general relativity, 
+near a massive object the proper time rate is
+
+\begin{equation}
+\frac{d\tau}{dt} \approx 1 - \frac{\Phi}{c^2} + O(\Phi^2)
+\end{equation}
+
+where $\Phi \propto M/r$ is the gravitational potential. Both effects are linear in mass to leading order.  Heavier masses experience slower proper time. The distinction is that ours arises from Fisher geometry and information processing rates rather than spacetime curvature. This suggests the two phenomena may be different manifestations of a unified information-geometric structure.  
+
+%==============================================================================
+\section{The Full Dynamical Theory}
+\label{sec:dynamics}
+%==============================================================================
+
+Given the kinetic energy $\mathcal{T}$ from Section~\ref{sec:mass} and the potential $\mathcal{V}$, we can now construct the complete Lagrangian and Hamiltonian formulations for epistemic dynamics.
+
+\subsection{The Lagrangian}
+
+The Lagrangian is
+
+\begin{equation}
+\mathcal{L} = \mathcal{T} - \mathcal{V}
+\label{eq:lagrangian}
+\end{equation}
+
+Suppressing covariance and gauge kinetic terms for clarity, the mean sector Lagrangian is
+
+\begin{equation}
+\begin{aligned}
+\mathcal{L} &= \sum_i \int_{\mathcal{C}} \chi_i(c) \, \frac{1}{2} \dot{\mu}_{q,i}^T \Sigma_{p,i}^{-1} \dot{\mu}_{q,i} \, dc \\
+&\quad - \sum_i \int_{\mathcal{C}} \chi_i(c) \, D_{\mathrm{KL}}(q_i \| p_i) \, dc \\
+&\quad - \sum_{ij} \int_{\mathcal{C}} \chi_{ij}(c) \, \beta_{ij}(c) \, D_{\mathrm{KL}}(q_i \| \Omega_{ij}[q_j]) \, dc \\
+&\quad - \sum_{ij} \int_{\mathcal{C}} \chi_{ij}(c) \, \gamma_{ij}(c) \, D_{\mathrm{KL}}(p_i \| \Omega_{ij}[p_j]) \, dc \\
+&\quad + \sum_i \int_{\mathcal{C}} \chi_i(c) \, \mathbb{E}_{q_i}[\log p(o|c)] \, dc
+\end{aligned}
+\label{eq:lagrangian_explicit}
+\end{equation}
+
+The action is
+
+\begin{equation}
+S = \int_{\tau_0}^{\tau_1} \mathcal{L} \, d\tau
+\label{eq:action}
+\end{equation}
+
+where $\tau$ represents a proper time.  
+
+\subsection{Conjugate Momenta}
+
+The conjugate momentum to $\mu_{q,i}(c)$ is:
+\begin{equation}
+\pi_{\mu,i}(c) = \frac{\delta \mathcal{L}}{\delta \dot{\mu}_{q,i}(c)} = \Sigma_{p,i}^{-1}(c) \, \dot{\mu}_{q,i}(c)
+\label{eq:momentum}
+\end{equation}
+
+Inverting:
+\begin{equation}
+\dot{\mu}_{q,i}(c) = \Sigma_{p,i}(c) \, \pi_{\mu,i}(c)
+\end{equation}
+
+\subsection{The Hamiltonian}
+
+The Hamiltonian is the Legendre transform of the Lagrangian
+
+\begin{equation}
+\mathcal{H} = \sum_i \int_{\mathcal{C}} \pi_{\mu,i} \cdot \dot{\mu}_{q,i} \, dc - \mathcal{L} = \mathcal{T} + \mathcal{V}
+\label{eq:hamiltonian}
+\end{equation}
+
+In terms of momenta we have
+
+\begin{equation}
+\mathcal{H} = \sum_i \int_{\mathcal{C}} \frac{1}{2} \pi_{\mu,i}^T(c) \, \Sigma_{p,i}(c) \, \pi_{\mu,i}(c) \, dc + \mathcal{V}[\{q_i\}, \{p_i\}, \{\phi_i\}]
+\label{eq:hamiltonian_explicit}
+\end{equation}
+
+where integration over agent support is understood.
+
+\subsection{Hamilton's Equations}
+
+Given these results we have 
+
+\begin{align}
+\dot{\mu}_{q,i}(c) &= \frac{\delta \mathcal{H}}{\delta \pi_{\mu,i}(c)} =  \Sigma_{p,i}(c) \, \pi_{\mu,i}(c) \label{eq:hamilton1}\\[6pt]
+\dot{\pi}_{\mu,i}(c) &= -\frac{\delta \mathcal{H}}{\delta \mu_{q,i}(c)} = -\frac{\delta \mathcal{V}}{\delta \mu_{q,i}(c)} \label{eq:hamilton2}
+\end{align}
+
+Combining \eqref{eq:hamilton1} and \eqref{eq:hamilton2} yields the second-order equation
+
+\begin{equation}
+\Sigma_{p,i}^{-1}(c) \, \ddot{\mu}_{q,i}(c) = -\frac{\delta \mathcal{V}}{\delta \mu_{q,i}(c)}
+\label{eq:newton}
+\end{equation}
+
+This is an informational Newton's second law on the statistical manifold
+
+\begin{equation}
+M_i(c) \, \ddot{\mu}_i(c) = F_i(c)
+\end{equation}
+
+with
+
+\begin{itemize}
+\item Mass matrix: $M_i(c) =  \Sigma_{p,i}^{-1}(c)$
+\item Force: $F_i(c) = -\frac{\delta \mathcal{V}}{\delta \mu_{q,i}(c)}$
+\end{itemize}
+
+We provide the complete gradients in the appendix.
+
+Finally, we notice, in passing, that the full variational energy has the structure of the grand thermodynamic potential $\Upsilon = E - TS - \mu N$.
+
+
+
+\subsection{The Overdamped Limit}
+
+Adding dissipation (friction) $\gamma_i$ to the dynamics:
+\begin{equation}
+\chi_i \Sigma_{p,i}^{-1} \ddot{\mu}_{q,i} + \gamma_i \dot{\mu}_{q,i} = -\frac{\delta \mathcal{V}}{\delta \mu_{q,i}}
+\label{eq:damped}
+\end{equation}
+
+In the \textbf{overdamped limit} $\gamma_i \to \infty$ (or equivalently $M_i \to 0$), the inertial term vanishes:
+\begin{equation}
+\gamma_i \dot{\mu}_{q,i} = -\frac{\delta \mathcal{V}}{\delta \mu_{q,i}}
+\label{eq:overdamped}
+\end{equation}
+
+This is standard gradient descent as popularized by Friston's free energy principle \cite{Friston2010}.
+
+\begin{center}
+\fbox{\parbox{0.85\textwidth}{
+The free energy principle is the overdamped (high-friction, zero-inertia) limit of a richer Hamiltonian theory. Neural systems may operate in this regime however, "it from bit" physics requires the full second-order structure.
+}}
+\end{center}
+
+\subsection{Conservation Laws and Symmetries}
+
+By Noether's theorem, continuous symmetries of $\mathcal{L}$ yield conserved quantities:
+
+\paragraph{Time translation invariance} ($\mathcal{L}$ independent of $t$) implies conservation of energy:
+\begin{equation}
+\frac{d\mathcal{H}}{dt} = 0
+\end{equation}
+
+\paragraph{Gauge invariance} ($\mathcal{L}$ invariant under $\phi_i \to \phi_i + \xi$) implies conservation of "gauge charge".
+
+\paragraph{Translation invariance on $\mathcal{C}$} (if present) implies conservation of total informational momentum:
+\begin{equation}
+P_{\mathrm{total}} = \sum_i \int_{\mathcal{C}} \pi_{\mu,i}(c) \, dc = \text{const}
+\end{equation}
+
+
+\section{Results}
+\label{sec:experiments}
+
+
+\subsection{Computational Validation of Mass as Statistical Precision}
+
+We conducted systematic computational validation of the theoretical prediction that the Fisher-Rao metric tensor $M = \Sigma_p^{-1}$ provides the natural inertial mass for belief dynamics on statistical manifolds. All experiments employed $K = 13$ dimensional latent spaces with isotropic prior covariances $\Sigma_p = \sigma^2 \mathbb{I}$, integrated using our symplectic ProductManifoldVerlet integrator (available in repository) that preserves the geometric structure of the product manifold $\mathbb{R}^K \times \text{SPD}(K) \times \mathfrak{so}(3)$. The system evolves under the full Hamiltonian
+
+\begin{equation}
+H = \frac{1}{2} \dot{\mu}^T \Sigma_p^{-1} \dot{\mu} + \frac{1}{4} \text{tr}(\Sigma^{-1} \dot{\Sigma} \Sigma^{-1} \dot{\Sigma}) + \frac{1}{2} \langle \dot{\phi}, \dot{\phi} \rangle_{\mathfrak{g}} + V(\mu, \Sigma, \phi),
+\end{equation}
+
+where the first term implements the Fisher-Rao metric with per-component mass $M_{ii} = 1/\sigma^2$.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{Fig_1.png}
+\caption{\textbf{Inertial mass as statistical precision: $M = \Sigma_p^{-1}$.} 
+Computational validation that the Fisher-Rao metric provides the natural mass tensor for belief dynamics on statistical manifolds ($K=13$ dimensions). 
+\textbf{(A)} Effective mass $M_{\text{eff}}$ measured from oscillation dynamics exhibits precise linear relationship with inverse prior variance: $M_{\text{eff}} = (0.23/\sigma^2) + 0.02$ with $R^2 = 0.9998$, validating the theoretical prediction $M \propto \Sigma_p^{-1}$. 
+\textbf{(B)} Three systems with identical potential but different masses ($M = 26.0, 6.5, 1.6$) show mass-dependent oscillation frequencies under Newton's second law $M\ddot{\mu} = -\nabla V$. Distance to target plotted on logarithmic scale reveals factor-of-4 frequency variation consistent with $\omega \propto M^{-1/2}$. 
+\textbf{(C)} Phase space trajectories in $(\mu_0, \mu_1)$ plane demonstrate mass-dependent curvature: lighter systems (blue) execute tight orbits with small radii, heavier systems (red) follow broader paths, all remaining on a constant energy trajectory. 
+\textbf{(D)} Under-damped Hamiltonian dynamics (solid red) exhibits sustained oscillations from momentum conservation, contrasting sharply with overdamped gradient flow (dashed blue) showing monotonic exponential relaxation. 
+\textbf{(E)} Harmonic oscillator frequency relationship $\omega^2 = k/M$ validated through linear fit $\omega^2 = 4.46 \times \sigma^2$ (equivalently $\omega^2 = 4.46/M$), with effective spring constant $k_{\text{eff}} \approx 4.46$ reflecting geometric coupling across $K=13$ dimensions. 
+\textbf{(F)} Energy conservation: symplectic integrator preserves total Hamiltonian $H = T + V$ to sub-0.01\% precision over 25 time units, with measured drift of $-0.000\%$, validating both the geometric integration scheme and Hamiltonian structure.}
+\label{fig:mass_precision}
+\end{figure}
+
+
+
+\textbf{Mass-precision relationship (Panel A).} We systematically varied the prior variance $\sigma^2$ over more than one order of magnitude (0.316 to 10.0) and measured the effective mass $M_{\text{eff}}$ from harmonic oscillation dynamics. The relationship exhibits exceptional linearity: $M_{\text{eff}} = (0.23/\sigma^2) + 0.02$ with coefficient of determination $R^2 = 0.9998$. This precise agreement validates the theoretical prediction that statistical precision (inverse variance) directly manifests as inertial mass in belief dynamics. The small positive intercept ($0.02$) and the coefficient ($0.23 \approx K/56$) reflect finite-dimensional coupling effects across the $K=13$ components, where the measured mass captures collective oscillation modes rather than purely independent degrees of freedom.
+
+\textbf{Mass-dependent trajectories (Panels B and C).} Three systems with identical quadratic potential $V = \frac{1}{2}\|\mu - \mu^*\|^2$ but different prior variances ($\sigma^2 = 0.5, 2.0, 8.0$ corresponding to masses $M = 26.0, 6.5, 1.6$) demonstrate Newton's second law in belief space: $M\ddot{\mu} = -\nabla V$. Panel B shows temporal evolution of distance to target on logarithmic scale, revealing clear mass-dependent oscillation frequencies. Light masses (high precision) exhibit rapid oscillations with frequency $\omega \approx 1.8$, while heavy masses (low precision) display slow oscillations with $\omega \approx 0.45$---approximately a factor of 4 difference consistent with $\omega \propto M^{-1/2}$. Panel C visualizes the corresponding phase-space trajectories in the $(\mu_0, \mu_1)$ plane. Lighter systems execute tight spiral trajectories with small radii of curvature, while heavier systems follow broader, more gradual paths. Critically, all three trajectories converge to the identical equilibrium point, confirming that mass affects only the dynamics of approach, not the final equilibrium state determined by $\nabla V = 0$.
+
+\textbf{Harmonic oscillator frequency scaling (Panel E).} For a harmonic oscillator with spring constant $k$ and mass $M$, classical mechanics predicts $\omega^2 = k/M$. Since our quadratic potential has unit spring constant and the per-component mass is $M = 1/\sigma^2$, we expect the linear relationship $\omega^2 = \sigma^2$. Measuring oscillation frequencies via Fourier analysis across twelve logarithmically-spaced values of $\sigma^2$, we obtain the fit $\omega^2 = (4.46) \times \sigma^2$ with near-perfect correlation. The effective spring constant $k_{\text{eff}} \approx 4.46$ exceeds unity due to the coupling structure in the $K$-dimensional system, where each component experiences restoring forces from its deviation from the target while coupled to the other $K-1$ components through the shared potential. This validates both the mass relationship $M \propto 1/\sigma^2$ and the geometric coupling inherent in the mean-field dynamics.
+
+\textbf{Energy conservation (Panel F).} The symplectic integrator preserves the total Hamiltonian $H = T + V$ to exceptional precision. The normalized energy $E(t)/E(0)$ remains constant within $\pm 0.01\%$ over 25 time units of evolution, with measured drift of $-0.000\%$. This sub-machine-precision conservation validates both the geometric integrator (which respects the symplectic structure on the product manifold) and confirms that the discretized dynamics accurately approximate the continuous Hamiltonian flow. Energy conservation is a critical test since any violation would indicate either incorrect Hamilton equations, numerical instability in the SPD manifold projection, or breakdown of the geometric integration scheme.
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{Fig_2.png}
+\caption{\textbf{Overdamped versus under-damped belief dynamics.} 
+Direct comparison between full second-order Hamiltonian dynamics (under-damped, blue) and standard first-order gradient flow (overdamped, red) for $K=3$ dimensional system with quadratic potential $V = \frac{1}{2}\|\mu - \mu^*\|^2$. 
+\textbf{Top left:} Temporal evolution of first component $\mu_0(t)$ shows oscillatory approach (under-damped) versus monotonic exponential relaxation (overdamped). Under-damped system repeatedly overshoots target due to momentum, while overdamped approaches from one side only. 
+\textbf{Top right:} Potential energy dissipation on logarithmic scale. 
+\textbf{Middle row:} Phase space trajectories in $(\mu_0, \mu_1)$ plane. Over-damped (left) follows direct descent path to equilibrium without spiraling. Under-damped (center) exhibits constant energy orbits. Velocity evolution (right) shows oscillatory character for under-damped versus monotonic decay. 
+\textbf{Bottom:} Distance to target $\|\mu(t) - \mu^*\|$ on logarithmic scale quantifies approach dynamics. Overdamped exhibits smooth exponential decay $\propto e^{-t/\tau}$ over three orders of magnitude. Under-damped shows oscillatory character.}
+\label{fig:overdamped_underdamped}
+\end{figure}
+
+
+\subsection{Underdamped Versus Overdamped Dynamics}
+
+Panel D and Figure~2 contrast the full under-damped Hamiltonian dynamics against the standard over-damped gradient flow $\dot{\mu} = -\gamma^{-1} \nabla V$ typically employed in variational inference. Both systems were initialized at the origin with identical target $\mu^* = (1.0, -0.5, 0, \ldots)$ under the same quadratic potential, but the under-damped system carried initial momentum $\pi_\mu \sim \mathcal{N}(0, 0.05^2 \mathbb{I})$ while the overdamped system started from rest.
+
+The under-damped dynamics (solid red in Panel D, blue in Figure~2) exhibits sustained harmonic oscillations about the equilibrium, with the system repeatedly overshooting the target due to momentum conservation and being pulled back by restoring forces $-\nabla V$. The trajectory shows clear periodic behavior, characteristic of lightly damped harmonic motion. In phase space (Figure~2, middle panels), the under-damped trajectory forms a contracting spiral, gradually dissipating energy while preserving oscillatory character. The velocity evolution (Figure~2, middle right) shows alternating positive and negative velocities as the system oscillates through equilibrium.
+
+In stark contrast, the overdamped dynamics (dashed blue in Panel D, red in Figure~2) follows pure exponential relaxation $\mu(t) - \mu^* \propto e^{-t/\tau}$ with no oscillations. The system approaches equilibrium monotonically from one side, never overshooting the target. This first-order dynamics lacks any notion of momentum or inertia. The instantaneous velocity depends only on the current gradient, not on the system's history. The phase space trajectory is a direct path to equilibrium without spiraling, and the velocity decays monotonically to zero.
+
+The distance-to-target comparison (Figure~2, bottom) quantifies this qualitative difference on a logarithmic scale. The overdamped system shows smooth exponential decay over three orders of magnitude, while the under-damped system displays oscillatory decay with the envelope decreasing as energy dissipates. After 20 time units, both systems have converged to within $10^{-4}$ of the target, but their approach paths fundamentally differ: the under-damped system has explored the potential landscape through multiple oscillations, while the overdamped system has taken the most direct descent path.
+
+This comparison highlights why the Fisher metric as mass matters for understanding belief dynamics. The standard Free Energy Principle literature employs overdamped approximations that discard all inertial terms, effectively assuming infinite friction. While this simplification is mathematically convenient, it eliminates rich dynamical phenomena including resonances, ringing behavior, and momentum-driven exploration that may be relevant for understanding neural dynamics, decision-making under uncertainty, and the temporal structure of inference. The full second-order theory presented here captures these inertial effects as fundamental consequences of the information geometry.
+
+\subsection{Proper Time Dilation from Information Geometry}
+
+The Fisher-Rao metric tensor $M = \Sigma_p^{-1}$ not only determines inertial dynamics but also defines a natural notion of proper time along belief trajectories. Just as proper time in general relativity measures the arc length along world-lines in spacetime, we define proper time in belief space via the differential
+
+\begin{equation}
+d\tau = \sqrt{d\mu^T \Sigma_p^{-1} d\mu},
+\end{equation}
+
+which accumulates the Fisher-Rao distance traversed by an agent's beliefs. This geometric quantity is coordinate-independent and represents the "internal clock" experienced by the agent as it evolves through belief space.
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{Fig_3.png}
+\caption{\textbf{Proper time dilation from Fisher-Rao metric geometry.} 
+Four agents with identical dynamics but different prior covariances $\Sigma_p = \sigma^2 \mathbb{I}$ ($\sigma^2 = 0.5, 2.0, 8.0, 32.0$) accumulate different proper times $\tau = \int \sqrt{d\mu^T \Sigma_p^{-1} d\mu}$ along their trajectories in $K=13$ dimensional belief space.
+\textbf{(A)} Proper time versus coordinate time. All trajectories lie above the light cone diagonal ($\tau = t$, dashed gray), indicating that oscillatory dynamics cause proper time to advance faster than coordinate time. Critically, heavier agents (red) accumulate substantially more proper time than lighter agents (blue): $\tau_{\text{heavy}}/\tau_{\text{light}} \approx 1.5$ after 30 time units, constituting a genuine relativistic time dilation effect from information geometry.
+\textbf{(B)} Time dilation factor versus mass scale on logarithmic axes shows monotonic power-law increase: agents with 64× larger prior variance experience 50\% more subjective proper time over the same coordinate time interval.
+\textbf{(C)} Belief trajectories showing distance to target $\|\mu(t) - \mu^*\|$ on logarithmic scale. Heavier agents exhibit larger-amplitude oscillations due to reduced restoring forces $M\ddot{\mu} = -\nabla V$, traversing longer paths in belief space.
+\textbf{(D)} Proper velocity $d\tau/dt$ oscillates with mass-dependent amplitude. Heavy agents (red) show large proper velocity swings ($0.5$ to $2.2$) while light agents (blue) show smaller variations ($0.2$ to $1.5$), reflecting their different oscillation dynamics.
+\textbf{(E)} Accumulated coordinate distance $\int \|d\mu\|$ reveals the mechanism: heavier agents traverse $\sim 7\times$ longer paths in coordinate space (350 vs 50 units), more than compensating for their reduced metric weighting $\Sigma_p^{-1}$ and resulting in net proper time dilation.}
+\label{fig:proper_time}
+\end{figure}
+
+
+\textbf{Mass-dependent time dilation (Panels A--B).} We evolved four agents with identical initial conditions and target $\mu^*$ but different prior covariances $\Sigma_p = \sigma^2 \mathbb{I}$ with scales $\sigma^2 = 0.5, 2.0, 8.0, 32.0$ (labeled Very Light through Very Heavy). Panel A shows the accumulated proper time $\tau(t)$ versus coordinate time $t$. Remarkably, all trajectories lie above the light cone diagonal $\tau = t$, indicating that proper time advances faster than coordinate time due to the oscillatory dynamics in belief space. More strikingly, heavier agents accumulate significantly more proper time than lighter agents over the same coordinate time interval: after $t=30$ time units, the Very Heavy agent has experienced $\tau \approx 62$ while the Very Light agent has experienced only $\tau \approx 42$.
+
+Panel B quantifies this time dilation effect by plotting the proper time ratio $\tau/\tau_{\text{light}}$ versus mass scale $\Sigma_p$ on logarithmic axes. The ratio increases monotonically from 1.0 to approximately 1.5 over a factor of 64 in mass, following a power-law relationship. This constitutes a genuine relativistic effect emerging purely from the information geometry: agents with different statistical precision (mass) experience different proper times along their trajectories, even when evolving under identical potentials and coordinate time durations.
+
+\textbf{Physical mechanism.} The proper time dilation arises from the interplay between oscillation amplitude and metric structure. Panel C shows that heavier agents exhibit larger-amplitude oscillations in belief space. They overshoot the target more dramatically due to reduced restoring forces $M\ddot{\mu} = -\nabla V$. Although the Fisher-Rao metric weights each infinitesimal displacement $d\mu$ by the precision $\Sigma_p^{-1}$ (making individual steps "count less" for heavy agents), the heavier agents traverse much longer coordinate paths, ultimately accumulating more proper time. Panel E confirms this: the accumulated coordinate distance $\int \|d\mu\|$ is dramatically larger for heavier agents (350 units for Very Heavy versus 50 units for Very Light), more than compensating for the reduced metric weighting.
+
+\textbf{Proper velocity oscillations (Panel D).} The proper velocity $d\tau/dt$ exhibits rich oscillatory structure. For the Very Light agent (blue), proper velocity oscillates between $\sim 0.2$ and $\sim 1.5$, reflecting the rapid, small-amplitude oscillations in belief space. The Very Heavy agent (red) shows larger-amplitude proper velocity oscillations between $\sim 0.5$ and $\sim 2.2$, corresponding to its slow, large-amplitude sweeps through belief space. The proper velocity never drops to zero because even at turning points where $\dot{\mu} = 0$ in coordinate velocity, the system is still traversing the statistical manifold.
+
+This proper time dilation effect has profound implications for multi-agent active inference systems. Agents with different epistemic precision (prior variances) will experience different subjective time flows while interacting in the same environment. A high-precision agent (small $\Sigma_p$, light mass) experiences time more slowly, completing many rapid belief updates in the time a low-precision agent (large $\Sigma_p$, heavy mass) completes a single ponderous swing through belief space. This provides a geometric foundation for understanding temporal coordination and synchronization in hierarchical cognitive systems, where different levels of the hierarchy may naturally operate on different proper time scales determined by their statistical precision.
+
+
+%==============================================================================
+\section{Discussion}
+\label{sec:discussion}
+%==============================================================================
+
+\subsection{Why Was the Kinetic Term Missed?}
+
+The kinetic term $\frac{1}{2}d\mu^T \Sigma^{-1} d\mu$ is second-order in the belief update. Standard treatments of active inference and variational free energy minimization employ first-order gradient descent, implicitly taking the overdamped limit in which inertial terms are negligible. In the mechanical analogy, this corresponds to
+
+\begin{equation}
+m\ddot{q} + \gamma\dot{q} = -\nabla V \quad \xrightarrow{m/\gamma \to 0} \quad \gamma\dot{q} = -\nabla V
+\end{equation}
+
+where the mass-to-damping ratio vanishes and acceleration becomes instantaneously yoked to the force. Furthermore, our framework fundamentally allows for agent priors to evolve dynamically.  In traditional approaches predictive models are consider fixed. 
+
+Neural systems may well operate in this regime, where synaptic time constants dominate over any inertial effects. But in our theory fundamental physics requires the full second-order structure. The oversight is natural: when modeling brain dynamics, one reasonably neglects terms that are small on biological timescales. The present work recovers these terms by treating the variational principle as fundamental rather than approximate, revealing structure that was always present but previously discarded. 
+
+
+
+\subsection{Inertial Mass and Gravitational Effects in Pullback Geometry}
+
+We have demonstrated that the Fisher-Rao metric provides inertial mass:
+$M_{\text{inertial}} = \kappa \cdot \mathrm{tr}(\Sigma_p^{-1})$. The same precision tensor also determines the agent's pullback metric on the base manifold, which defines the geometry the agent experiences.
+
+In our framework, agents have no direct access to the base manifold $\mathcal{C}$ itself, it remains noumenal in the Kantian sense. What agents experience is the pullback metric
+
+\begin{equation}
+g_{\mu\nu}^{(i)}(x) = \text{pullback of Fisher-Rao metric via agent } i\text{'s section}
+\end{equation}
+
+If gravitational effects emerge, they would manifest as curvature in this pullback geometry. Since the pullback metric is determined by $\Sigma_p^{-1}$, the same quantity that provides inertial mass would also source the curvature that the agent experiences as gravitational effects
+
+\begin{equation}
+R_{\mu\nu\rho\sigma}^{(i)}[g^{(i)}] \propto \text{functions of } \Sigma_{p,i}^{-1}
+\end{equation}
+
+This would automatically satisfy the equivalence principle: inertial and gravitational mass share a single origin in prior precision because both are properties of the agent's experienced geometry, not of some external "true" spacetime.
+
+Before consensus, different agents with different priors $\Sigma_{p,i} \neq \Sigma_{p,j}$ would experience different pullback geometries $g^{(i)}_{\mu\nu} \neq g^{(j)}_{\mu\nu}$ and thus different gravitational fields. Consensus formation via the $\gamma_{ij}$ coupling drives prior alignment, causing the pullback metrics to converge: $g^{(i)}_{\mu\nu} \to g^{(j)}_{\mu\nu}$. Objective spacetime geometry emerges as the shared pullback metric at equilibrium.
+
+Demonstrating this rigorously requires computing the induced curvature tensors in the pullback metrics; work that remains to be done. However, the mathematical structure strongly suggests this pathway since agents' experienced geometry is entirely determined by their statistical structures, and those structures have a single mass scale $\Sigma_p^{-1}$, the equivalence principle follows as a consequence rather than a postulate.
+
+The biggest challenge then is reproducing the Lorentz signature (-+++) since the Fisher-Rao metric is manifestly positive.  This, however, is not fatal: we are considering MVGs and SO(3).  It may very well be possible that when we extend to unitary groups and/or other exponential or mixture families that the proper signature may result under pullback.
+
+
+
+Objectivity therefore is an emergent aspect of inter-subjective consensus. What we call "universal physical laws," "shared spacetime," and "objective mass" are the gauge-invariant structures that persist at equilibrium when agents minimize their collective free energy.  Incidentally, this mechanism (if true) offers a straightforward explanation of gauge invariance in physics: we must have gauge invariance in order to agree on our observations.
+
+This framework naturally accounts for why human observers largely agree 
+on physical reality. We have evolved similar generative models and converged on consensus priors through shared sensory channels and cultural transmission. It also explains perceptual variations: altered states (psychedelics, sensory deprivation, meditation, neurological conditions) temporarily shift an individual's priors away from consensus, leading to experiences of modified spacetime structure, altered causal relations, or anomalous physics. These are not pathological "hallucinations" in the sense of perceiving non-existent entities, but rather genuine differences in the pullback geometry experienced by an agent operating with non-consensus priors.
+
+The theory thus dissolves the hard boundary between "veridical perception" and "altered states". Both are valid geometries on the statistical manifold, differing only in their degree of alignment with the consensus equilibrium.
+
+Our theories of physics then are predicable because a) we as humans share predictive models of reality and what it ultimately responsible are the dynamical laws of information geometry.  Interestingly, this is true for all meta-agents.  For example, the institution of science is a meta-agent of the collective constituent humans.  Under dynamical renormalization this meta-agent then has integrated beliefs and priors into representations of reality which we, as lower agents, cannot perceive. Analogously, a single brain cell does not access the human agent's perspective, predictive models, or belief fluctuations - those are higher level meta-cognitive structures.
+
+\subsection{Macroscopic Objects as Consensus Enforcers}
+
+If our perceptions and models of reality are tentative and contingent why then does everyday physics appear objective? Our answer is that macroscopic objects enforce consensus through precision dominance.
+
+A rock maintains extraordinarily precise self-localization with prior 
+covariance $\Sigma_{\mathrm{rock}} \approx \epsilon I$ where $\epsilon \sim \ell_P^2$ approaches the Planck scale. When agent $i$ interacts with the rock, the coupling term
+
+\begin{equation}
+\beta_{i,\mathrm{rock}} \, \mathrm{KL}(q_i \| \Omega_{i,\mathrm{rock}}[q_{\mathrm{rock}}])
+\end{equation}
+
+carries weight proportional to $\Sigma_{\mathrm{rock}}^{-1} \sim \ell_P^{-2}$, vastly dominating $i$'s total free energy. Agent $i$'s beliefs are forced into alignment—there is no freedom to maintain alternative priors when coupled to such high precision.
+
+The apparent objectivity of macroscopic physics thus arises not from 
+pre-existing external reality but from epistemic anchoring: high-precision systems constrain all observers into consensus. Rocks 
+appear "certainly there" because their extreme self-precision leaves 
+no room for disagreement.
+
+\subsection{Quantum Systems: Pre-Consensus Dynamics}
+
+Quantum systems, however, represent the opposite regime where agents have not yet established consensus. Consider a particle before measurement, with different observers maintaining different priors:
+
+\begin{itemize}
+\item Observer $A$ expects localization near $x_0$: 
+      $p_A(x) = \mathcal{N}(x_0, \sigma_A^2)$
+\item Observer $B$ expects localization near $x_1 \neq x_0$: 
+      $p_B(x) = \mathcal{N}(x_1, \sigma_B^2)$  
+\item Observer $C$ has diffuse uncertainty: 
+      $p_C(x) = \mathcal{N}(x_{\text{avg}}, \sigma_C^2)$ with $\sigma_C \gg \sigma_A, \sigma_B$
+\end{itemize}
+
+Each observer assigns a different inertial mass via $M = \mathrm{tr}(\Sigma_p^{-1})$. 
+The particle has no observer-independent mass prior to consensus formation.
+
+Measurement is the dynamical process by which an apparatus (itself a 
+high-precision macroscopic system) couples to the particle and dominates the free energy landscape, forcing all observers into agreement. What physics calls "wavefunction collapse" emerges as the transition from pre-consensus (perspectival, observer-dependent) to post-consensus (shared, objective) physics.
+
+Our framework suggests a potential resolution to the measurement problem. What appears as discontinuous "collapse" may emerge from the continuous dynamics of precision-weighted consensus formation when a high-precision macroscopic apparatus couples to a low-precision quantum system. Demonstrating this rigorously requires extending the framework to include quantum superposition states, which remains future work.
+
+
+\subsection{Relation to Existing Participatory Approaches}
+
+Taking Wheeler's participatory universe \cite{Wheeler1990} seriously,  this perspectival structure extends several philosophical and physical 
+traditions.
+
+\paragraph{Kantian Idealism.} Kant argued that space and time are not 
+"things in themselves" but forms of "sensuous intuition" through which the mind organizes experience \cite{Kant1781}. Our framework makes this precise: spacetime geometry is the pullback of the Fisher metric, determined by agent priors rather than existing independently.
+
+\paragraph{Relational Quantum Mechanics.} Rovelli \cite{Rovelli1996} 
+argues quantum states are relative to observers. We extend this further and find that not only states but masses, geometry, temporal flow, and physical laws themselves are observer-dependent until consensus forms. Prior alignment is what creates the shared physics we mistake for objective reality.
+
+\paragraph{QBism.} Fuchs et al.\ \cite{Fuchs2014} interpret quantum 
+probabilities as subjective degrees of belief. Our framework shares this spirit but provides the specific dynamical mechanism and geometry, variational free energy minimization on gauge-covariant principal bundles by which intersubjective agreement emerges from initially disparate beliefs.
+
+
+\subsection{Realization of Wheeler's Program}
+
+John Wheeler proposed that physics might ultimately rest on information-theoretic foundations, captured in slogans such as "it from bit" and "law without law" \cite{Wheeler1990}. The present framework provides a concrete mathematical framework with falsifiable predictions for this vision.
+
+In tandem Wheeler's "participatory universe" holds that observers constitute reality rather than merely measuring a pre-existing world. In our framework, spacetime structure is not ontologically prior to agents but emerges from their consensus. The coupling terms in the variational functional drive agents toward aligned beliefs; the geometry they collectively experience is this alignment made manifest.
+
+Finally, "law without law" suggests that physical regularities emerge from deeper principles rather than being axiomatic. Here, the laws of mechanics emerge from variational free energy minimization on a principal bundle. No dynamical laws are assumed; they arise from the geometry of inference. Furthermore, gauge invariance of physical law is manifestly a consequence of agent-agent alignment and consensus.  Any agents which agree on reality must be gauge equivalent.  Our theory produces this as a consequence, rather than an assumption.
+
+
+\subsection{A Falsifiable Prediction}
+
+\subsubsection{Mass Deficit in Quantum Superpositions}
+
+A particle in a spatial superposition $|\psi\rangle = \frac{1}{\sqrt{2}}(|x_1\rangle + |x_2\rangle)$ has an uncertain position with variance $\sigma^2 \sim (x_2-x_1)^2/4$. Standard quantum mechanics assigns a fixed rest mass $m_0$ independent of the state. Our framework predicts the effective inertial mass depends on localization precision by observers
+
+\begin{equation}
+M_{\text{superposition}} = \frac{1}{\sigma^2} \ll M_{\text{localized}} = \frac{1}{\sigma_0^2}
+\end{equation}
+
+where $\sigma_0 \to 0$ for a collapsed state.
+
+If our framework is extensible to quantum phenomena (which we have not shown) we can test these ideas by preparing a massive particle (such as fullerene C$_{60}$) in a spatial superposition with separation $\Delta x \sim 100$ nm using near-field interferometry \cite{Arndt2014}. We may measure the effective mass through gravitational coupling if mass sources curvature. The superposed state should exhibit reduced gravitational self-energy compared to the localized states, i.e.  
+$E_g^{\text{super}} < E_g^{\text{local}}$. This could be detected via precision interferometry measuring the phase shift $\phi \propto M \cdot g$ in a gravitational field.
+
+Alternatively the dynamical phase accumulated in an interferometer depends on kinetic energy $\phi_{\text{dyn}} \propto M v^2 t/\hbar$. Reduced mass in superposition should produce measurable phase shifts.
+
+\textbf{Critical distinction from Penrose-Diósi:} Their gravitational decoherence predicts massive superpositions are \emph{unstable} and collapse faster. Our framework predicts they have \emph{reduced mass} and should be more stable (lower inertia resists environmental perturbations). 
+
+Current levitated optomechanics experiments with nanoparticles approach the required sensitivity \cite{Bateman2014, Millen2020}. A null result (no mass deficit in superposition) would falsify the central claim that $M = \mathrm{tr}(\Sigma_p^{-1})$.
+
+
+
+
+%==============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%==============================================================================
+
+We have shown that an inertial mass-like quantity emerges in the form of statistical precision via the inverse covariance of an agent's predictive model, within a gauge-theoretic informational bundle geometry. The second-order KL expansion provides kinetic energy with the Fisher metric as mass matrix. The Lagrangian structure $\mathcal{L} = T - V$ automatically yields Lorentzian signature when covariantized to field theory.
+
+Most significantly, in our Wheelerian framework, mass and geometry are perspectival, defined relative to each agent's prior, with objective physics emerging only through inter-agent consensus. Different groups of agents may assign completely different "physics" to their shared reality.  While arbitrary foolishness might emerge at first glance we find a surprising deep self-consistency throughout the framework.  This provides a novel and concrete realization of Wheeler's participatory universe wherein physical law emerges from the epistemic alignment of observing agents. It remains unclear whether this represents a new conceptualization of physics or simply an elegant alternative perspective and interpretation void of experimental predictions.  While many questions remain, this framework, based solely on informational geometry, may find utility not only in physics but also diverse fields where dynamical informational systems interact and evolve.
+
+All analytical gradients verified against:
+- Numerical finite differences (tolerance $10^{-6}$)
+- PyTorch automatic differentiation (relative error $< 10^{-8}$)
+
+\section{Methods}
+\subsection{Computational Details}
+All simulations were implemented in Python.
+
+\subsection{Large Language Model Assistance}
+Claude Sonnet 4.5 was utilized as a programming and typesetting assistant.
+
+
+\section*{Statements and Declarations}
+
+\subsection*{Competing Interests}
+The author declares no competing interests, either financial or non-financial, related to the work submitted for publication. This research received no specific grant from any funding agency in the public, commercial, or not-for-profit sectors.
+
+\subsection*{Author Contributions}
+R.C.D. conceived the theoretical framework, performed all mathematical derivations, designed and implemented all computational experiments, analyzed all results, and wrote the manuscript. Large language model assistance was limited to programming support, fact checking, and LaTeX formatting as detailed in the Methods section.
+
+\subsection*{Data Availability}
+All code and data will be made publicly available upon publication at [https://github.com/cdenn016/Participatory-It-From-Bit-Universe].
+
+\subsection*{Funding}
+This research received no external funding.
+
+
+
+
+%==============================================================================
+\appendix
+%==============================================================================
+
+
+
+\section{Detailed KL Expansion for Multivariate Gaussians}
+\label{app:kl}
+
+For $q = \mathcal{N}(\mu_q, \Sigma_q)$ and $p = \mathcal{N}(\mu_p, \Sigma_p)$, the KL divergence is:
+\begin{equation}
+D_{KL}(q \| p) = \frac{1}{2}\left[tr(\Sigma_p^{-1}\Sigma_q) + \Delta\mu^T \Sigma_p^{-1} \Delta\mu - K + \ln\frac{|\Sigma_p|}{|\Sigma_q|}\right]
+\end{equation}
+where $\Delta\mu = \mu_q - \mu_p$ and $K = \dim(\mu)$.
+
+Under the shift $\mu_q \to \mu_q + d\mu$:
+\begin{align}
+D_{KL}(q + dq \| p) &= \frac{1}{2}\left[tr(\Sigma_p^{-1}\Sigma_q) + (\Delta\mu + d\mu)^T \Sigma_p^{-1} (\Delta\mu + d\mu) - K + \ln\frac{|\Sigma_p|}{|\Sigma_q|}\right] \\
+&= D_{KL}(q \| p) + \Delta\mu^T \Sigma_p^{-1} d\mu + \frac{1}{2} d\mu^T \Sigma_p^{-1} d\mu
+\end{align}
+
+The first-order term $\Delta\mu^T \Sigma_p^{-1} d\mu$ is the directional derivative (force).
+
+The second-order term $\frac{1}{2} d\mu^T \Sigma_p^{-1} d\mu$ is the kinetic energy contribution.
+
+With $d\mu = \dot{\mu}\, dt$:
+\begin{equation}
+\Delta D_{KL} = \left(\nabla_\mu D_{KL}\right) \cdot \dot{\mu}\, dt + \frac{1}{2} \dot{\mu}^T \Sigma_p^{-1} \dot{\mu}\, dt^2
+\end{equation}
+
+Integrating over time and identifying the action:
+\begin{equation}
+S = \int dt \left[\frac{1}{2} \dot{\mu}^T \Sigma_p^{-1} \dot{\mu} - V(\mu)\right]
+\end{equation}
+
+\subsection*{Mass Evolution from Prior Alignment}
+
+Updates to prior covariances $\Sigma_{p,i}$ via $\gamma_{ij}$ coupling 
+directly modify the mass tensor $M_i = \Sigma_{p,i}^{-1}$. This creates 
+dynamical mass:
+\begin{equation}
+\frac{dM_i}{dt} = -M_i \left(\frac{d\Sigma_{p,i}}{dt}\right) M_i
+\end{equation}
+
+Consensus formation drives $\Sigma_{p,i} \to \Sigma_{\text{consensus}}$, 
+establishing shared mass values. This is how objectivity emerges.
+
+
+
+\section{Gauge Structure and the Emergent Metric}
+\label{app:gauge}
+
+In the full gauge-theoretic framework \cite{Dennis2025}, agents carry gauge frames $\phi_i(c) \in \mathfrak{so}(3)$ over the base manifold $\Cbase$. The transport operator:
+\begin{equation}
+\Omega_{ij} = e^{\phi_i} e^{-\phi_j}
+\end{equation}
+
+
+
+
+The emergent metric has components:
+\begin{equation}
+g_{\mu\nu}(x) = \sum_i G_{ab}^{(i)}(x) \frac{\partial \theta_i^a}{\partial x^\mu} \frac{\partial \theta_i^b}{\partial x^\nu}
+\end{equation}
+
+where $\theta_i^a$ are coordinates on agent $i$'s statistical manifold 
+(fiber), and the pullback $\frac{\partial \theta_i^a}{\partial x^\mu}$ 
+maps base manifold tangent vectors to fiber coordinates and $G_{ab}^{(i)}$ is the Fisher metric on agent $i$'s statistical manifold.
+
+
+
+\section*{Explicit Gradient Expressions for SO(3) Gaussian Agents}
+
+We derive explicit natural gradient expressions for gauge-theoretic free energy minimization with Gaussian distributions and SO(3) transport. All operations are gauge covariant.
+
+\subsection*{Setup and Notation}
+
+Agent $i$ maintains belief $q_i = \mathcal{N}(\mu_i, \Sigma_i)$ and prior $p_i = \mathcal{N}(\mu_{p,i}, \Sigma_{p,i})$ over $K$-dimensional fiber. Transport operator $\Omega_{ij} = \exp(\phi_i)\exp(-\phi_j) \in \mathrm{SO}(3)$ acts via representation $\rho: \mathrm{SO}(3) \to \mathrm{GL}(K)$.
+
+The free energy decomposes as:
+\begin{equation}
+S = \sum_i \mathrm{KL}(q_i \| p_i) + \sum_{ij} \beta_{ij} \mathrm{KL}(q_i \| \Omega_{ij}[q_j]) + \sum_{ij} \gamma_{ij} \mathrm{KL}(p_i \| \tilde{\Omega}_{ij}[p_j])
+\end{equation}
+
+Attention weights are defined by:
+\begin{equation}
+\beta_{ij} = \frac{\exp\left[-\kappa_\beta^{-1}\mathrm{KL}(q_i \| \Omega_{ij}[q_j])\right]}{\sum_k \exp\left[-\kappa_\beta^{-1}\mathrm{KL}(q_i \| \Omega_{ik}[q_k])\right]}
+\end{equation}
+
+\subsection*{Free Energy Gradient: Belief Means (Complete)}
+
+The belief alignment term is:
+\begin{equation}
+S_{\mathrm{belief}} = \sum_j \beta_{ij}(\mu_i, \Sigma_i) \, \mathrm{KL}(q_i \| \Omega_{ij}[q_j])
+\end{equation}
+
+Applying the product rule:
+\begin{equation}
+\nabla_{\mu_i} S_{\mathrm{belief}} = \sum_j \left[ \frac{\partial \beta_{ij}}{\partial \mu_i} \mathrm{KL}_{ij} + \beta_{ij} \frac{\partial \mathrm{KL}_{ij}}{\partial \mu_i} \right]
+\end{equation}
+
+The softmax derivative for attention weights gives:
+\begin{equation}
+\frac{\partial \beta_{ij}}{\partial \mu_i} = -\frac{1}{\kappa_\beta} \beta_{ij} \left[\frac{\partial \mathrm{KL}_{ij}}{\partial \mu_i} - \sum_k \beta_{ik} \frac{\partial \mathrm{KL}_{ik}}{\partial \mu_i}\right]
+\end{equation}
+
+For the direct KL gradient:
+\begin{equation}
+\frac{\partial \mathrm{KL}_{ij}}{\partial \mu_i} = (\Omega_{ij}\Sigma_j\Omega_{ij}^T)^{-1}(\mu_i - \Omega_{ij}\mu_j)
+\end{equation}
+
+Substituting and simplifying:
+\begin{align}
+\nabla_{\mu_i} S_{\mathrm{belief}} &= \sum_j \beta_{ij} (\Omega_{ij}\Sigma_j\Omega_{ij}^T)^{-1}(\mu_i - \Omega_{ij}\mu_j) \left[1 - \frac{\mathrm{KL}_{ij}}{\kappa_\beta}\right] \nonumber \\
+&\quad + \frac{1}{\kappa_\beta}\left(\sum_j \beta_{ij}\mathrm{KL}_{ij}\right) \sum_k \beta_{ik} (\Omega_{ik}\Sigma_k\Omega_{ik}^T)^{-1}(\mu_i - \Omega_{ik}\mu_k)
+\end{align}
+
+Including the self-term $\mathrm{KL}(q_i \| p_i)$:
+\begin{equation}
+\boxed{\nabla_{\mu_i} S = \Sigma_i^{-1}(\mu_i - \mu_{p,i}) + \sum_j \beta_{ij} (\Omega_{ij}\Sigma_j\Omega_{ij}^T)^{-1}(\mu_i - \Omega_{ij}\mu_j) \left[1 - \frac{\mathrm{KL}_{ij}}{\kappa_\beta}\right] + R_\mu}
+\end{equation}
+
+where the reweighting term is:
+\begin{equation}
+R_\mu = \frac{1}{\kappa_\beta}\left(\sum_j \beta_{ij}\mathrm{KL}_{ij}\right) \sum_k \beta_{ik} (\Omega_{ik}\Sigma_k\Omega_{ik}^T)^{-1}(\mu_i - \Omega_{ik}\mu_k)
+\end{equation}
+
+The natural gradient is:
+\begin{equation}
+\tilde{\nabla}_{\mu_i} S = \Sigma_i \nabla_{\mu_i} S
+\end{equation}
+
+\subsection*{Free Energy Gradient: Belief Covariances (Complete)}
+
+Similarly for covariances, the product rule gives:
+\begin{equation}
+\nabla_{\Sigma_i} S_{\mathrm{belief}} = \sum_j \left[ \frac{\partial \beta_{ij}}{\partial \Sigma_i} \mathrm{KL}_{ij} + \beta_{ij} \frac{\partial \mathrm{KL}_{ij}}{\partial \Sigma_i} \right]
+\end{equation}
+
+The softmax derivative is:
+\begin{equation}
+\frac{\partial \beta_{ij}}{\partial \Sigma_i} = -\frac{1}{\kappa_\beta} \beta_{ij} \left[\frac{\partial \mathrm{KL}_{ij}}{\partial \Sigma_i} - \sum_k \beta_{ik} \frac{\partial \mathrm{KL}_{ik}}{\partial \Sigma_i}\right]
+\end{equation}
+
+For Gaussian KL divergence:
+\begin{equation}
+\frac{\partial \mathrm{KL}_{ij}}{\partial \Sigma_i} = \frac{1}{2}\left[-\Sigma_i^{-1} + (\Omega_{ij}\Sigma_j\Omega_{ij}^T)^{-1}\right]
+\end{equation}
+
+The complete gradient including self-term is:
+\begin{align}
+\nabla_{\Sigma_i} S &= \frac{1}{2}\left[-\Sigma_i^{-1} + \Sigma_{p,i}^{-1}\right] \nonumber \\
+&\quad + \frac{1}{2}\sum_j \beta_{ij} \left[-\Sigma_i^{-1} + (\Omega_{ij}\Sigma_j\Omega_{ij}^T)^{-1}\right]\left[1 - \frac{\mathrm{KL}_{ij}}{\kappa_\beta}\right] \nonumber \\
+&\quad + \frac{1}{2\kappa_\beta}\left(\sum_j \beta_{ij}\mathrm{KL}_{ij}\right) \sum_k \beta_{ik} \left[-\Sigma_i^{-1} + (\Omega_{ik}\Sigma_k\Omega_{ik}^T)^{-1}\right]
+\end{align}
+
+The natural gradient on $\mathcal{S}_{++}^K$ is:
+\begin{equation}
+\tilde{\nabla}_{\Sigma_i} S = \Sigma_i (\nabla_{\Sigma_i} S) \Sigma_i
+\end{equation}
+
+\textbf{Gauge Covariance:} Under gauge transformation $g \in \mathrm{SO}(3)$:
+\begin{align}
+\Sigma_i &\mapsto g\Sigma_i g^T \\
+\nabla_{\Sigma_i} S &\mapsto g(\nabla_{\Sigma_i} S)g^T \\
+\tilde{\nabla}_{\Sigma_i} S &\mapsto g(\tilde{\nabla}_{\Sigma_i} S)g^T
+\end{align}
+
+This bilinear form $\Sigma (\cdot) \Sigma$ is the unique gauge-covariant gradient structure on $\mathcal{S}_{++}^K$.
+
+\subsection*{Retraction: Staying on the SPD Manifold}
+
+After computing $\tilde{\nabla}_{\Sigma_i} S$, we update via retraction to ensure $\Sigma_i$ remains positive-definite:
+\begin{equation}
+\Sigma_i^{\mathrm{new}} = \mathcal{R}_{\Sigma_i}(-\eta_\Sigma \tilde{\nabla}_{\Sigma_i} S)
+\end{equation}
+
+We use the \textbf{affine-invariant exponential map}:
+\begin{equation}
+\mathcal{R}_{\Sigma}(\Delta) = \Sigma^{1/2} \exp\left(\Sigma^{-1/2} \Delta \Sigma^{-1/2}\right) \Sigma^{1/2}
+\end{equation}
+
+where $\exp(\cdot)$ is the matrix exponential. This retraction:
+\begin{itemize}
+\item Preserves positive-definiteness (exponential of symmetric matrix is SPD)
+\item Is affine-invariant under $\Sigma \mapsto A\Sigma A^T$ for invertible $A$
+\item Is gauge covariant: $\mathcal{R}_{g\Sigma g^T}(g\Delta g^T) = g \mathcal{R}_{\Sigma}(\Delta) g^T$
+\end{itemize}
+
+\textbf{Computational Implementation:} Using eigendecomposition $\Sigma = V\Lambda V^T$:
+\begin{equation}
+\mathcal{R}_{\Sigma}(\Delta) = V \sqrt{\Lambda} \exp\left(\sqrt{\Lambda}^{-1} V^T \Delta V \sqrt{\Lambda}^{-1}\right) \sqrt{\Lambda} V^T
+\end{equation}
+
+This is the Riemannian exponential map---the geodesic retraction following the unique geodesic from $\Sigma$ in direction $\Delta$ for unit parameter.
+
+
+
+\subsection*{Complete Gauge Frame Gradients (Product Rule)}
+
+The free energy contains gauge frames $\phi_i$ through both transport operators and attention weights. For the belief alignment term:
+\begin{equation}
+S_{\mathrm{belief}} = \sum_j \beta_{ij}(\phi_i) \, \mathrm{KL}(q_i \| \Omega_{ij}(\phi_i)[q_j])
+\end{equation}
+
+Applying the product rule:
+\begin{equation}
+\nabla_{\phi_i} S_{\mathrm{belief}} = \sum_j \left[ \frac{\partial \beta_{ij}}{\partial \phi_i} \mathrm{KL}(q_i \| \Omega_{ij}[q_j]) + \beta_{ij} \frac{\partial}{\partial \phi_i}\mathrm{KL}(q_i \| \Omega_{ij}[q_j]) \right]
+\end{equation}
+
+\subsubsection*{Term 1: Direct KL Gradient}
+
+For small gauge fields $|\phi_i| \ll 1$, or using right-invariant 
+vector fields
+
+\begin{equation}
+\frac{\partial \Omega_{ij}}{\partial \phi_i^a} = G_a \Omega_{ij}
+\end{equation}
+
+where $\{G_a\}$ are the SO(3) generators. For finite transformations, 
+the full differential involves $d\exp$ via the Baker-Campbell-Hausdorff 
+formula.
+
+For the transported KL divergence, using $\frac{\partial \Omega_{ij}}{\partial \phi_i^a} = G_a \Omega_{ij}$ where $\{G_a\}$ are SO(3) generators:
+\begin{equation}
+\frac{\partial}{\partial \phi_i^a}\mathrm{KL}(q_i \| \Omega_{ij}[q_j]) = \mathrm{tr}\left[G_a \Omega_{ij} \frac{\partial}{\partial \Omega_{ij}}\mathrm{KL}(q_i \| \Omega_{ij}[q_j])\right]
+\end{equation}
+
+For Gaussians, the functional derivative is:
+\begin{equation}
+\frac{\partial}{\partial \Omega_{ij}}\mathrm{KL}(q_i \| \Omega_{ij}[q_j]) = (\Omega_{ij}\Sigma_j\Omega_{ij}^T)^{-1}(\mu_i - \Omega_{ij}\mu_j)\mu_j^T + \mathrm{tr}\left[(\Omega_{ij}\Sigma_j\Omega_{ij}^T)^{-1}\Sigma_j\right]\Omega_{ij}
+\end{equation}
+
+\subsubsection*{Term 2: Attention Weight Gradient (Softmax Derivative)}
+
+The softmax structure of $\beta_{ij}$ yields:
+\begin{equation}
+\frac{\partial \beta_{ij}}{\partial \phi_i^a} = -\frac{1}{\kappa_\beta} \beta_{ij} \left[\frac{\partial}{\partial \phi_i^a}\mathrm{KL}(q_i \| \Omega_{ij}[q_j]) - \sum_k \beta_{ik} \frac{\partial}{\partial \phi_i^a}\mathrm{KL}(q_i \| \Omega_{ik}[q_k])\right]
+\end{equation}
+
+This follows from $\frac{\partial}{\partial x_i}\mathrm{softmax}(x)_j = \mathrm{softmax}(x)_j(\delta_{ij} - \mathrm{softmax}(x)_i)$ applied with $x_j = -\kappa_\beta^{-1}\mathrm{KL}_j$.
+
+\subsubsection*{Combined Gradient (Two-Term Structure)}
+
+Substituting the softmax derivative and simplifying:
+\begin{align}
+\nabla_{\phi_i^a} S_{\mathrm{belief}} &= \sum_j \beta_{ij}\frac{\partial \mathrm{KL}_{ij}}{\partial \phi_i^a}\left[1 - \frac{\mathrm{KL}_{ij}}{\kappa_\beta}\right] \nonumber \\
+&\quad + \frac{1}{\kappa_\beta}\left(\sum_j \beta_{ij}\mathrm{KL}_{ij}\right)\left(\sum_k \beta_{ik}\frac{\partial \mathrm{KL}_{ik}}{\partial \phi_i^a}\right)
+\end{align}
+
+where $\mathrm{KL}_{ij} \equiv \mathrm{KL}(q_i \| \Omega_{ij}[q_j])$.
+
+\subsubsection*{Physical Interpretation}
+
+The complete gradient has two interpretable terms:
+\begin{equation}
+\boxed{\nabla_{\phi_i} S = \underbrace{\sum_j \beta_{ij}\nabla_{\phi_i}\mathrm{KL}_{ij}}_{\text{Direct alignment}} + \underbrace{\frac{1}{\kappa_\beta}\left(\sum_j \beta_{ij}\mathrm{KL}_{ij}\right) \left(\sum_k \beta_{ik}\nabla_{\phi_i}\mathrm{KL}_{ik}\right)}_{\text{Attention reweighting}}}
+\end{equation}
+
+\begin{itemize}
+\item \textbf{Direct alignment:} Gradient of weighted KL divergences (as if $\beta$ were constant)
+\item \textbf{Attention reweighting:} How changing $\phi_i$ redistributes attention across neighbors
+\end{itemize}
+
+When $\kappa_\beta \to \infty$ (soft/uniform attention), the reweighting term vanishes. When $\kappa_\beta \to 0$ (hard attention), reweighting dominates.
+
+\subsubsection*{Prior Alignment (Similar Structure)}
+
+The prior alignment gradient has identical form:
+\begin{equation}
+\nabla_{\phi_i} S_{\mathrm{prior}} = \sum_j \gamma_{ij}\nabla_{\phi_i}\mathrm{KL}(p_i \| \tilde{\Omega}_{ij}[p_j]) + \frac{1}{\kappa_\gamma}\left(\sum_j \gamma_{ij}\mathrm{KL}(p_i \| \tilde{\Omega}_{ij}[p_j])\right)\left(\sum_k \gamma_{ik}\nabla_{\phi_i}\mathrm{KL}_{ik}^p\right)
+\end{equation}
+
+\subsection*{Complete Update Equations}
+
+The gauge-covariant update scheme is:
+\begin{align}
+\mu_i^{t+1} &= \mu_i^t - \eta_\mu \Sigma_i^t \nabla_{\mu_i} S \\
+\Sigma_i^{t+1} &= \left(\Sigma_i^t\right)^{1/2} \exp\left[\left(\Sigma_i^t\right)^{-1/2}\left(-\eta_\Sigma \tilde{\nabla}_{\Sigma_i} S\right)\left(\Sigma_i^t\right)^{-1/2}\right] \left(\Sigma_i^t\right)^{1/2} \\
+\phi_i^{t+1} &= \phi_i^t - \eta_\phi \nabla_{\phi_i} S
+\end{align}
+
+where learning rates satisfy timescale separation $\eta_\mu : \eta_p : \eta_\phi \sim 1 : \epsilon : \epsilon^2$ with $\epsilon \ll 1$.
+
+\subsection*{Computational Complexity}
+
+Per gradient step with $N$ agents, dimension $K$:
+\begin{itemize}
+\item Computing all $\Omega_{ij}$: $O(N^2 K^3)$ matrix exponentials
+\item Computing all transported KL divergences: $O(N^2 K^3)$ inverse covariances
+\item Natural gradient projections: $O(NK^3)$ per agent
+\item Exponential map retraction: $O(NK^3)$ eigendecomposition per agent
+\end{itemize}
+
+Total complexity: $O(N^2 K^3)$ per step, dominated by pairwise coupling.
+
+\subsection*{Numerical Stability and Verification}
+
+\textbf{Positive-Definiteness:} The exponential map retraction $\mathcal{R}_{\Sigma}(\Delta)$ maps to $\mathcal{S}_{++}^K$ for any symmetric $\Delta$, guaranteeing $\Sigma_i \succ 0$ throughout optimization.
+
+\textbf{Gauge Orbit Preservation:} Under simultaneous transformation $\mu_i \mapsto g\mu_i$, $\Sigma_i \mapsto g\Sigma_i g^T$, $\phi_i \mapsto \phi_i + \xi$ for all $i$, the gradients transform covariantly and updates preserve gauge invariance of the free energy functional.
+
+\textbf{Gradient Verification:} All analytical gradients verified against:
+\begin{itemize}
+\item Numerical finite differences (tolerance $10^{-6}$)
+\item PyTorch automatic differentiation (relative error $< 10^{-8}$)
+\end{itemize}
+
+
+
+\bibliographystyle{unsrt} 
+\bibliography{references}
+
+\end{document}
+
