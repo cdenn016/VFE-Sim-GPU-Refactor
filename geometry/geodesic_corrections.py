@@ -18,15 +18,24 @@ Key Features:
 
 Mathematical Background:
 ------------------------
-The mass matrix M includes:
-    M = Sigma_p^{-1} + sum_j beta_ij Omega_ij Sigma_q_j^{-1} Omega_ij^T
+The COMPLETE mass matrix M includes 4 terms:
+    M = Λ_p + Λ_o + Σ_k β_ik Ω_ik Σ_q_k^{-1} Ω_ik^T + (Σ_j β_ji) Σ_q_i^{-1}
 
-The softmax weights beta_ij depend on theta through KL divergences:
-    beta_ij = exp[-KL_ij/kappa] / sum_k exp[-KL_ik/kappa]
+Expanded:
+    1. Prior precision: Λ_p = Σ_p^{-1}
+    2. Observation precision: Λ_o = R_obs^{-1}
+    3. Outgoing attention: Σ_k β_ik Ω_ik Σ_q_k^{-1} Ω_ik^T
+    4. Incoming attention: (Σ_j β_ji) Σ_q_i^{-1}
 
-Therefore dM/d\theta includes contributions from:
-    1. Direct dependence of Sigma_q_j on theta (when theta = Sigma_j)
-    2. Indirect dependence through beta_ij(theta) (always)
+The softmax weights β_ij depend on θ through KL divergences:
+    β_ij = exp[-KL_ij/κ] / Σ_k exp[-KL_ik/κ]
+
+Therefore dM/dθ includes contributions from:
+    1. Direct dependence of Σ_q on θ (terms 3, 4)
+    2. Indirect dependence through β_ij(θ) (term 3)
+    3. Observation precision (constant if R_obs fixed)
+
+Reference: Dennis (2025). The Inertia of Belief. Eq. 266-268.
 
 Author: Chris
 Date: November 2025
@@ -256,6 +265,9 @@ def _compute_M_inverse_for_agent(
     """
     Compute M^{-1} for a single agent at current system state.
 
+    COMPLETE 4-term formula:
+        M_i = Λ_p + Λ_o + Σ_k β_ik Λ̃_q,k + Σ_j β_ji Λ_q,i
+
     Args:
         trainer: HamiltonianTrainer
         agent: Agent instance
@@ -264,13 +276,18 @@ def _compute_M_inverse_for_agent(
 
     Returns:
         M_inv: Inverse mass matrix, shape (*S, K, K) or (K, K)
+
+    References:
+        Dennis (2025). The Inertia of Belief. Equation (266-268).
     """
     from gradients.softmax_grads import compute_softmax_weights
 
     K = agent.config.K
     spatial_shape = agent.mu_q.shape[:-1] if agent.mu_q.ndim > 1 else ()
 
-    # Initialize with bare mass: Sigma_p^{-1}
+    # ===================================================================
+    # TERM 1: Prior precision Λ_p = Σ_p^{-1}
+    # ===================================================================
     if agent.Sigma_p.ndim == 2:
         M = np.linalg.inv(agent.Sigma_p + 1e-8 * np.eye(K))
     elif agent.Sigma_p.ndim == 3:
@@ -283,7 +300,26 @@ def _compute_M_inverse_for_agent(
             for j in range(agent.Sigma_p.shape[1]):
                 M[i, j] = np.linalg.inv(agent.Sigma_p[i, j] + 1e-8 * np.eye(K))
 
-    # Add relational mass from consensus coupling
+    # ===================================================================
+    # TERM 2: Observation precision Λ_o = R_obs^{-1}
+    # ===================================================================
+    if trainer.system.R_obs is not None and trainer.system.config.lambda_obs > 0:
+        Lambda_obs = np.linalg.inv(trainer.system.R_obs + 1e-8 * np.eye(trainer.system.R_obs.shape[0]))
+
+        if Lambda_obs.shape[0] == K:
+            if agent.Sigma_p.ndim == 2:
+                M += Lambda_obs
+            elif agent.Sigma_p.ndim == 3:
+                for i in range(agent.Sigma_p.shape[0]):
+                    M[i] += Lambda_obs
+            else:
+                for i in range(agent.Sigma_p.shape[0]):
+                    for j in range(agent.Sigma_p.shape[1]):
+                        M[i, j] += Lambda_obs
+
+    # ===================================================================
+    # TERM 3: Outgoing attention Σ_k β_ik Ω_ik Σ_q,k^{-1} Ω_ik^T
+    # ===================================================================
     kappa_beta = getattr(trainer.system.config, 'kappa_beta', 1.0)
 
     if recompute_beta:
@@ -299,27 +335,68 @@ def _compute_M_inverse_for_agent(
                 trainer.system, agent_idx, 'belief', kappa_beta
             )
 
-    for j_idx, beta_ij in beta_fields.items():
-        agent_j = trainer.system.agents[j_idx]
-        Omega_ij = trainer.system.compute_transport_ij(agent_idx, j_idx)
+    for k_idx, beta_ik in beta_fields.items():
+        agent_k = trainer.system.agents[k_idx]
+        Omega_ik = trainer.system.compute_transport_ij(agent_idx, k_idx)
 
         if agent.mu_q.ndim == 1:
             # 0D
-            Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q + 1e-8 * np.eye(K))
-            M += float(beta_ij) * (Omega_ij @ Sigma_q_j_inv @ Omega_ij.T)
+            Sigma_q_k_inv = np.linalg.inv(agent_k.Sigma_q + 1e-8 * np.eye(K))
+            M += float(beta_ik) * (Omega_ik @ Sigma_q_k_inv @ Omega_ik.T)
         elif agent.mu_q.ndim == 2:
             # 1D field
             for i in range(agent.mu_q.shape[0]):
-                Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q[i] + 1e-8 * np.eye(K))
-                Omega_c = Omega_ij[i] if Omega_ij.ndim == 3 else Omega_ij
-                M[i] += beta_ij[i] * (Omega_c @ Sigma_q_j_inv @ Omega_c.T)
+                Sigma_q_k_inv = np.linalg.inv(agent_k.Sigma_q[i] + 1e-8 * np.eye(K))
+                Omega_c = Omega_ik[i] if Omega_ik.ndim == 3 else Omega_ik
+                M[i] += beta_ik[i] * (Omega_c @ Sigma_q_k_inv @ Omega_c.T)
         else:
             # 2D field
             for i in range(agent.mu_q.shape[0]):
                 for j in range(agent.mu_q.shape[1]):
-                    Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q[i, j] + 1e-8 * np.eye(K))
-                    Omega_c = Omega_ij[i, j] if Omega_ij.ndim == 4 else Omega_ij
-                    M[i, j] += beta_ij[i, j] * (Omega_c @ Sigma_q_j_inv @ Omega_c.T)
+                    Sigma_q_k_inv = np.linalg.inv(agent_k.Sigma_q[i, j] + 1e-8 * np.eye(K))
+                    Omega_c = Omega_ik[i, j] if Omega_ik.ndim == 4 else Omega_ik
+                    M[i, j] += beta_ik[i, j] * (Omega_c @ Sigma_q_k_inv @ Omega_c.T)
+
+    # ===================================================================
+    # TERM 4: Incoming attention (Σ_j β_ji) Σ_q,i^{-1}
+    # ===================================================================
+    total_incoming_beta = 0.0
+
+    for j_idx, agent_j in enumerate(trainer.system.agents):
+        if j_idx == agent_idx:
+            continue
+
+        beta_j_fields = compute_softmax_weights(trainer.system, j_idx, 'belief', kappa_beta)
+
+        if agent_idx in beta_j_fields:
+            beta_ji = beta_j_fields[agent_idx]
+
+            if agent.mu_q.ndim == 1:
+                total_incoming_beta += float(beta_ji)
+            elif agent.mu_q.ndim == 2:
+                if np.isscalar(beta_ji):
+                    total_incoming_beta = beta_ji
+                else:
+                    total_incoming_beta = float(np.mean(beta_ji))
+            else:
+                if np.isscalar(beta_ji):
+                    total_incoming_beta = beta_ji
+                else:
+                    total_incoming_beta = float(np.mean(beta_ji))
+
+    if total_incoming_beta > 1e-10:
+        if agent.Sigma_p.ndim == 2:
+            Sigma_q_i_inv = np.linalg.inv(agent.Sigma_q + 1e-8 * np.eye(K))
+            M += total_incoming_beta * Sigma_q_i_inv
+        elif agent.Sigma_p.ndim == 3:
+            for i in range(agent.Sigma_p.shape[0]):
+                Sigma_q_i_inv = np.linalg.inv(agent.Sigma_q[i] + 1e-8 * np.eye(K))
+                M[i] += total_incoming_beta * Sigma_q_i_inv
+        else:
+            for i in range(agent.Sigma_p.shape[0]):
+                for j in range(agent.Sigma_p.shape[1]):
+                    Sigma_q_i_inv = np.linalg.inv(agent.Sigma_q[i, j] + 1e-8 * np.eye(K))
+                    M[i, j] += total_incoming_beta * Sigma_q_i_inv
 
     # Invert M to get M^{-1}
     if M.ndim == 2:
