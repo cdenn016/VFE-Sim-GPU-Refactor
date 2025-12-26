@@ -139,6 +139,10 @@ class GaugeTransformerLM(nn.Module):
         ffn_max_seq_len = config.get('ffn_max_seq_len', max_seq_len)
         ffn_prior_lr = config.get('ffn_prior_lr', 0.01)
 
+        # PriorBank positioning: token-dependent (True) vs position-dependent (False, legacy)
+        # CRITICAL: Token-dependent is REQUIRED for language modeling!
+        use_prior_bank = config.get('use_prior_bank', False)  # Toggle for PriorBank
+
         # Pure FEP requires untied embeddings!
         # - Input embeddings (W_in) = priors, updated via p-flow
         # - Output embeddings (W_out) = observation anchors, fixed
@@ -265,6 +269,26 @@ class GaugeTransformerLM(nn.Module):
         )
 
         # =================================================================
+        # PriorBank for Pure FEP (Token-Dependent Priors)
+        # =================================================================
+        self.prior_bank = None
+        if ffn_pure_fep_mode and use_prior_bank:
+            from transformer.prior_bank import PriorBank
+
+            self.prior_bank = PriorBank(
+                vocab_size=vocab_size,
+                embed_dim=embed_dim,
+                init_std=config.get('mu_init_std', None),
+                init_sigma_scale=1.0,
+                learnable_sigma=config.get('evolve_sigma', False),
+                gauge_fixed_priors=gauge_fixed_priors,  # Can use gauge-fixed priors in PriorBank too
+                generators=self.generators if gauge_fixed_priors else None,
+                phi_dim=self.phi_dim,
+            )
+            print(f"[GaugeTransformerLM] Created PriorBank with token-dependent priors (vocab_size={vocab_size})")
+            print(f"                     gauge_fixed_priors={gauge_fixed_priors}")
+
+        # =================================================================
         # Transformer Stack
         # =================================================================
         self.transformer = GaugeTransformerStack(
@@ -298,6 +322,8 @@ class GaugeTransformerLM(nn.Module):
             ffn_pure_fep_mode=ffn_pure_fep_mode,
             ffn_max_seq_len=ffn_max_seq_len,
             ffn_prior_lr=ffn_prior_lr,
+            ffn_prior_bank=self.prior_bank,  # Pass PriorBank to FFN layers
+            ffn_use_prior_bank=use_prior_bank,  # Enable token-dependent priors
             # Memory-efficient options
             ffn_irrep_dims=self._compute_irrep_dims(irrep_spec) if config.get('use_block_diagonal_kl', True) else None,
             ffn_chunk_size=config.get('ffn_chunk_size', None),
@@ -455,6 +481,7 @@ class GaugeTransformerLM(nn.Module):
             self.generators,
             mask=mask,
             mu_prior=mu_prior,  # Pass priors for variational FFN
+            token_ids=token_ids,  # Pass token IDs for PriorBank lookup
             return_intermediates=return_agents,
             cached_head_transports=cached_head_transports,
         )
