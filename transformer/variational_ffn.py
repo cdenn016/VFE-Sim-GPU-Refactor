@@ -1293,6 +1293,8 @@ class VariationalFFNDynamic(nn.Module):
         max_seq_len: int = 512,    # Max sequence length for persistent priors
         pure_fep_mode: bool = False,  # Enable backprop-free learning
         prior_lr: float = 0.01,    # Learning rate for prior updates
+        prior_bank: Optional[nn.Module] = None,  # Token-dependent PriorBank (if provided)
+        use_prior_bank: bool = False,  # If True, use PriorBank (token-dependent) instead of position-dependent priors
         # Memory-efficient options (NEW!)
         irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
         chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
@@ -1316,6 +1318,9 @@ class VariationalFFNDynamic(nn.Module):
             max_seq_len: Maximum sequence length for persistent priors (pure FEP mode)
             pure_fep_mode: If True, use persistent priors that evolve via prediction error
             prior_lr: Learning rate for prior updates in pure FEP mode
+            prior_bank: Optional PriorBank module with token-dependent priors (recommended!)
+            use_prior_bank: If True, use PriorBank (token-dependent priors) instead of
+                           position-dependent priors. CRITICAL for language modeling!
             irrep_dims: Block dimensions [d₁, d₂, ...] for memory-efficient block-diagonal KL.
                        When provided, exploits O(N² × Σᵢdᵢ²) vs O(N² × K²) - massive savings!
             chunk_size: Chunk size for memory-efficient processing. Processes N×N in C×C chunks.
@@ -1350,14 +1355,34 @@ class VariationalFFNDynamic(nn.Module):
         self.pure_fep_mode = pure_fep_mode
         self.max_seq_len = max_seq_len
         self.prior_lr = prior_lr
+        self.use_prior_bank = use_prior_bank
+        self.prior_bank = prior_bank
 
         if pure_fep_mode:
-            # Position-dependent persistent priors (the LEARNING happens here!)
-            # These evolve based on prediction-error-weighted beliefs
-            self.register_buffer('prior_mu', torch.zeros(max_seq_len, embed_dim))
-            self.register_buffer('prior_sigma', torch.ones(max_seq_len, embed_dim))
-            self.register_buffer('prior_update_count', torch.zeros(max_seq_len))
-            self.register_buffer('prior_initialized', torch.tensor(False))
+            if use_prior_bank and prior_bank is not None:
+                # Token-dependent priors via PriorBank (CORRECT for language!)
+                self.prior_bank = prior_bank
+                print(f"[VariationalFFNDynamic] Using PriorBank with token-dependent priors (vocab_size={prior_bank.vocab_size})")
+            elif use_prior_bank and prior_bank is None:
+                raise ValueError(
+                    "use_prior_bank=True requires prior_bank to be provided! "
+                    "Create a PriorBank and pass it to VariationalFFNDynamic."
+                )
+            else:
+                # Legacy position-dependent priors (DEPRECATED for language!)
+                import warnings
+                warnings.warn(
+                    "pure_fep_mode without PriorBank uses POSITION-DEPENDENT priors. "
+                    "This doesn't work for language modeling! "
+                    "Set use_prior_bank=True and provide a PriorBank for token-dependent priors.",
+                    UserWarning
+                )
+                # Position-dependent persistent priors (the LEARNING happens here!)
+                # These evolve based on prediction-error-weighted beliefs
+                self.register_buffer('prior_mu', torch.zeros(max_seq_len, embed_dim))
+                self.register_buffer('prior_sigma', torch.ones(max_seq_len, embed_dim))
+                self.register_buffer('prior_update_count', torch.zeros(max_seq_len))
+                self.register_buffer('prior_initialized', torch.tensor(False))
 
         # Learnable step size
         if learnable_lr:
@@ -1375,6 +1400,7 @@ class VariationalFFNDynamic(nn.Module):
         mask: Optional[torch.Tensor] = None,   # (B, N, N) - causal mask
         targets: Optional[torch.Tensor] = None,  # (B, N) - target token IDs
         W_out: Optional[torch.Tensor] = None,    # (V, K) - output projection
+        token_ids: Optional[torch.Tensor] = None,  # (B, N) - token IDs for PriorBank lookup
         return_beta_history: bool = False,  # Return β evolution for analysis
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[list]]:
         """
@@ -1397,6 +1423,7 @@ class VariationalFFNDynamic(nn.Module):
             mask: Causal mask (B, N, N) where 0 = cannot attend
             targets: Target tokens for observation term (B, N)
             W_out: Output projection for ∂CE/∂μ computation
+            token_ids: Token IDs for PriorBank lookup (required if use_prior_bank=True)
             return_beta_history: If True, return list of β at each step
 
         Returns:
@@ -1426,7 +1453,28 @@ class VariationalFFNDynamic(nn.Module):
         # =====================================================================
         # PURE FEP MODE: Use persistent priors instead of embedding priors
         # =====================================================================
-        if self.pure_fep_mode:
+        if self.pure_fep_mode and self.use_prior_bank:
+            # Token-dependent priors via PriorBank (CORRECT for language!)
+            if token_ids is None:
+                raise ValueError(
+                    "token_ids required when use_prior_bank=True! "
+                    "Pass token_ids to forward() for PriorBank lookup."
+                )
+
+            # Get token-dependent priors from PriorBank
+            mu_p_from_bank, sigma_p_from_bank, _ = self.prior_bank.encode(token_ids)  # (B, N, K)
+
+            # Use PriorBank priors for VFE dynamics
+            mu_p_current = mu_p_from_bank
+
+            # Convert diagonal sigma_p to full covariance if needed
+            if is_diagonal:
+                sigma_p = sigma_p_from_bank
+            else:
+                sigma_p = torch.diag_embed(sigma_p_from_bank)  # (B, N, K) -> (B, N, K, K)
+
+        elif self.pure_fep_mode:
+            # Legacy position-dependent priors (DEPRECATED!)
             # Initialize persistent priors from embeddings on first call
             self.initialize_priors_from_embeddings(mu_prior)
 

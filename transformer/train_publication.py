@@ -361,7 +361,23 @@ GPU_OPTIMIZED_CONFIG = {
     'ffn_pure_fep_mode': False,   # Enable backprop-free learning
     'ffn_prior_lr': 0.01,         # Learning rate for prior updates
 
-    'gauge_fixed_priors': True,
+    # =========================================================================
+    # PRIORBANK POSITIONING (Token-Dependent vs Position-Dependent)
+    # CRITICAL FOR LANGUAGE MODELING!
+    # =========================================================================
+    # When ffn_pure_fep_mode=True, priors can be:
+    # - Token-dependent (use_prior_bank=True):  prior[token_id] - CORRECT for language!
+    # - Position-dependent (use_prior_bank=False): prior[position] - BROKEN for language!
+    #
+    # For language modeling, you MUST use token-dependent priors because:
+    # - Token "bank" should have the same prior regardless of position
+    # - Position 5 could be any token, so position-dependent priors make no sense
+    #
+    # Set this to True to fix pure FEP learning!
+    # =========================================================================
+    'use_prior_bank': True,  # Use token-dependent PriorBank (required for language!)
+
+    'gauge_fixed_priors': False,  # Can use gauge-fixed priors in PriorBank too
 
     # Training (scaled for GPU)
     'max_steps': 20000 ,         # More steps for convergence
