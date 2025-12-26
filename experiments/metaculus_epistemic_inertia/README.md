@@ -4,28 +4,45 @@ Empirical test of the **epistemic inertia** prediction from Hamiltonian Variatio
 
 ## Theoretical Background
 
-The Hamiltonian VFE framework predicts that belief dynamics follow second-order equations with an **effective mass matrix**:
+### Complete Epistemic Mass Formula
+
+The Hamiltonian VFE framework derives belief dynamics from the VFE Hessian. The **effective mass matrix** has FOUR components:
 
 ```
-M_i = Σ_p^{-1} + Σ_j β_ji Ω_ji Σ_q,j^{-1} Ω_ji^T
+M_i = Λ_p,i + Λ_o,i + Σ_k β_ik Λ̃_q,k + Σ_j β_ji Λ_q,i
 ```
 
-Where:
-- `Σ_p^{-1}`: Prior precision (bare mass)
-- `β_ji`: Attention from agent j to agent i (social coupling)
-- `Σ_q,j^{-1}`: Precision of agent j's beliefs (relational mass)
-- `Ω_ji`: Gauge transport operator
+Expanding explicitly:
+```
+M_i = Σ_p,i^{-1}                              [1. Prior precision]
+    + R_obs,i^{-1}                            [2. Observation precision]
+    + Σ_k β_ik Ω_ik Σ_q,k^{-1} Ω_ik^T         [3. Outgoing attention: i→k]
+    + (Σ_j β_ji) Σ_q,i^{-1}                   [4. Incoming attention: j→i]
+```
+
+**Physical Interpretations**:
+
+1. **Prior precision (Λ_p)**: Confident priors resist change
+2. **Observation precision (Λ_o)**: High-quality data anchors beliefs (counterintuitive!)
+3. **Outgoing attention**: Attending to confident neighbors → inheriting their rigidity
+4. **Incoming attention**: Being watched by others → influence costs flexibility
 
 ### Core Prediction
 
-**Agents with many followers/high attention develop greater epistemic inertia**
+**Epistemic mass increases through multiple channels**
 
-This means:
-1. High-mass agents make **smaller updates** in response to new evidence
-2. High-mass agents show **delayed responses** to information shocks
-3. Epistemic inertia increases with social coupling strength
+High-reputation agents develop inertia via:
+1. ✓ Sharper priors from experience (Λ_p ↑)
+2. ✓ More observations accumulated (Λ_o ↑)
+3. ✓ Following many sources (Σ_k β_ik ↑)
+4. ✓ Being followed by others (Σ_j β_ji ↑)
 
-The mechanism: When many people pay attention to you (high β_ji), your effective mass increases, making your beliefs harder to change.
+This predicts:
+- Smaller updates in response to evidence
+- Delayed responses to information shocks
+- Belief rigidity proportional to reputation
+
+**Key insight**: Track record proxies for TOTAL mass, not just one component!
 
 ## Empirical Strategy
 
@@ -289,10 +306,43 @@ Possible follow-ups:
 4. **Prediction accuracy**: Does inertia harm or help performance?
 5. **Community polarization**: Epistemic inertia → echo chambers?
 
+## References
+
+### Theoretical Foundation
+
+This experiment provides empirical validation for:
+
+**Dennis, R.C. (2025). The Inertia of Belief.**
+- Full mass matrix derivation (Equation 266-268)
+- Physical interpretations of all 4 components
+- Testable predictions for epistemic inertia
+- Location: `papers/psych/belief_inertia.tex`
+
+**Critical Context**: The psychology paper was desk rejected by:
+- Perspectives in Psychological Science
+- Entropy
+- Journal of Mathematical Psychology
+
+**Reason for rejection**: Beautiful theory but insufficient empirical evidence. The Nassar helicopter task validation showed overdamped dynamics (as predicted), but this meant the framework reduced to standard gradient descent in that regime. Reviewers wanted evidence of the UNIQUE predictions (oscillations, inertia, overshooting).
+
+**This Metaculus experiment addresses the gap**: Tests epistemic inertia directly in a regime where social mass dominates, providing the missing empirical validation.
+
+### Related Documentation
+
+- **Sociology manuscript**: `docs/derivations_sociology_manuscript.tex`
+  - Shows 6 classical models (DeGroot, Friedkin-Johnsen, etc.) as limits
+  - Full mathematical derivations with Proposition/Proof structure
+  - Intended for AJS, Sociological Theory submission
+
+- **Code implementation**: `agent/hamiltonian_trainer.py`
+  - Complete 4-term mass matrix (lines 445-606)
+  - Observation precision + incoming attention added Dec 2024
+
 ## Contact
 
 For questions about this analysis:
-- Theory: See `docs/derivations_sociology_manuscript.tex`
+- Theory: See `papers/psych/belief_inertia.tex` (psychology paper)
+- Sociology integration: See `docs/derivations_sociology_manuscript.tex`
 - Implementation: See code comments in each module
 - Issues: Open GitHub issue
 
@@ -303,4 +353,6 @@ MIT License - Free to use with attribution
 ---
 
 **Status**: ✓ Pipeline complete, ready to run
+**Purpose**: Empirical validation for rejected psychology paper
+**Target journals**: AJS, Sociological Theory (theory + empirics)
 **Last updated**: December 2024
