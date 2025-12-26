@@ -53,6 +53,8 @@ class GaugeFFN(nn.Module):
         pure_fep_mode: bool = False,
         max_seq_len: int = 512,
         prior_lr: float = 0.01,
+        prior_bank: Optional[nn.Module] = None,  # Token-dependent PriorBank
+        use_prior_bank: bool = False,  # Use PriorBank vs position-dependent priors
         # Phi evolution via VFE gradients (principled approach)
         update_phi: bool = False,  # If True, update phi via ∂F/∂φ
         phi_lr: float = 0.05,      # Learning rate for phi updates
@@ -117,6 +119,8 @@ class GaugeFFN(nn.Module):
             pure_fep_mode=pure_fep_mode,
             max_seq_len=max_seq_len,
             prior_lr=prior_lr,
+            prior_bank=prior_bank,  # Pass PriorBank
+            use_prior_bank=use_prior_bank,  # Enable token-dependent priors
             # Phi evolution via VFE gradients
             update_phi=update_phi,
             phi_lr=phi_lr,
@@ -137,6 +141,7 @@ class GaugeFFN(nn.Module):
         sigma: Optional[torch.Tensor] = None,     # (B, N, K, K)
         sigma_prior: Optional[torch.Tensor] = None,  # (B, N, K, K) - unused
         mask: Optional[torch.Tensor] = None,      # (B, N, N)
+        token_ids: Optional[torch.Tensor] = None,  # (B, N) - For PriorBank lookup
         targets: Optional[torch.Tensor] = None,   # (B, N) - target tokens
         W_out: Optional[torch.Tensor] = None,     # (V, K) - output projection
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -170,6 +175,7 @@ class GaugeFFN(nn.Module):
             phi=phi,
             sigma=sigma,
             mask=mask,
+            token_ids=token_ids,  # For PriorBank lookup
             targets=targets,
             W_out=W_out,
             return_beta_history=False,
