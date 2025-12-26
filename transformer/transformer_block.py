@@ -98,6 +98,8 @@ class GaugeTransformerBlock(nn.Module):
         ffn_pure_fep_mode: bool = False,
         ffn_max_seq_len: int = 512,
         ffn_prior_lr: float = 0.01,
+        ffn_prior_bank: Optional[nn.Module] = None,  # PriorBank for token-dependent priors
+        ffn_use_prior_bank: bool = False,  # Use PriorBank (token-dependent) vs position-dependent priors
         # Memory-efficient options
         ffn_irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
         ffn_chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
@@ -245,6 +247,7 @@ class GaugeTransformerBlock(nn.Module):
         generators: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         mu_prior: Optional[torch.Tensor] = None,  # For variational FFN
+        token_ids: Optional[torch.Tensor] = None,  # For PriorBank lookup
         targets: Optional[torch.Tensor] = None,   # For E-step observations
         W_out: Optional[torch.Tensor] = None,     # Output projection for discrete observations
         cached_head_transports: Optional[list] = None,  # Cross-layer transport cache
@@ -331,6 +334,7 @@ class GaugeTransformerBlock(nn.Module):
             phi=phi,            # Current gauge frames
             sigma=sigma_q,      # Current covariances
             mask=mask,          # Causal mask
+            token_ids=token_ids,  # For PriorBank lookup
             targets=targets,    # Target tokens (discrete observations)
             W_out=W_out,        # Output projection for ∂CE/∂μ
         )
@@ -408,6 +412,8 @@ class GaugeTransformerStack(nn.Module):
         ffn_pure_fep_mode: bool = False,
         ffn_max_seq_len: int = 512,
         ffn_prior_lr: float = 0.01,
+        ffn_prior_bank: Optional[nn.Module] = None,  # PriorBank for token-dependent priors
+        ffn_use_prior_bank: bool = False,  # Use PriorBank (token-dependent) vs position-dependent priors
         # Memory-efficient options
         ffn_irrep_dims: Optional[List[int]] = None,  # Block dimensions for principled KL decomposition
         ffn_chunk_size: Optional[int] = None,  # Chunk size for memory-efficient attention
@@ -489,6 +495,8 @@ class GaugeTransformerStack(nn.Module):
                 ffn_pure_fep_mode=ffn_pure_fep_mode,
                 ffn_max_seq_len=ffn_max_seq_len,
                 ffn_prior_lr=ffn_prior_lr,
+                ffn_prior_bank=ffn_prior_bank,  # Pass PriorBank to each block
+                ffn_use_prior_bank=ffn_use_prior_bank,  # Enable token-dependent priors
                 # Memory-efficient options
                 ffn_irrep_dims=ffn_irrep_dims,
                 ffn_chunk_size=ffn_chunk_size,
@@ -517,6 +525,7 @@ class GaugeTransformerStack(nn.Module):
         generators: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         mu_prior: Optional[torch.Tensor] = None,  # For variational FFN
+        token_ids: Optional[torch.Tensor] = None,  # For PriorBank lookup
         return_intermediates: bool = False,
         cached_head_transports: Optional[list] = None,  # Cross-layer transport cache
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[List]]:
@@ -554,6 +563,7 @@ class GaugeTransformerStack(nn.Module):
 
             mu_q, sigma_q, phi = block(
                 mu_q, sigma_q, phi, generators, mask, mu_prior,
+                token_ids=token_ids,  # Pass token IDs for PriorBank
                 cached_head_transports=cached_head_transports,
             )
 
