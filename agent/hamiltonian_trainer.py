@@ -444,13 +444,21 @@ class HamiltonianTrainer:
 
     def _compute_complete_mass_matrix(self, agent, agent_idx: int) -> np.ndarray:
         """
-        Compute COMPLETE Fisher-Rao mass matrix with coupling terms.
+        Compute COMPLETE epistemic mass matrix from VFE Hessian.
 
-        M_i = Σ_p^{-1} + Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T
+        M_i = Λ_p,i + Λ_o,i + Σ_k β_ik Λ̃_q,k + Σ_j β_ji Λ_q,i
 
-        Components:
-        - Σ_p^{-1}: Bare mass from prior precision (constant, quasi-static)
-        - Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T: Relational mass from consensus coupling
+        Components (from VFE Hessian ∂²F/∂μ_i²):
+        1. Λ_p,i = Σ_p^{-1}: Prior precision (resistance to deviating from priors)
+        2. Λ_o,i = R_obs^{-1}: Observation precision (grounding through sensory data)
+        3. Σ_k β_ik Ω_ik Σ_q,k^{-1} Ω_ik^T: Outgoing attention (i attends TO k)
+        4. (Σ_j β_ji) Σ_q,i^{-1}: Incoming attention (j attends TO i)
+
+        Physical interpretation:
+        - High-precision priors → greater cognitive inertia
+        - High-quality observations → stronger anchoring (counterintuitive!)
+        - Attending to confident neighbors → inheriting their rigidity
+        - Being attended by others → becoming more rigid (influence costs flexibility)
 
         Args:
             agent: Agent whose mass matrix to compute
@@ -458,16 +466,21 @@ class HamiltonianTrainer:
 
         Returns:
             M: Mass matrix per spatial point, shape (*S, K, K)
+
+        References:
+            Dennis (2025). The Inertia of Belief. Equation (266-268).
         """
         from gradients.softmax_grads import compute_softmax_weights
 
         K = agent.config.K
         spatial_shape = agent.mu_q.shape[:-1] if agent.mu_q.ndim > 1 else ()
 
-        # Initialize with bare mass: Σ_p^{-1}
+        # Initialize mass matrix
         M = np.zeros(agent.Sigma_p.shape, dtype=np.float64)
 
-        # Bare mass (constant for quasi-static priors)
+        # ===================================================================
+        # TERM 1: Prior precision Λ_p = Σ_p^{-1}
+        # ===================================================================
         if agent.Sigma_p.ndim == 2:
             # 0D: single Gaussian
             M = np.linalg.inv(agent.Sigma_p + 1e-8 * np.eye(K))
@@ -481,36 +494,114 @@ class HamiltonianTrainer:
                 for j in range(agent.Sigma_p.shape[1]):
                     M[i, j] = np.linalg.inv(agent.Sigma_p[i, j] + 1e-8 * np.eye(K))
 
-        # Add relational mass from belief consensus coupling
+        # ===================================================================
+        # TERM 2: Observation precision Λ_o = R_obs^{-1}
+        # ===================================================================
+        if self.system.R_obs is not None and self.system.config.lambda_obs > 0:
+            # Observation precision (same for all agents and spatial points)
+            Lambda_obs = np.linalg.inv(self.system.R_obs + 1e-8 * np.eye(self.system.R_obs.shape[0]))
+
+            # Project to agent's K-dimensional space if needed
+            if Lambda_obs.shape[0] == K:
+                # Direct observation of belief state
+                if agent.Sigma_p.ndim == 2:
+                    M += Lambda_obs
+                elif agent.Sigma_p.ndim == 3:
+                    for i in range(agent.Sigma_p.shape[0]):
+                        M[i] += Lambda_obs
+                else:
+                    for i in range(agent.Sigma_p.shape[0]):
+                        for j in range(agent.Sigma_p.shape[1]):
+                            M[i, j] += Lambda_obs
+
+        # ===================================================================
+        # TERM 3: Outgoing attention Σ_k β_ik Ω_ik Σ_q,k^{-1} Ω_ik^T
+        # (i attends TO k - inheriting precision from neighbors)
+        # ===================================================================
         kappa_beta = getattr(self.system.config, 'kappa_beta', 1.0)
         beta_fields = compute_softmax_weights(self.system, agent_idx, 'belief', kappa_beta)
 
-        for j_idx, beta_ij in beta_fields.items():
-            agent_j = self.system.agents[j_idx]
+        for k_idx, beta_ik in beta_fields.items():
+            agent_k = self.system.agents[k_idx]
 
-            # Compute transport Ω_ij
-            Omega_ij = self.system.compute_transport_ij(agent_idx, j_idx)
+            # Compute transport Ω_ik
+            Omega_ik = self.system.compute_transport_ij(agent_idx, k_idx)
 
-            # Add coupling: β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T
+            # Add outgoing coupling: β_ik Ω_ik Σ_q_k^{-1} Ω_ik^T
             if agent.mu_q.ndim == 1:
                 # 0D: scalar β, single matrix
-                Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q + 1e-8 * np.eye(K))
-                M += float(beta_ij) * (Omega_ij @ Sigma_q_j_inv @ Omega_ij.T)
+                Sigma_q_k_inv = np.linalg.inv(agent_k.Sigma_q + 1e-8 * np.eye(K))
+                M += float(beta_ik) * (Omega_ik @ Sigma_q_k_inv @ Omega_ik.T)
 
             elif agent.mu_q.ndim == 2:
-                # 1D field: β_ij(c), Ω_ij(c), Σ_q_j(c) all spatial
+                # 1D field: β_ik(c), Ω_ik(c), Σ_q_k(c) all spatial
                 for i in range(agent.mu_q.shape[0]):
-                    Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q[i] + 1e-8 * np.eye(K))
-                    Omega_c = Omega_ij[i] if Omega_ij.ndim == 3 else Omega_ij
-                    M[i] += beta_ij[i] * (Omega_c @ Sigma_q_j_inv @ Omega_c.T)
+                    Sigma_q_k_inv = np.linalg.inv(agent_k.Sigma_q[i] + 1e-8 * np.eye(K))
+                    Omega_c = Omega_ik[i] if Omega_ik.ndim == 3 else Omega_ik
+                    M[i] += beta_ik[i] * (Omega_c @ Sigma_q_k_inv @ Omega_c.T)
 
             else:
                 # 2D field
                 for i in range(agent.mu_q.shape[0]):
                     for j in range(agent.mu_q.shape[1]):
-                        Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q[i, j] + 1e-8 * np.eye(K))
-                        Omega_c = Omega_ij[i, j] if Omega_ij.ndim == 4 else Omega_ij
-                        M[i, j] += beta_ij[i, j] * (Omega_c @ Sigma_q_j_inv @ Omega_c.T)
+                        Sigma_q_k_inv = np.linalg.inv(agent_k.Sigma_q[i, j] + 1e-8 * np.eye(K))
+                        Omega_c = Omega_ik[i, j] if Omega_ik.ndim == 4 else Omega_ik
+                        M[i, j] += beta_ik[i, j] * (Omega_c @ Sigma_q_k_inv @ Omega_c.T)
+
+        # ===================================================================
+        # TERM 4: Incoming attention (Σ_j β_ji) Σ_q,i^{-1}
+        # (j attends TO i - influence costs flexibility)
+        # ===================================================================
+        # Compute total incoming attention: sum over all j that attend to i
+        total_incoming_beta = 0.0
+
+        for j_idx, agent_j in enumerate(self.system.agents):
+            if j_idx == agent_idx:
+                continue  # Skip self
+
+            # Get j's attention to i
+            beta_j_fields = compute_softmax_weights(self.system, j_idx, 'belief', kappa_beta)
+
+            if agent_idx in beta_j_fields:
+                beta_ji = beta_j_fields[agent_idx]
+
+                if agent.mu_q.ndim == 1:
+                    # 0D: scalar β
+                    total_incoming_beta += float(beta_ji)
+                elif agent.mu_q.ndim == 2:
+                    # 1D field: sum spatially if needed
+                    if np.isscalar(beta_ji):
+                        total_incoming_beta = beta_ji
+                    else:
+                        # For field case, handle per-point (this gets complex)
+                        # For now, use mean as approximation
+                        total_incoming_beta = float(np.mean(beta_ji))
+                else:
+                    # 2D field: similarly approximate
+                    if np.isscalar(beta_ji):
+                        total_incoming_beta = beta_ji
+                    else:
+                        total_incoming_beta = float(np.mean(beta_ji))
+
+        # Add incoming mass: (Σ_j β_ji) Σ_q,i^{-1}
+        if total_incoming_beta > 1e-10:  # Only add if non-negligible
+            if agent.Sigma_p.ndim == 2:
+                # 0D: single Gaussian
+                Sigma_q_i_inv = np.linalg.inv(agent.Sigma_q + 1e-8 * np.eye(K))
+                M += total_incoming_beta * Sigma_q_i_inv
+
+            elif agent.Sigma_p.ndim == 3:
+                # 1D field
+                for i in range(agent.Sigma_p.shape[0]):
+                    Sigma_q_i_inv = np.linalg.inv(agent.Sigma_q[i] + 1e-8 * np.eye(K))
+                    M[i] += total_incoming_beta * Sigma_q_i_inv
+
+            else:
+                # 2D field
+                for i in range(agent.Sigma_p.shape[0]):
+                    for j in range(agent.Sigma_p.shape[1]):
+                        Sigma_q_i_inv = np.linalg.inv(agent.Sigma_q[i, j] + 1e-8 * np.eye(K))
+                        M[i, j] += total_incoming_beta * Sigma_q_i_inv
 
         return M.astype(np.float32)
 
@@ -521,9 +612,11 @@ class HamiltonianTrainer:
         For μ part (COMPLETE Fisher-Rao): dμ/dt = M^{-1} π_μ
         For Σ part (Hyperbolic SPD): dΣ/dt = Σ Π_Σ Σ
 
-        where M = Σ_p^{-1} + Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T includes:
-        - Bare mass: Σ_p^{-1} (prior precision)
-        - Relational mass: Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T (consensus coupling)
+        where M = Λ_p + Λ_o + Σ_k β_ik Λ̃_q,k + Σ_j β_ji Λ_q,i includes:
+        1. Prior precision: Λ_p = Σ_p^{-1}
+        2. Observation precision: Λ_o = R_obs^{-1}
+        3. Outgoing attention: Σ_k β_ik Ω_ik Σ_q,k^{-1} Ω_ik^T
+        4. Incoming attention: (Σ_j β_ji) Σ_q,i^{-1}
 
         The Σ equation is the geodesic flow on SPD(n) with affine-invariant metric,
         giving the manifold constant negative curvature κ = -1/4 (HYPERBOLIC!).
