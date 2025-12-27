@@ -28,29 +28,75 @@ print("  model.load_state_dict(torch.load('checkpoints/state_dict.pt'))")
 # For testing, create a fresh model (YOU SHOULD REPLACE THIS!)
 from transformer.model import GaugeTransformerLM
 
-# YOUR CONFIG HERE - replace with actual config from training
+# =============================================================================
+# OPTION 1: Load from checkpoint (RECOMMENDED)
+# =============================================================================
+# Uncomment this if you have a saved checkpoint:
+# checkpoint_path = 'path/to/your/checkpoint.pt'
+# checkpoint = torch.load(checkpoint_path, map_location='cpu')
+# model = checkpoint['model']  # Or however your checkpoint is structured
+# config = checkpoint.get('config', {})  # Get config from checkpoint
+
+# =============================================================================
+# OPTION 2: Recreate model with YOUR config
+# =============================================================================
+# You MUST provide the EXACT config you used for training!
+# Copy the config from your training script here:
+
 config = {
-    'vocab_size': 50257,
-    'embed_dim': 255,  # 19 heads of spin-0 (dim 1 each) = ... wait, that doesn't add up
+    'vocab_size': 50257,  # Your vocab size
+    'embed_dim': 255,  # CRITICAL: What is your actual embed_dim?
     'n_layers': 4,
     'hidden_dim': 1024,
     'max_seq_len': 128,
-    'kappa_beta': 1.0,  # CHECK THIS! Should be 0.3-1.0
+    'kappa_beta': 1.0,  # CRITICAL: Is this your actual kappa?
     'mask_self_attention': True,
     'evolve_sigma': True,
-    # CRITICAL: What is your irrep_spec?
-    # You said "spin-0 ...19 heads" - need to see the actual spec
+
+    # CRITICAL: You MUST provide your irrep_spec!
+    # You said "spin-0 ...19 heads" - what is the actual spec?
+    # Examples:
+    # - 19 spin-0 heads: [('l0', 19, 1)]  (total dim = 19)
+    # - Mixed: [('l0', 10, 1), ('l1', 3, 3), ...]
+    # - Spin-0 through spin-9: [('l0', 1, 1), ('l1', 1, 3), ('l2', 1, 5), ...]
+
+    'irrep_spec': [
+        # REPLACE THIS with your actual irrep_spec!
+        # For now, assuming 19 spin-0 heads:
+        ('l0', 19, 1),
+        # If total embed_dim = 255, remaining dims need other irreps:
+        # 255 - 19 = 236 remaining dimensions
+        # You might have something like:
+        # ('l1', 10, 3),  # 10 spin-1 heads × 3 dims = 30
+        # ('l2', 8, 5),   # 8 spin-2 heads × 5 dims = 40
+        # etc.
+        # Total must equal embed_dim!
+    ],
 }
 
-print("\n⚠️  WARNING: Using config from script, not your trained model!")
-print("   Please modify this script to load your actual trained model.")
+print("\n⚠️  WARNING: Using hardcoded config!")
+print("   Modify the irrep_spec above to match your training config.")
 print("\nCurrent config:")
-for key in ['embed_dim', 'n_layers', 'kappa_beta', 'mask_self_attention']:
+for key in ['embed_dim', 'n_layers', 'kappa_beta', 'mask_self_attention', 'irrep_spec']:
     print(f"  {key}: {config.get(key)}")
 
-# Create model (REPLACE with your trained model!)
+# Verify irrep_spec dimensions add up
+if 'irrep_spec' in config:
+    total_dim = sum(num * dim for name, num, dim in config['irrep_spec'])
+    print(f"\nIrrep spec dimensions: {total_dim}")
+    if total_dim != config['embed_dim']:
+        print(f"  ❌ ERROR: irrep_spec total ({total_dim}) != embed_dim ({config['embed_dim']})")
+        print(f"     Fix your irrep_spec to match embed_dim!")
+        raise ValueError("Irrep dimensions mismatch")
+    else:
+        print(f"  ✓ Dimensions match!")
+
+# Create model
 model = GaugeTransformerLM(config)
 model.eval()
+
+print("\n⚠️  NOTE: This is a FRESH model with random weights!")
+print("   To diagnose your TRAINED model, load it from checkpoint above.")
 
 # =============================================================================
 # STEP 2: Get a test sequence
