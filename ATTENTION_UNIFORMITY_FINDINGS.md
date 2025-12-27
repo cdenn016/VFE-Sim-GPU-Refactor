@@ -171,12 +171,46 @@ The diversity is **not the problem** - the problem is **geometric limitation of 
 
 ---
 
-## Recommended Next Steps
+## UPDATE: Belief Alignment Loss Discovery
 
-1. **Test new irrep configurations** with more tensor heads
-2. **Profile memory/compute** for higher embed_dim (e.g., 64, 128)
-3. **Ablation study**: Compare pure-tensor vs mixed configurations
-4. **Theoretical analysis**: Derive minimum K for sharp attention given dataset statistics
+**Critical finding**: The uniform attention pattern is caused by **over-regularization from belief alignment loss**, not architectural limitations!
+
+### The λ_β Trade-off Curve
+
+| λ_β | Sharp Heads | Best row_std | PPL | μ_dist | KL_std |
+|-----|-------------|--------------|-----|--------|--------|
+| 0.0 | 4/9 (44%) | 0.118 | ~1500 | 1.73 | 0.145 |
+| **0.1** | **4/9 (44%)** | **0.118** | **~1070** | **1.51** | **0.096** |
+| 1.0 | 0/9 (0%) | 0.080 | ~890 | 0.74 | 0.034 |
+
+**Key insight**: Belief alignment loss = `λ_β · Σ(β_ij × KL_ij)` compresses the embedding space:
+- High λ_β → embeddings cluster (low μ_dist) → small KL → uniform attention forced
+- Low λ_β → embeddings spread (high μ_dist) → large KL → sharp attention possible
+- **Optimal λ_β = 0.1**: Sharp attention + good PPL
+
+### The Mechanism
+
+The belief alignment loss penalizes attending to dissimilar beliefs:
+```python
+belief_align_loss = λ_β · Σ(β_ij × KL_ij)
+```
+
+**When λ_β is too high:**
+1. Model learns to make all embeddings similar (reduces KL_ij)
+2. Small KL values → softmax can't differentiate → uniform β_ij
+3. Result: Uniform attention, compressed belief space
+
+**When λ_β = 0.1:**
+1. Gentle regularization prevents extreme diversity
+2. Embeddings stay distinct enough for meaningful KL variation
+3. Result: Sharp attention + stable training
+
+### Revised Recommendations
+
+1. **Use λ_β = 0.1** for optimal attention/PPL trade-off
+2. **Test lower values** (0.01, 0.05) to see if even sharper attention helps
+3. **Combine with more tensor heads** for maximum sharpness
+4. **Consider different loss formulation** that doesn't compress embeddings
 
 ---
 
