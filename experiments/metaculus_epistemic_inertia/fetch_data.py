@@ -118,12 +118,13 @@ class MetaculusDataFetcher:
         print(f"Found {len(questions)} questions meeting criteria")
         return questions
 
-    def fetch_prediction_timeseries(self, question_id: int) -> List[Dict]:
+    def fetch_prediction_timeseries(self, question_id: int, max_retries: int = 3) -> List[Dict]:
         """
-        Fetch all predictions for a specific question.
+        Fetch all predictions for a specific question with retry logic.
 
         Args:
             question_id: Metaculus question ID
+            max_retries: Maximum number of retries for rate limit errors
 
         Returns:
             List of prediction dictionaries with timestamps
@@ -131,29 +132,33 @@ class MetaculusDataFetcher:
         # New API endpoint for predictions
         url = f"https://www.metaculus.com/api/questions/{question_id}/predict/"
 
-        try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(url, timeout=30)
 
-            predictions = []
+                # Handle 404 silently - some questions don't have public predictions
+                if response.status_code == 404:
+                    return []
 
-            # The new API may return predictions in different formats
-            # Try multiple possible structures
-            if isinstance(data, list):
-                # List of predictions
-                for entry in data:
-                    predictions.append({
-                        'question_id': question_id,
-                        'user_id': entry.get('user_id') or entry.get('user', {}).get('id'),
-                        'time': entry.get('t') or entry.get('created_at'),
-                        'prediction': entry.get('x') or entry.get('prediction', {}).get('full', {}).get('q2'),
-                        'created_time': entry.get('created_time') or entry.get('created_at')
-                    })
-            elif isinstance(data, dict):
-                # Single prediction or wrapped format
-                if 'results' in data:
-                    for entry in data['results']:
+                # Handle rate limiting with exponential backoff
+                if response.status_code == 429:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    if attempt < max_retries - 1:
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        return []  # Give up after max retries
+
+                response.raise_for_status()
+                data = response.json()
+
+                predictions = []
+
+                # The new API may return predictions in different formats
+                # Try multiple possible structures
+                if isinstance(data, list):
+                    # List of predictions
+                    for entry in data:
                         predictions.append({
                             'question_id': question_id,
                             'user_id': entry.get('user_id') or entry.get('user', {}).get('id'),
@@ -161,19 +166,38 @@ class MetaculusDataFetcher:
                             'prediction': entry.get('x') or entry.get('prediction', {}).get('full', {}).get('q2'),
                             'created_time': entry.get('created_time') or entry.get('created_at')
                         })
+                elif isinstance(data, dict):
+                    # Single prediction or wrapped format
+                    if 'results' in data:
+                        for entry in data['results']:
+                            predictions.append({
+                                'question_id': question_id,
+                                'user_id': entry.get('user_id') or entry.get('user', {}).get('id'),
+                                'time': entry.get('t') or entry.get('created_at'),
+                                'prediction': entry.get('x') or entry.get('prediction', {}).get('full', {}).get('q2'),
+                                'created_time': entry.get('created_time') or entry.get('created_at')
+                            })
 
-            return predictions
+                return predictions
 
-        except Exception as e:
-            print(f"Error fetching predictions for question {question_id}: {e}")
-            return []
+            except requests.exceptions.HTTPError as e:
+                # Don't print 404 errors - these are expected
+                if '404' not in str(e):
+                    print(f"HTTP error for question {question_id}: {e}")
+                return []
+            except Exception as e:
+                print(f"Error fetching predictions for question {question_id}: {e}")
+                return []
 
-    def fetch_user_stats(self, user_id: int) -> Optional[Dict]:
+        return []
+
+    def fetch_user_stats(self, user_id: int, max_retries: int = 3) -> Optional[Dict]:
         """
         Fetch forecaster statistics (track record, reputation).
 
         Args:
             user_id: Metaculus user ID
+            max_retries: Maximum number of retries for rate limit errors
 
         Returns:
             User statistics dictionary
@@ -181,35 +205,55 @@ class MetaculusDataFetcher:
         # New API endpoint for users
         url = f"https://www.metaculus.com/api/users/{user_id}/"
 
-        try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(url, timeout=30)
 
-            # Extract score from new API structure
-            score = 0
-            if 'scores' in data:
-                # New API structure
-                scores = data.get('scores', {})
-                score = scores.get('baseline_score') or scores.get('peer_score') or 0
-            elif 'track_record' in data:
-                # Old API structure
-                score = data.get('track_record', {}).get('score', 0)
+                # Handle 404 silently - user profile may not be public
+                if response.status_code == 404:
+                    return None
 
-            return {
-                'user_id': user_id,
-                'username': data.get('username'),
-                'track_record': score,
-                'question_count': data.get('question_count') or data.get('num_questions', 0),
-                'prediction_count': data.get('prediction_count') or data.get('num_predictions', 0),
-                'medal_count': data.get('medal_count', 0),
-                'peer_score': data.get('peer_score') or data.get('scores', {}).get('peer_score'),
-                'coverage': data.get('coverage')
-            }
+                # Handle rate limiting with exponential backoff
+                if response.status_code == 429:
+                    wait_time = 2 ** attempt
+                    if attempt < max_retries - 1:
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        return None
 
-        except Exception as e:
-            # User data may not be public or user doesn't exist
-            return None
+                response.raise_for_status()
+                data = response.json()
+
+                # Extract score from new API structure
+                score = 0
+                if 'scores' in data:
+                    # New API structure
+                    scores = data.get('scores', {})
+                    score = scores.get('baseline_score') or scores.get('peer_score') or 0
+                elif 'track_record' in data:
+                    # Old API structure
+                    score = data.get('track_record', {}).get('score', 0)
+
+                return {
+                    'user_id': user_id,
+                    'username': data.get('username'),
+                    'track_record': score,
+                    'question_count': data.get('question_count') or data.get('num_questions', 0),
+                    'prediction_count': data.get('prediction_count') or data.get('num_predictions', 0),
+                    'medal_count': data.get('medal_count', 0),
+                    'peer_score': data.get('peer_score') or data.get('scores', {}).get('peer_score'),
+                    'coverage': data.get('coverage')
+                }
+
+            except requests.exceptions.HTTPError:
+                # Silently handle HTTP errors (404, etc.)
+                return None
+            except Exception:
+                # Silently handle other errors
+                return None
+
+        return None
 
     def compute_updates(self, predictions: pd.DataFrame) -> pd.DataFrame:
         """
@@ -281,11 +325,12 @@ class MetaculusDataFetcher:
         # Step 2: Fetch predictions for each question
         all_predictions = []
         print(f"\nFetching prediction time series for {len(questions)} questions...")
+        print("Note: Some questions may not have public prediction data (404 errors are expected)")
 
         for q in tqdm(questions):
             preds = self.fetch_prediction_timeseries(q['id'])
             all_predictions.extend(preds)
-            time.sleep(0.5)  # Rate limiting
+            time.sleep(2.0)  # Increased rate limiting to avoid 429 errors
 
         predictions_df = pd.DataFrame(all_predictions)
         print(f"Collected {len(predictions_df)} total predictions")
@@ -318,13 +363,14 @@ class MetaculusDataFetcher:
         # Step 3: Fetch user statistics
         unique_users = predictions_df['user_id'].dropna().unique()
         print(f"\nFetching statistics for {len(unique_users)} forecasters...")
+        print("Note: Some user profiles may not be public (errors are expected)")
 
         user_stats = []
         for user_id in tqdm(unique_users):
             stats = self.fetch_user_stats(int(user_id))
             if stats:
                 user_stats.append(stats)
-            time.sleep(0.3)  # Rate limiting
+            time.sleep(1.0)  # Increased rate limiting to avoid 429 errors
 
         users_df = pd.DataFrame(user_stats)
         print(f"Collected stats for {len(users_df)} users")
