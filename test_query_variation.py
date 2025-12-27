@@ -168,8 +168,15 @@ def main():
     if config_json_path.exists():
         print(f"Loading config from {config_json_path}")
         with open(config_json_path, 'r') as f:
-            config = json.load(f)
-        print(f"✓ Loaded config from experiment_config.json")
+            json_data = json.load(f)
+
+        # Check if config is nested under a 'config' key
+        if 'config' in json_data and isinstance(json_data['config'], dict):
+            config = json_data['config']
+            print(f"✓ Loaded config from experiment_config.json (nested under 'config' key)")
+        else:
+            config = json_data
+            print(f"✓ Loaded config from experiment_config.json")
     else:
         print(f"Warning: {config_json_path} not found, trying to extract from checkpoint...")
 
