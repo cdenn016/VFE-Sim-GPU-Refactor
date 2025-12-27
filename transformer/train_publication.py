@@ -596,12 +596,18 @@ class PublicationTrainer(FastTrainer):
         """
         Save attention pattern visualization for interpretability analysis.
 
-        Generates attention heatmap from a forward pass through the model.
+        CRITICAL FIXES (based on visualization analysis):
+        1. Save PER-HEAD attention (not averaged - averaging destroys patterns!)
+        2. Show WHAT sequence is being visualized (token IDs + decoded text)
+        3. Include diagnostic statistics (row uniformity to detect issues)
+        4. Save both individual heads AND averaged comparison
         """
         try:
             import matplotlib
             matplotlib.use('Agg')  # Non-interactive backend
             import matplotlib.pyplot as plt
+            from matplotlib.gridspec import GridSpec
+            import numpy as np
         except ImportError:
             return  # Skip if matplotlib unavailable
 
@@ -614,41 +620,144 @@ class PublicationTrainer(FastTrainer):
             if hasattr(self.model, 'forward_with_attention'):
                 _, attn_info = self.model.forward_with_attention(input_ids, targets=None)
                 beta = attn_info.get('beta')
+                kl_matrix = attn_info.get('kl_matrix')
 
                 if beta is not None:
-                    # Average over heads: (B, H, N, N) -> (B, N, N)
+                    # Get shape info
                     if beta.dim() == 4:
-                        attn = beta[0].mean(dim=0).cpu().numpy()
+                        B, n_heads, N, N = beta.shape
                     else:
-                        attn = beta[0].cpu().numpy()
+                        B, N, N = beta.shape
+                        n_heads = 1
+                        beta = beta.unsqueeze(1)  # Add head dimension
 
-                    N = attn.shape[0]
+                    beta_np = beta[0].cpu().numpy()  # (n_heads, N, N)
 
-                    # Mask diagonal (self-attention dominates) and use log scale
-                    import numpy as np
-                    attn_plot = attn.copy()
+                    # Show what sequence we're visualizing
+                    seq_info = f"Step {step}, Tokens: {input_ids[0, :20].tolist()}..."
+
+                    # Try to decode if tokenizer available
+                    if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                        try:
+                            decoded = self.tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
+                            seq_info += f"\nText: {decoded[:100]}..."
+                        except:
+                            pass
+
+                    # Save directory
+                    save_dir = self.config.checkpoint_dir / 'attention_patterns'
+                    save_dir.mkdir(parents=True, exist_ok=True)
+
+                    # ============================================================
+                    # SAVE INDIVIDUAL HEAD VISUALIZATIONS (NOT AVERAGED!)
+                    # ============================================================
+                    for head_idx in range(n_heads):
+                        fig, ax = plt.subplots(figsize=(8, 6))
+
+                        attn_head = beta_np[head_idx]  # (N, N)
+                        attn_plot = attn_head.copy()
+                        np.fill_diagonal(attn_plot, np.nan)  # Mask diagonal
+                        attn_plot = np.log10(np.maximum(attn_plot, 1e-6))  # Log scale
+
+                        im = ax.imshow(attn_plot, cmap='viridis', aspect='auto', vmin=-3, vmax=0)
+                        ax.set_xlabel('Key Position (j)')
+                        ax.set_ylabel('Query Position (i)')
+
+                        # Compute row uniformity diagnostic
+                        attn_safe = attn_head.copy()
+                        np.fill_diagonal(attn_safe, np.nan)
+                        row_std = np.nanstd(attn_safe, axis=1).mean()
+                        status = "SHARP✓" if row_std > 0.1 else "MEDIUM⚠" if row_std > 0.05 else "UNIFORM❌"
+
+                        ax.set_title(f'Head {head_idx} - {seq_info}\nRow std: {row_std:.4f} [{status}]',
+                                    fontsize=10)
+                        plt.colorbar(im, ax=ax, label='log₁₀(β)')
+
+                        fig.savefig(save_dir / f'attention_step_{step:06d}_head{head_idx}.png',
+                                   dpi=100, bbox_inches='tight')
+                        plt.close(fig)
+
+                    # ============================================================
+                    # SAVE COMPARISON: Individual Heads vs Averaged
+                    # ============================================================
+                    fig = plt.figure(figsize=(16, 8))
+                    gs = GridSpec(2, n_heads, figure=fig, hspace=0.3, wspace=0.3)
+
+                    # Top row: Individual heads
+                    for head_idx in range(n_heads):
+                        ax = fig.add_subplot(gs[0, head_idx])
+                        attn_head = beta_np[head_idx]
+                        attn_plot = attn_head.copy()
+                        np.fill_diagonal(attn_plot, np.nan)
+                        attn_plot = np.log10(np.maximum(attn_plot, 1e-6))
+
+                        im = ax.imshow(attn_plot, cmap='viridis', aspect='auto', vmin=-3, vmax=0)
+
+                        # Diagnostic
+                        attn_safe = attn_head.copy()
+                        np.fill_diagonal(attn_safe, np.nan)
+                        row_std = np.nanstd(attn_safe, axis=1).mean()
+                        status = "✓" if row_std > 0.1 else "⚠" if row_std > 0.05 else "❌"
+
+                        ax.set_title(f'Head {head_idx}\nstd={row_std:.3f} {status}', fontsize=9)
+                        ax.set_xlabel('Key')
+                        ax.set_ylabel('Query')
+
+                    # Bottom row: Averaged (what old code was doing - shows the problem!)
+                    ax = fig.add_subplot(gs[1, :])
+                    attn_avg = beta_np.mean(axis=0)  # Average over heads
+                    attn_plot = attn_avg.copy()
                     np.fill_diagonal(attn_plot, np.nan)
                     attn_plot = np.log10(np.maximum(attn_plot, 1e-6))
 
-                    # Create visualization with focused colorbar range
-                    # vmin=-3 (0.001), vmax=0 (1.0) to see medium-weight connections
-                    fig, ax = plt.subplots(figsize=(8, 6))
                     im = ax.imshow(attn_plot, cmap='viridis', aspect='auto', vmin=-3, vmax=0)
 
-                    ax.set_xlabel('Key Position (j)')
-                    ax.set_ylabel('Query Position (i)')
-                    ax.set_title(f'Attention Weights (Step {step}) [log₁₀, diag masked]')
+                    # Diagnostic for averaged
+                    attn_safe = attn_avg.copy()
+                    np.fill_diagonal(attn_safe, np.nan)
+                    row_std = np.nanstd(attn_safe, axis=1).mean()
+                    status = "✓" if row_std > 0.1 else "⚠" if row_std > 0.05 else "❌"
+
+                    ax.set_title(f'AVERAGED (old method) - std={row_std:.3f} {status}\n' +
+                                f'⚠️ Averaging destroys per-head patterns!',
+                                fontsize=11, fontweight='bold')
+                    ax.set_xlabel('Key Position')
+                    ax.set_ylabel('Query Position')
                     plt.colorbar(im, ax=ax, label='log₁₀(β)')
 
-                    # Save to checkpoint directory
-                    save_dir = self.config.checkpoint_dir / 'attention_patterns'
-                    save_dir.mkdir(parents=True, exist_ok=True)
-                    fig.savefig(save_dir / f'attention_step_{step:06d}.png', dpi=100, bbox_inches='tight')
+                    fig.suptitle(f'Attention Analysis: {seq_info}', fontsize=12, y=0.98)
+
+                    fig.savefig(save_dir / f'attention_step_{step:06d}_comparison.png',
+                               dpi=150, bbox_inches='tight')
                     plt.close(fig)
 
+                    # ============================================================
+                    # LOG DIAGNOSTICS
+                    # ============================================================
                     self._attention_viz_count += 1
                     if self._attention_viz_count == 1:
-                        print(f"[INFO] Attention patterns saved to: {save_dir}/")
+                        print(f"\n[INFO] Attention patterns saved to: {save_dir}/")
+                        print(f"  Saving per-head visualizations (NOT averaged)")
+                        print(f"  Includes sequence context and uniformity diagnostics")
+
+                    # Print diagnostic summary for this step
+                    if step % (self.config.log_interval * 10) == 0:  # Every 10th logging
+                        print(f"\n[Attention Diagnostic @ step {step}]")
+                        for head_idx in range(n_heads):
+                            attn_head = beta_np[head_idx]
+                            attn_safe = attn_head.copy()
+                            np.fill_diagonal(attn_safe, np.nan)
+                            row_std = np.nanstd(attn_safe, axis=1).mean()
+                            status = "✓SHARP" if row_std > 0.1 else "⚠MEDIUM" if row_std > 0.05 else "❌UNIFORM"
+                            print(f"  Head {head_idx}: row_std={row_std:.4f} [{status}]")
+
+                        # Averaged
+                        attn_avg = beta_np.mean(axis=0)
+                        attn_safe = attn_avg.copy()
+                        np.fill_diagonal(attn_safe, np.nan)
+                        row_std = np.nanstd(attn_safe, axis=1).mean()
+                        status = "✓" if row_std > 0.1 else "⚠" if row_std > 0.05 else "❌"
+                        print(f"  Averaged: row_std={row_std:.4f} [{status}]")
 
         self.model.train()
 
