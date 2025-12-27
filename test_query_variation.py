@@ -159,7 +159,7 @@ def main():
         print("Exiting...")
         return
 
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
     # Extract config from checkpoint
     if 'config' in checkpoint:
