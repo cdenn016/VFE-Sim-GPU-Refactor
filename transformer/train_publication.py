@@ -592,6 +592,20 @@ class PublicationTrainer(FastTrainer):
         # Track attention visualization count
         self._attention_viz_count = 0
 
+    def _get_head_irrep_labels(self) -> list:
+        """
+        Map head indices to irrep types for diagnostic labeling.
+
+        Returns:
+            List of strings like "ℓ0", "ℓ1", "ℓ2" for each head.
+        """
+        irrep_spec = self.config.irrep_spec
+        labels = []
+        for irrep_name, num_heads, dim in irrep_spec:
+            for _ in range(num_heads):
+                labels.append(irrep_name)
+        return labels
+
     def save_attention_visualization(self, step: int, batch: Tuple[torch.Tensor, torch.Tensor]):
         """
         Save attention pattern visualization for interpretability analysis.
@@ -601,6 +615,7 @@ class PublicationTrainer(FastTrainer):
         2. Show WHAT sequence is being visualized (token IDs + decoded text)
         3. Include diagnostic statistics (row uniformity to detect issues)
         4. Save both individual heads AND averaged comparison
+        5. Label each head with its irrep type (ℓ0, ℓ1, ℓ2, etc.)
         """
         try:
             import matplotlib
@@ -634,6 +649,13 @@ class PublicationTrainer(FastTrainer):
                         beta = beta.unsqueeze(1)  # Add head dimension
 
                     beta_np = beta[0].cpu().numpy()  # (n_heads, N, N)
+
+                    # Get irrep labels for each head
+                    try:
+                        head_labels = self._get_head_irrep_labels()
+                    except:
+                        # Fallback if irrep_spec not available
+                        head_labels = [f"H{i}" for i in range(n_heads)]
 
                     # Show what sequence we're visualizing
                     seq_info = f"Step {step}, Tokens: {input_ids[0, :20].tolist()}..."
@@ -671,7 +693,8 @@ class PublicationTrainer(FastTrainer):
                         row_std = np.nanstd(attn_safe, axis=1).mean()
                         status = "SHARP✓" if row_std > 0.1 else "MEDIUM⚠" if row_std > 0.05 else "UNIFORM❌"
 
-                        ax.set_title(f'Head {head_idx} - {seq_info}\nRow std: {row_std:.4f} [{status}]',
+                        irrep_label = head_labels[head_idx] if head_idx < len(head_labels) else f"H{head_idx}"
+                        ax.set_title(f'Head {head_idx} ({irrep_label}) - {seq_info}\nRow std: {row_std:.4f} [{status}]',
                                     fontsize=10)
                         plt.colorbar(im, ax=ax, label='log₁₀(β)')
 
@@ -701,7 +724,8 @@ class PublicationTrainer(FastTrainer):
                         row_std = np.nanstd(attn_safe, axis=1).mean()
                         status = "✓" if row_std > 0.1 else "⚠" if row_std > 0.05 else "❌"
 
-                        ax.set_title(f'Head {head_idx}\nstd={row_std:.3f} {status}', fontsize=9)
+                        irrep_label = head_labels[head_idx] if head_idx < len(head_labels) else f"H{head_idx}"
+                        ax.set_title(f'Head {head_idx} ({irrep_label})\nstd={row_std:.3f} {status}', fontsize=9)
                         ax.set_xlabel('Key')
                         ax.set_ylabel('Query')
 
@@ -751,7 +775,8 @@ class PublicationTrainer(FastTrainer):
                             np.fill_diagonal(attn_safe, np.nan)
                             row_std = np.nanstd(attn_safe, axis=1).mean()
                             status = "✓SHARP" if row_std > 0.1 else "⚠MEDIUM" if row_std > 0.05 else "❌UNIFORM"
-                            print(f"  Head {head_idx}: row_std={row_std:.4f} [{status}]")
+                            irrep_label = head_labels[head_idx] if head_idx < len(head_labels) else f"H{head_idx}"
+                            print(f"  Head {head_idx} ({irrep_label}): row_std={row_std:.4f} [{status}]")
 
                         # Averaged
                         attn_avg = beta_np.mean(axis=0)
