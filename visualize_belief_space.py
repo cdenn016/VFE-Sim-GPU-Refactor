@@ -324,6 +324,14 @@ def main():
     print(f"  Σ shape: {sigma_embeddings.shape}")
     print(f"  φ shape: {phi_embeddings.shape}")
 
+    # CRITICAL: Show which BPE tokens we actually got
+    print(f"\nBPE Token Mappings (first 20):")
+    print(f"{'Word':<15} {'BPE Token ID':<15} {'Decoded':<20}")
+    print(f"{'-'*50}")
+    for i in range(min(20, len(valid_tokens))):
+        token_str = tokenizer.decode([token_ids[i]]) if hasattr(tokenizer, 'decode') else '???'
+        print(f"{valid_tokens[i]:<15} {token_ids[i]:<15} {repr(token_str):<20}")
+
     # Filter categories to match valid tokens
     valid_categories = [TOKEN_CATEGORIES[ALL_TOKENS.index(t)] for t in valid_tokens]
 
