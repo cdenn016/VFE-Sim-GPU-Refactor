@@ -24,7 +24,7 @@ from tqdm import tqdm
 class MetaculusDataFetcher:
     """Fetch prediction data from Metaculus API."""
 
-    BASE_URL = "https://www.metaculus.com/api2"
+    BASE_URL = "https://www.metaculus.com/api/posts"
 
     def __init__(self, output_dir: str = "data"):
         self.output_dir = Path(output_dir)
@@ -53,14 +53,15 @@ class MetaculusDataFetcher:
         limit = 100
 
         while len(questions) < max_questions:
-            # Fetch batch of questions
-            url = f"{self.BASE_URL}/questions/"
+            # Fetch batch of questions - new API structure
+            url = f"{self.BASE_URL}/"
             params = {
-                'status': status,
-                'type': 'forecast',
+                'has_group': 'false',
+                'forecast_type': 'binary',
+                'status': 'resolved' if status == 'resolved' else 'open',
                 'limit': limit,
                 'offset': offset,
-                'order_by': '-prediction_count'
+                'order_by': '-hotness'
             }
 
             try:
@@ -69,37 +70,46 @@ class MetaculusDataFetcher:
                 data = response.json()
             except Exception as e:
                 print(f"Error fetching questions at offset {offset}: {e}")
+                print(f"  Response status: {response.status_code if 'response' in locals() else 'N/A'}")
+                print(f"  URL: {url}")
+                print(f"  Params: {params}")
                 break
 
             results = data.get('results', [])
             if not results:
+                print(f"No more results at offset {offset}")
                 break
 
-            # Filter for binary questions with enough predictions
-            for q in results:
+            # Extract question data from new API format
+            for item in results:
                 if len(questions) >= max_questions:
                     break
 
-                # Check if binary question
-                possibilities = q.get('possibilities', {})
-                if possibilities.get('type') != 'binary':
+                # New API wraps question in 'question' field
+                q = item.get('question')
+                if not q:
+                    continue
+
+                # Check if binary
+                question_type = q.get('type', '')
+                if question_type != 'binary':
                     continue
 
                 # Check prediction count
-                pred_count = q.get('number_of_predictions', 0)
+                pred_count = item.get('nr_forecasters', 0)
                 if pred_count < min_predictions:
                     continue
 
                 questions.append({
                     'id': q['id'],
-                    'title': q['title'],
-                    'url': q['url'],
-                    'created_time': q['created_time'],
-                    'publish_time': q.get('publish_time'),
-                    'resolve_time': q.get('resolve_time'),
+                    'title': q.get('title', ''),
+                    'url': item.get('url', ''),
+                    'created_time': q.get('created_at'),
+                    'publish_time': q.get('published_at'),
+                    'resolve_time': q.get('scheduled_resolve_time'),
                     'resolution': q.get('resolution'),
                     'prediction_count': pred_count,
-                    'forecaster_count': q.get('number_of_forecasters', 0)
+                    'forecaster_count': pred_count
                 })
 
             offset += limit
@@ -118,7 +128,8 @@ class MetaculusDataFetcher:
         Returns:
             List of prediction dictionaries with timestamps
         """
-        url = f"{self.BASE_URL}/questions/{question_id}/prediction_timeseries/"
+        # New API endpoint for predictions
+        url = f"https://www.metaculus.com/api/questions/{question_id}/predict/"
 
         try:
             response = self.session.get(url, timeout=30)
@@ -126,14 +137,30 @@ class MetaculusDataFetcher:
             data = response.json()
 
             predictions = []
-            for entry in data:
-                predictions.append({
-                    'question_id': question_id,
-                    'user_id': entry.get('user_id'),
-                    'time': entry.get('t'),
-                    'prediction': entry.get('x'),  # Probability (0-1)
-                    'created_time': entry.get('created_time')
-                })
+
+            # The new API may return predictions in different formats
+            # Try multiple possible structures
+            if isinstance(data, list):
+                # List of predictions
+                for entry in data:
+                    predictions.append({
+                        'question_id': question_id,
+                        'user_id': entry.get('user_id') or entry.get('user', {}).get('id'),
+                        'time': entry.get('t') or entry.get('created_at'),
+                        'prediction': entry.get('x') or entry.get('prediction', {}).get('full', {}).get('q2'),
+                        'created_time': entry.get('created_time') or entry.get('created_at')
+                    })
+            elif isinstance(data, dict):
+                # Single prediction or wrapped format
+                if 'results' in data:
+                    for entry in data['results']:
+                        predictions.append({
+                            'question_id': question_id,
+                            'user_id': entry.get('user_id') or entry.get('user', {}).get('id'),
+                            'time': entry.get('t') or entry.get('created_at'),
+                            'prediction': entry.get('x') or entry.get('prediction', {}).get('full', {}).get('q2'),
+                            'created_time': entry.get('created_time') or entry.get('created_at')
+                        })
 
             return predictions
 
@@ -151,26 +178,37 @@ class MetaculusDataFetcher:
         Returns:
             User statistics dictionary
         """
-        url = f"{self.BASE_URL}/users/{user_id}/"
+        # New API endpoint for users
+        url = f"https://www.metaculus.com/api/users/{user_id}/"
 
         try:
             response = self.session.get(url, timeout=30)
             response.raise_for_status()
             data = response.json()
 
+            # Extract score from new API structure
+            score = 0
+            if 'scores' in data:
+                # New API structure
+                scores = data.get('scores', {})
+                score = scores.get('baseline_score') or scores.get('peer_score') or 0
+            elif 'track_record' in data:
+                # Old API structure
+                score = data.get('track_record', {}).get('score', 0)
+
             return {
                 'user_id': user_id,
                 'username': data.get('username'),
-                'track_record': data.get('track_record', {}).get('score', 0),
-                'question_count': data.get('question_count', 0),
-                'prediction_count': data.get('prediction_count', 0),
+                'track_record': score,
+                'question_count': data.get('question_count') or data.get('num_questions', 0),
+                'prediction_count': data.get('prediction_count') or data.get('num_predictions', 0),
                 'medal_count': data.get('medal_count', 0),
-                'peer_score': data.get('peer_score'),
+                'peer_score': data.get('peer_score') or data.get('scores', {}).get('peer_score'),
                 'coverage': data.get('coverage')
             }
 
         except Exception as e:
-            # User data may not be public
+            # User data may not be public or user doesn't exist
             return None
 
     def compute_updates(self, predictions: pd.DataFrame) -> pd.DataFrame:
@@ -251,6 +289,31 @@ class MetaculusDataFetcher:
 
         predictions_df = pd.DataFrame(all_predictions)
         print(f"Collected {len(predictions_df)} total predictions")
+
+        # Check if we have any predictions
+        if len(predictions_df) == 0:
+            print("\n⚠️  WARNING: No predictions collected!")
+            print("This could be due to:")
+            print("  1. API changes - the endpoint structure may have changed")
+            print("  2. No questions matched the criteria")
+            print("  3. Rate limiting or authentication issues")
+            print("\nReturning empty datasets.")
+
+            return {
+                'questions': questions_df,
+                'predictions': pd.DataFrame(),
+                'users': pd.DataFrame(),
+                'updates': pd.DataFrame(),
+                'metadata': {
+                    'timestamp': datetime.now().strftime('%Y%m%d_%H%M%S'),
+                    'num_questions': len(questions_df),
+                    'num_predictions': 0,
+                    'num_users': 0,
+                    'num_updates': 0,
+                    'min_predictions': min_predictions,
+                    'max_questions': max_questions
+                }
+            }
 
         # Step 3: Fetch user statistics
         unique_users = predictions_df['user_id'].dropna().unique()
