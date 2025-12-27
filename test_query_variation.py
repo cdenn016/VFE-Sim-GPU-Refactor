@@ -9,6 +9,7 @@ import torch
 import numpy as np
 from pathlib import Path
 import sys
+import json
 
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -159,13 +160,20 @@ def main():
         print("Exiting...")
         return
 
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    # Try to load experiment_config.json first (more reliable)
+    checkpoint_dir = Path(checkpoint_path).parent
+    config_json_path = checkpoint_dir / "experiment_config.json"
 
-    # Extract config from checkpoint
-    if 'config' in checkpoint:
-        config = checkpoint['config']
+    config = None
+    if config_json_path.exists():
+        print(f"Loading config from {config_json_path}")
+        with open(config_json_path, 'r') as f:
+            config = json.load(f)
+        print(f"✓ Loaded config from experiment_config.json")
     else:
-        print("Warning: No config in checkpoint, using default config")
+        print(f"Warning: {config_json_path} not found, trying to extract from checkpoint...")
+
+        # Fallback: Default config
         config = {
             'vocab_size': 50257,
             'embed_dim': 28,
@@ -183,15 +191,31 @@ def main():
             'ffn_mode': 'variational_gradient_engine',
         }
 
+        # Try to extract config from checkpoint pickle
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        if 'config' in checkpoint:
+            ckpt_config = checkpoint['config']
+            if isinstance(ckpt_config, dict):
+                config.update(ckpt_config)
+            elif hasattr(ckpt_config, '__dict__'):
+                config.update(vars(ckpt_config))
+            print(f"✓ Extracted config from checkpoint")
+        else:
+            print("⚠️  Using default config")
+
+    print(f"\nConfig: vocab={config['vocab_size']}, embed_dim={config['embed_dim']}, "
+          f"n_layers={config['n_layers']}, irrep_spec={config['irrep_spec']}")
+
     model = GaugeTransformerLM(config)
 
     # Load model weights
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
         model.load_state_dict(checkpoint)
 
-    print(f"Loaded checkpoint from {checkpoint_path}")
+    print(f"✓ Loaded checkpoint from {checkpoint_path}")
 
     model.eval()
 
