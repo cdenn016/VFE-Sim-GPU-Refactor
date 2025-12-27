@@ -597,9 +597,8 @@ class PublicationTrainer(FastTrainer):
         CRITICAL FIXES (based on visualization analysis):
         1. Save PER-HEAD attention (not averaged - averaging destroys patterns!)
         2. Show WHAT sequence is being visualized (token IDs + decoded text)
-        3. Include diagnostic statistics (row uniformity to detect issues)
-        4. Save both individual heads AND averaged comparison
-        5. Label each head with its irrep type (ℓ0, ℓ1, ℓ2, etc.)
+        3. Save both individual heads AND averaged comparison
+        4. Label each head with its irrep type (ℓ0, ℓ1, ℓ2, etc.)
         """
         try:
             import matplotlib
@@ -671,14 +670,8 @@ class PublicationTrainer(FastTrainer):
                         ax.set_xlabel('Key Position (j)')
                         ax.set_ylabel('Query Position (i)')
 
-                        # Compute row uniformity diagnostic
-                        attn_safe = attn_head.copy()
-                        np.fill_diagonal(attn_safe, np.nan)
-                        row_std = np.nanstd(attn_safe, axis=1).mean()
-                        status = "SHARP✓" if row_std > 0.1 else "MEDIUM⚠" if row_std > 0.05 else "UNIFORM❌"
-
                         irrep_label = head_labels[head_idx] if head_idx < len(head_labels) else f"H{head_idx}"
-                        ax.set_title(f'Head {head_idx} ({irrep_label}) - {seq_info}\nRow std: {row_std:.4f} [{status}]',
+                        ax.set_title(f'Head {head_idx} ({irrep_label}) - {seq_info}',
                                     fontsize=10)
                         plt.colorbar(im, ax=ax, label='log₁₀(β)')
 
@@ -702,14 +695,8 @@ class PublicationTrainer(FastTrainer):
 
                         im = ax.imshow(attn_plot, cmap='viridis', aspect='auto', vmin=-3, vmax=0)
 
-                        # Diagnostic
-                        attn_safe = attn_head.copy()
-                        np.fill_diagonal(attn_safe, np.nan)
-                        row_std = np.nanstd(attn_safe, axis=1).mean()
-                        status = "✓" if row_std > 0.1 else "⚠" if row_std > 0.05 else "❌"
-
                         irrep_label = head_labels[head_idx] if head_idx < len(head_labels) else f"H{head_idx}"
-                        ax.set_title(f'Head {head_idx} ({irrep_label})\nstd={row_std:.3f} {status}', fontsize=9)
+                        ax.set_title(f'Head {head_idx} ({irrep_label})', fontsize=9)
                         ax.set_xlabel('Key')
                         ax.set_ylabel('Query')
 
@@ -722,14 +709,7 @@ class PublicationTrainer(FastTrainer):
 
                     im = ax.imshow(attn_plot, cmap='viridis', aspect='auto', vmin=-3, vmax=0)
 
-                    # Diagnostic for averaged
-                    attn_safe = attn_avg.copy()
-                    np.fill_diagonal(attn_safe, np.nan)
-                    row_std = np.nanstd(attn_safe, axis=1).mean()
-                    status = "✓" if row_std > 0.1 else "⚠" if row_std > 0.05 else "❌"
-
-                    ax.set_title(f'AVERAGED (old method) - std={row_std:.3f} {status}\n' +
-                                f'⚠️ Averaging destroys per-head patterns!',
+                    ax.set_title(f'AVERAGED (old method)\n⚠️ Averaging destroys per-head patterns!',
                                 fontsize=11, fontweight='bold')
                     ax.set_xlabel('Key Position')
                     ax.set_ylabel('Query Position')
@@ -742,33 +722,12 @@ class PublicationTrainer(FastTrainer):
                     plt.close(fig)
 
                     # ============================================================
-                    # LOG DIAGNOSTICS
+                    # LOG INFO
                     # ============================================================
                     self._attention_viz_count += 1
                     if self._attention_viz_count == 1:
                         print(f"\n[INFO] Attention patterns saved to: {save_dir}/")
                         print(f"  Saving per-head visualizations (NOT averaged)")
-                        print(f"  Includes sequence context and uniformity diagnostics")
-
-                    # Print diagnostic summary for this step
-                    if step % (self.config.log_interval * 10) == 0:  # Every 10th logging
-                        print(f"\n[Attention Diagnostic @ step {step}]")
-                        for head_idx in range(n_heads):
-                            attn_head = beta_np[head_idx]
-                            attn_safe = attn_head.copy()
-                            np.fill_diagonal(attn_safe, np.nan)
-                            row_std = np.nanstd(attn_safe, axis=1).mean()
-                            status = "✓SHARP" if row_std > 0.1 else "⚠MEDIUM" if row_std > 0.05 else "❌UNIFORM"
-                            irrep_label = head_labels[head_idx] if head_idx < len(head_labels) else f"H{head_idx}"
-                            print(f"  Head {head_idx} ({irrep_label}): row_std={row_std:.4f} [{status}]")
-
-                        # Averaged
-                        attn_avg = beta_np.mean(axis=0)
-                        attn_safe = attn_avg.copy()
-                        np.fill_diagonal(attn_safe, np.nan)
-                        row_std = np.nanstd(attn_safe, axis=1).mean()
-                        status = "✓" if row_std > 0.1 else "⚠" if row_std > 0.05 else "❌"
-                        print(f"  Averaged: row_std={row_std:.4f} [{status}]")
 
         self.model.train()
 
@@ -937,88 +896,6 @@ class PublicationTrainer(FastTrainer):
 
         return norms
 
-    def _compute_diversity_metrics(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, float]:
-        """
-        Compute embedding diversity metrics to diagnose uniform attention.
-
-        Tracks:
-        - μ (belief) pairwise distance statistics
-        - φ (gauge frame) standard deviation statistics
-        - KL matrix standard deviation (if available)
-
-        Returns dict with diversity metrics.
-        """
-        self.model.eval()
-
-        input_ids, _ = batch
-        input_ids = input_ids.to(self.device)
-
-        diversity_metrics = {}
-
-        with torch.no_grad():
-            # Get embeddings
-            if hasattr(self.model, 'token_embed'):
-                mu, sigma, phi = self.model.token_embed(input_ids)
-
-                # μ diversity: pairwise distances
-                mu_batch = mu[0]  # (N, K)
-                mu_dists = torch.cdist(mu_batch, mu_batch, p=2)  # (N, N)
-
-                # Exclude diagonal
-                mask = ~torch.eye(mu_dists.shape[0], dtype=torch.bool, device=mu_dists.device)
-                mu_dists_off_diag = mu_dists[mask]
-
-                diversity_metrics['mu_dist_mean'] = mu_dists_off_diag.mean().item()
-                diversity_metrics['mu_dist_std'] = mu_dists_off_diag.std().item()
-
-                # φ diversity: standard deviation across positions
-                phi_batch = phi[0]  # (N, 3)
-                phi_std_per_dim = phi_batch.std(dim=0)  # (3,)
-                diversity_metrics['phi_std_mean'] = phi_std_per_dim.mean().item()
-
-                # σ (variance) statistics - critical for understanding KL magnitudes
-                sigma_batch = sigma[0]  # (N, K) for diagonal or (N, K, K) for full
-                if sigma_batch.dim() == 2:  # Diagonal covariance
-                    sigma_vals = sigma_batch  # (N, K)
-                    diversity_metrics['sigma_mean'] = sigma_vals.mean().item()
-                    diversity_metrics['sigma_std'] = sigma_vals.std().item()
-                    diversity_metrics['sigma_min'] = sigma_vals.min().item()
-                    diversity_metrics['sigma_max'] = sigma_vals.max().item()
-                elif sigma_batch.dim() == 3:  # Full covariance
-                    # Extract diagonal elements
-                    sigma_diag = torch.diagonal(sigma_batch, dim1=-2, dim2=-1)  # (N, K)
-                    diversity_metrics['sigma_mean'] = sigma_diag.mean().item()
-                    diversity_metrics['sigma_std'] = sigma_diag.std().item()
-                    diversity_metrics['sigma_min'] = sigma_diag.min().item()
-                    diversity_metrics['sigma_max'] = sigma_diag.max().item()
-
-            # Get KL matrix if available
-            if hasattr(self.model, 'forward_with_attention'):
-                _, attn_info = self.model.forward_with_attention(input_ids, targets=None)
-                kl = attn_info.get('kl')  # (B, n_heads, N, N) - per-head KL divergences
-
-                if kl is not None:
-                    # Average over heads to get aggregate KL matrix
-                    kl_matrix = kl.mean(dim=1)  # (B, N, N)
-                    kl_batch = kl_matrix[0]  # (N, N)
-
-                    # Exclude diagonal (KL(q||q) = 0)
-                    kl_safe = kl_batch.clone()
-                    kl_safe.fill_diagonal_(float('nan'))
-
-                    # Compute statistics
-                    kl_flat = kl_safe[~torch.isnan(kl_safe)]
-                    if len(kl_flat) > 0:
-                        diversity_metrics['kl_mean'] = kl_flat.mean().item()
-                        diversity_metrics['kl_std'] = kl_flat.std().item()
-                        diversity_metrics['kl_min'] = kl_flat.min().item()
-                        diversity_metrics['kl_max'] = kl_flat.max().item()
-
-                        # Store sample for detailed logging
-                        diversity_metrics['kl_sample'] = kl_batch[:5, :5].cpu().numpy()
-
-        self.model.train()
-        return diversity_metrics
 
     def sample_text(
         self,
@@ -1109,28 +986,9 @@ class PublicationTrainer(FastTrainer):
                     step + 1, metrics, lrs, grad_norms, step_time, batch_size, seq_len
                 )
 
-                # Compute diversity metrics for tracking
-                diversity_metrics = self._compute_diversity_metrics(batch)
-
                 # Log to comprehensive publication metrics (if enabled)
                 if self.pub_metrics:
                     diagnostics = metrics.get('hamiltonian_diagnostics', None)
-                    # Add diversity metrics to diagnostics
-                    if diagnostics is None:
-                        diagnostics = {}
-                    diagnostics.update({
-                        'mu_dist_mean': diversity_metrics.get('mu_dist_mean', 0),
-                        'mu_dist_std': diversity_metrics.get('mu_dist_std', 0),
-                        'phi_std_mean': diversity_metrics.get('phi_std_mean', 0),
-                        'sigma_mean': diversity_metrics.get('sigma_mean', 0),
-                        'sigma_std': diversity_metrics.get('sigma_std', 0),
-                        'sigma_min': diversity_metrics.get('sigma_min', 0),
-                        'sigma_max': diversity_metrics.get('sigma_max', 0),
-                        'kl_mean': diversity_metrics.get('kl_mean', 0),
-                        'kl_std': diversity_metrics.get('kl_std', 0),
-                        'kl_min': diversity_metrics.get('kl_min', 0),
-                        'kl_max': diversity_metrics.get('kl_max', 0),
-                    })
 
                     self.pub_metrics.record_training_step(
                         step=step + 1,
@@ -1163,64 +1021,12 @@ class PublicationTrainer(FastTrainer):
                         tqdm.write(f"  [GRAD] total: {grad_norms['total']:.3e} | "
                                    f"mu: {grad_norms['mu']:.3e} | sigma: {grad_norms['sigma']:.3e} | "
                                    f"phi: {grad_norms['phi']:.3e}")
-
-                    # Print diversity metrics (already computed above for CSV logging)
-                    if diversity_metrics:
-                        mu_dist = diversity_metrics.get('mu_dist_mean', 0)
-                        phi_std = diversity_metrics.get('phi_std_mean', 0)
-                        kl_std = diversity_metrics.get('kl_std', 0)
-                        kl_mean = diversity_metrics.get('kl_mean', 0)
-                        kl_min = diversity_metrics.get('kl_min', 0)
-                        kl_max = diversity_metrics.get('kl_max', 0)
-
-                        sigma_mean = diversity_metrics.get('sigma_mean', 0)
-                        sigma_min = diversity_metrics.get('sigma_min', 0)
-                        sigma_max = diversity_metrics.get('sigma_max', 0)
-
-                        tqdm.write(f"  [DIVERSITY] μ_dist: {mu_dist:.4f} | "
-                                   f"φ_std: {phi_std:.4f} | KL_std: {kl_std:.4f}")
-                        tqdm.write(f"              KL range: [{kl_min:.4f}, {kl_max:.4f}] | mean: {kl_mean:.4f}")
-                        tqdm.write(f"              σ range: [{sigma_min:.6f}, {sigma_max:.6f}] | mean: {sigma_mean:.6f}")
-
-                        # Print KL matrix sample every 500 steps for detailed diagnosis
-                        if (step + 1) % 500 == 0 and 'kl_sample' in diversity_metrics:
-                            tqdm.write(f"  [KL MATRIX] First 5x5 sample:")
-                            kl_sample = diversity_metrics['kl_sample']
-                            for i in range(min(5, kl_sample.shape[0])):
-                                row_str = ' '.join([f'{v:7.4f}' for v in kl_sample[i]])
-                                tqdm.write(f"              [{row_str}]")
                 else:
                     print(log_msg)
                     if grad_norms:
                         print(f"  [GRAD] total: {grad_norms['total']:.3e} | "
                               f"mu: {grad_norms['mu']:.3e} | sigma: {grad_norms['sigma']:.3e} | "
                               f"phi: {grad_norms['phi']:.3e}")
-
-                    # Print diversity metrics (already computed above for CSV logging)
-                    if diversity_metrics:
-                        mu_dist = diversity_metrics.get('mu_dist_mean', 0)
-                        phi_std = diversity_metrics.get('phi_std_mean', 0)
-                        kl_std = diversity_metrics.get('kl_std', 0)
-                        kl_mean = diversity_metrics.get('kl_mean', 0)
-                        kl_min = diversity_metrics.get('kl_min', 0)
-                        kl_max = diversity_metrics.get('kl_max', 0)
-
-                        sigma_mean = diversity_metrics.get('sigma_mean', 0)
-                        sigma_min = diversity_metrics.get('sigma_min', 0)
-                        sigma_max = diversity_metrics.get('sigma_max', 0)
-
-                        print(f"  [DIVERSITY] μ_dist: {mu_dist:.4f} | "
-                              f"φ_std: {phi_std:.4f} | KL_std: {kl_std:.4f}")
-                        print(f"              KL range: [{kl_min:.4f}, {kl_max:.4f}] | mean: {kl_mean:.4f}")
-                        print(f"              σ range: [{sigma_min:.6f}, {sigma_max:.6f}] | mean: {sigma_mean:.6f}")
-
-                        # Print KL matrix sample every 500 steps for detailed diagnosis
-                        if (step + 1) % 500 == 0 and 'kl_sample' in diversity_metrics:
-                            print(f"  [KL MATRIX] First 5x5 sample:")
-                            kl_sample = diversity_metrics['kl_sample']
-                            for i in range(min(5, kl_sample.shape[0])):
-                                row_str = ' '.join([f'{v:7.4f}' for v in kl_sample[i]])
-                                print(f"              [{row_str}]")
 
             # Validation
             if (step + 1) % self.config.eval_interval == 0:
