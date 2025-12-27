@@ -982,6 +982,11 @@ class PublicationTrainer(FastTrainer):
                     if len(kl_flat) > 0:
                         diversity_metrics['kl_mean'] = kl_flat.mean().item()
                         diversity_metrics['kl_std'] = kl_flat.std().item()
+                        diversity_metrics['kl_min'] = kl_flat.min().item()
+                        diversity_metrics['kl_max'] = kl_flat.max().item()
+
+                        # Store sample for detailed logging
+                        diversity_metrics['kl_sample'] = kl_batch[:5, :5].cpu().numpy()
 
         self.model.train()
         return diversity_metrics
@@ -1090,6 +1095,8 @@ class PublicationTrainer(FastTrainer):
                         'phi_std_mean': diversity_metrics.get('phi_std_mean', 0),
                         'kl_mean': diversity_metrics.get('kl_mean', 0),
                         'kl_std': diversity_metrics.get('kl_std', 0),
+                        'kl_min': diversity_metrics.get('kl_min', 0),
+                        'kl_max': diversity_metrics.get('kl_max', 0),
                     })
 
                     self.pub_metrics.record_training_step(
@@ -1129,9 +1136,21 @@ class PublicationTrainer(FastTrainer):
                         mu_dist = diversity_metrics.get('mu_dist_mean', 0)
                         phi_std = diversity_metrics.get('phi_std_mean', 0)
                         kl_std = diversity_metrics.get('kl_std', 0)
+                        kl_mean = diversity_metrics.get('kl_mean', 0)
+                        kl_min = diversity_metrics.get('kl_min', 0)
+                        kl_max = diversity_metrics.get('kl_max', 0)
 
                         tqdm.write(f"  [DIVERSITY] μ_dist: {mu_dist:.4f} | "
                                    f"φ_std: {phi_std:.4f} | KL_std: {kl_std:.4f}")
+                        tqdm.write(f"              KL range: [{kl_min:.4f}, {kl_max:.4f}] | mean: {kl_mean:.4f}")
+
+                        # Print KL matrix sample every 500 steps for detailed diagnosis
+                        if (step + 1) % 500 == 0 and 'kl_sample' in diversity_metrics:
+                            tqdm.write(f"  [KL MATRIX] First 5x5 sample:")
+                            kl_sample = diversity_metrics['kl_sample']
+                            for i in range(min(5, kl_sample.shape[0])):
+                                row_str = ' '.join([f'{v:7.4f}' for v in kl_sample[i]])
+                                tqdm.write(f"              [{row_str}]")
                 else:
                     print(log_msg)
                     if grad_norms:
@@ -1144,9 +1163,21 @@ class PublicationTrainer(FastTrainer):
                         mu_dist = diversity_metrics.get('mu_dist_mean', 0)
                         phi_std = diversity_metrics.get('phi_std_mean', 0)
                         kl_std = diversity_metrics.get('kl_std', 0)
+                        kl_mean = diversity_metrics.get('kl_mean', 0)
+                        kl_min = diversity_metrics.get('kl_min', 0)
+                        kl_max = diversity_metrics.get('kl_max', 0)
 
                         print(f"  [DIVERSITY] μ_dist: {mu_dist:.4f} | "
                               f"φ_std: {phi_std:.4f} | KL_std: {kl_std:.4f}")
+                        print(f"              KL range: [{kl_min:.4f}, {kl_max:.4f}] | mean: {kl_mean:.4f}")
+
+                        # Print KL matrix sample every 500 steps for detailed diagnosis
+                        if (step + 1) % 500 == 0 and 'kl_sample' in diversity_metrics:
+                            print(f"  [KL MATRIX] First 5x5 sample:")
+                            kl_sample = diversity_metrics['kl_sample']
+                            for i in range(min(5, kl_sample.shape[0])):
+                                row_str = ' '.join([f'{v:7.4f}' for v in kl_sample[i]])
+                                print(f"              [{row_str}]")
 
             # Validation
             if (step + 1) % self.config.eval_interval == 0:
