@@ -84,18 +84,26 @@ class AttentionValidator:
         self._test_vs_uniform(beta)
         self._compute_entropy(beta)
 
-        print("\n[5/7] Per-Head Analysis")
+        print("\n[5/8] Per-Head Analysis")
         print("-" * 70)
         self._analyze_per_head(beta)
 
-        print("\n[6/7] Diversity Correlation")
+        print("\n[6/8] Query-Side Variation (Do different tokens attend differently?)")
+        print("-" * 70)
+        self._analyze_query_variation(beta)
+
+        print("\n[7/9] Diversity Correlation")
         print("-" * 70)
         if mu is not None:
             self._check_diversity_correlation(beta, mu)
 
-        print("\n[7/7] Gradient Flow Check")
+        print("\n[8/9] Gradient Flow Check")
         print("-" * 70)
         self._check_gradient_flow()
+
+        print("\n[9/9] Ablation Study (Does Attention Help?)")
+        print("-" * 70)
+        self._ablation_study(batch, beta)
 
         # Summary
         self._print_summary()
@@ -405,6 +413,83 @@ class AttentionValidator:
             self._log_result("Per-Head Quality", False, overall_score,
                            f"❌ {uniform_heads}/{total} heads uniform", 'critical')
 
+    def _analyze_query_variation(self, beta: torch.Tensor):
+        """
+        Analyze query-side variation: do different positions attend differently?
+
+        INSIGHT: row_std measures KEY-side uniformity (does each query spread uniformly?).
+        But QUERY-side variation matters too (do different queries have different patterns?).
+        """
+        B, H, N, _ = beta.shape
+        beta_np = beta[0].cpu().numpy()
+
+        # For each head, compute pairwise differences between query attention patterns
+        query_variation_scores = []
+
+        for h in range(H):
+            # Compute pairwise L2 distances between rows (query patterns)
+            dists = []
+            for i in range(N):
+                for j in range(i + 1, N):
+                    dist = np.linalg.norm(beta_np[h, i] - beta_np[h, j])
+                    dists.append(dist)
+
+            if len(dists) > 0:
+                mean_dist = np.mean(dists)
+                query_variation_scores.append(mean_dist)
+            else:
+                query_variation_scores.append(0.0)
+
+        avg_query_var = np.mean(query_variation_scores)
+        max_query_var = np.max(query_variation_scores)
+
+        print(f"  Average query variation (L2 between rows): {avg_query_var:.4f}")
+        print(f"  Max query variation: {max_query_var:.4f}")
+
+        # Interpretation
+        # If avg_query_var > 0.05, different queries attend differently (good!)
+        # If avg_query_var < 0.02, all queries have similar patterns (bad!)
+
+        has_query_diversity = avg_query_var > 0.05
+
+        if has_query_diversity:
+            self._log_result("Query Variation", True, avg_query_var,
+                           f"✓ Different queries attend differently (L2={avg_query_var:.4f})", 'info')
+        elif avg_query_var > 0.02:
+            self._log_result("Query Variation", True, avg_query_var,
+                           f"⚠️  Weak query variation (L2={avg_query_var:.4f}) - queries similar", 'warning')
+        else:
+            self._log_result("Query Variation", False, avg_query_var,
+                           f"❌ Queries have nearly identical patterns (L2={avg_query_var:.4f})", 'critical')
+
+        # Additional insight: check correlation with position
+        print(f"\n  Positional pattern analysis:")
+        # Compare adjacent queries vs distant queries
+        adjacent_dists = []
+        distant_dists = []
+
+        for h in range(min(3, H)):  # Check first 3 heads
+            for i in range(1, min(N, 20)):  # Check first 20 positions
+                # Adjacent
+                dist_adjacent = np.linalg.norm(beta_np[h, i] - beta_np[h, i-1])
+                adjacent_dists.append(dist_adjacent)
+
+                # Distant (i vs i-10 if exists)
+                if i >= 10:
+                    dist_distant = np.linalg.norm(beta_np[h, i] - beta_np[h, i-10])
+                    distant_dists.append(dist_distant)
+
+        if len(adjacent_dists) > 0 and len(distant_dists) > 0:
+            avg_adjacent = np.mean(adjacent_dists)
+            avg_distant = np.mean(distant_dists)
+            print(f"    Adjacent queries (Δpos=1): L2={avg_adjacent:.4f}")
+            print(f"    Distant queries (Δpos=10): L2={avg_distant:.4f}")
+
+            if avg_distant > avg_adjacent * 1.5:
+                print(f"    → Positional structure detected (distant > adjacent)")
+            else:
+                print(f"    → Little positional structure")
+
     def _check_diversity_correlation(self, beta: torch.Tensor, mu: torch.Tensor):
         """Test if embedding diversity correlates with attention diversity."""
         # Compute belief diversity (pairwise distances in μ space)
@@ -460,6 +545,108 @@ class AttentionValidator:
         else:
             self._log_result("Gradient Flow", False, 0,
                            f"⚠️  No attention parameters found (might use KL-only, no learned params)", 'warning')
+
+    def _ablation_study(self, batch: Tuple[torch.Tensor, torch.Tensor], beta_learned: torch.Tensor):
+        """
+        Test if learned attention actually helps vs uniform/local baselines.
+
+        CRITICAL TEST: If model generates complex words but attention looks uniform,
+        this tells us whether the subtle differences actually matter.
+        """
+        input_ids, target_ids = batch
+        B, H, N, _ = beta_learned.shape
+
+        # Compute loss with learned attention
+        try:
+            with torch.no_grad():
+                # Normal forward pass
+                outputs = self.model(input_ids, targets=target_ids)
+                if isinstance(outputs, tuple):
+                    loss_learned = outputs[0].item()
+                else:
+                    loss_learned = outputs.item()
+
+                ppl_learned = np.exp(loss_learned)
+
+            print(f"  Learned attention: loss={loss_learned:.4f}, PPL={ppl_learned:.2f}")
+
+            # Create uniform attention baseline
+            uniform_beta = torch.ones_like(beta_learned) / N
+
+            # Create local-only attention (window size 5)
+            local_beta = torch.zeros_like(beta_learned)
+            for i in range(N):
+                window_start = max(0, i - 4)
+                window_end = i + 1
+                window_size = window_end - window_start
+                local_beta[:, :, i, window_start:window_end] = 1.0 / window_size
+
+            # Test uniform
+            try:
+                loss_uniform = self._compute_loss_with_attention(input_ids, target_ids, uniform_beta)
+                ppl_uniform = np.exp(loss_uniform)
+                print(f"  Uniform attention: loss={loss_uniform:.4f}, PPL={ppl_uniform:.2f}")
+
+                degradation_uniform = ppl_uniform - ppl_learned
+                pct_degradation = 100 * (ppl_uniform - ppl_learned) / ppl_learned
+
+                print(f"  → Degradation: +{degradation_uniform:.2f} PPL (+{pct_degradation:.1f}%)")
+
+                # Interpret results
+                if pct_degradation > 10:
+                    self._log_result("Ablation: Uniform", True, pct_degradation,
+                                   f"✓ Learned attention helps! ({pct_degradation:.1f}% better than uniform)", 'info')
+                elif pct_degradation > 2:
+                    self._log_result("Ablation: Uniform", True, pct_degradation,
+                                   f"⚠️  Learned attention helps slightly ({pct_degradation:.1f}% better)", 'warning')
+                else:
+                    self._log_result("Ablation: Uniform", False, pct_degradation,
+                                   f"❌ Learned ≈ uniform ({pct_degradation:.1f}% diff) - attention not helping!", 'critical')
+            except Exception as e:
+                print(f"  ⚠️  Could not test uniform attention: {e}")
+                self._log_result("Ablation: Uniform", False, 0,
+                               f"⚠️  Ablation test failed (model may not support attention override)", 'warning')
+
+            # Test local
+            try:
+                loss_local = self._compute_loss_with_attention(input_ids, target_ids, local_beta)
+                ppl_local = np.exp(loss_local)
+                print(f"  Local attention (window=5): loss={loss_local:.4f}, PPL={ppl_local:.2f}")
+
+                if ppl_local < ppl_learned:
+                    diff = ppl_learned - ppl_local
+                    print(f"  → Local is BETTER by {diff:.2f} PPL (consider adding positional bias!)")
+                    self._log_result("Ablation: Local", False, diff,
+                                   f"⚠️  Local attention outperforms learned (+{diff:.2f} PPL)", 'warning')
+                else:
+                    diff = ppl_local - ppl_learned
+                    print(f"  → Learned is better by {diff:.2f} PPL")
+                    self._log_result("Ablation: Local", True, diff,
+                                   f"✓ Learned beats local attention", 'info')
+            except Exception as e:
+                print(f"  ⚠️  Could not test local attention: {e}")
+
+        except Exception as e:
+            print(f"  ⚠️  Ablation study failed: {e}")
+            print(f"      This is okay - model may not support loss computation in eval mode")
+            self._log_result("Ablation Study", False, 0,
+                           f"⚠️  Ablation test skipped (model API incompatible)", 'info')
+
+    def _compute_loss_with_attention(self, input_ids: torch.Tensor, target_ids: torch.Tensor,
+                                     beta_override: torch.Tensor) -> float:
+        """
+        Compute loss with overridden attention pattern.
+
+        NOTE: This requires model to support attention override, which may not
+        be implemented. If not available, will raise exception.
+        """
+        # This is a hook - most models don't support this
+        # Would need to modify model.forward() to accept beta_override parameter
+        # For now, just raise NotImplementedError
+        raise NotImplementedError(
+            "Model does not support attention override. "
+            "To enable ablation study, modify model.forward() to accept beta_override parameter."
+        )
 
     def _log_result(self, test_name: str, passed: bool, score: float,
                    message: str, severity: str):
