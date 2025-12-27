@@ -276,7 +276,7 @@ Token at position i attends uniformly to all previous tokens (0 to i)
 
 ### Empirical Evidence
 
-**Model tested**: K=19, all scalar heads (ℓ0), β=1.0, vocab=2M, wikitext-2
+**Model tested**: K=19, all scalar heads (ℓ0), β=1.0, vocab=50257 (GPT-2 BPE), wikitext-2
 
 **Query-side variation**: **0.501** (10x the significance threshold!)
 
