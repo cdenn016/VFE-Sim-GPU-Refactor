@@ -314,10 +314,24 @@ def main(data_dir: str = 'data', output_dir: str = 'data'):
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True, parents=True)
 
-    # Load latest data files
-    updates_file = sorted(data_path.glob('updates_*.csv'))[-1]
-    questions_file = sorted(data_path.glob('questions_*.csv'))[-1]
-    users_file = sorted(data_path.glob('users_*.csv'))[-1]
+    # Load latest data files - check if they exist
+    updates_files = sorted(data_path.glob('updates_*.csv'))
+    questions_files = sorted(data_path.glob('questions_*.csv'))
+    users_files = sorted(data_path.glob('users_*.csv'))
+
+    if not updates_files or not questions_files or not users_files:
+        print("\n⚠️  ERROR: No data files found!")
+        print(f"Looking in: {data_path.absolute()}")
+        print(f"  Updates files: {len(updates_files)}")
+        print(f"  Questions files: {len(questions_files)}")
+        print(f"  Users files: {len(users_files)}")
+        print("\nThis means no predictions were collected from the API.")
+        print("The prediction endpoint may not be publicly accessible.")
+        raise FileNotFoundError("No data files found - prediction collection failed")
+
+    updates_file = updates_files[-1]
+    questions_file = questions_files[-1]
+    users_file = users_files[-1]
 
     print(f"Loading data from {data_path}/")
     updates_df = pd.read_csv(updates_file)
