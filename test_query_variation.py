@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+Quick test: Query-side variation for λ_β = 1.0 model
+
+Tests if different tokens attend differently despite uniform key-side patterns.
+"""
+
+import torch
+import numpy as np
+from pathlib import Path
+import sys
+
+# Add project to path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from transformer.model import GaugeEquivariantTransformer
+from transformer.config import TransformerConfig
+
+
+def analyze_query_variation(beta, input_ids=None, tokenizer=None):
+    """
+    Analyze if different queries (tokens) attend differently.
+
+    Args:
+        beta: (B, H, N, N) attention weights
+        input_ids: (B, N) token IDs (optional, for display)
+        tokenizer: For decoding (optional)
+    """
+    B, H, N, _ = beta.shape
+    beta_np = beta[0].cpu().numpy()
+
+    print("=" * 70)
+    print("QUERY-SIDE VARIATION ANALYSIS")
+    print("=" * 70)
+
+    # For each head, compute pairwise L2 distances between attention ROWS
+    # (Each row is how one query attends to all keys)
+
+    for h in range(H):
+        print(f"\nHead {h}:")
+
+        # Compute all pairwise row distances
+        dists = []
+        for i in range(min(N, 20)):  # First 20 tokens
+            for j in range(i + 1, min(N, 20)):
+                # L2 distance between row i and row j
+                dist = np.linalg.norm(beta_np[h, i, :] - beta_np[h, j, :])
+                dists.append(dist)
+
+        if len(dists) > 0:
+            mean_dist = np.mean(dists)
+            max_dist = np.max(dists)
+            min_dist = np.min(dists)
+
+            print(f"  Query variation (L2 between attention patterns):")
+            print(f"    Mean: {mean_dist:.6f}")
+            print(f"    Range: [{min_dist:.6f}, {max_dist:.6f}]")
+
+            if mean_dist < 0.001:
+                print(f"    → TRULY UNIFORM! All queries attend identically!")
+            elif mean_dist < 0.01:
+                print(f"    → Very low variation (queries almost identical)")
+            elif mean_dist < 0.05:
+                print(f"    → Low variation (weak differentiation)")
+            else:
+                print(f"    → Good variation (queries differ)")
+
+        # Show actual attention patterns for first few tokens
+        if input_ids is not None and tokenizer is not None and h == 0:
+            print(f"\n  Sample attention patterns (first 5 tokens):")
+            for i in range(min(5, N)):
+                try:
+                    token = tokenizer.decode([input_ids[0, i].item()])
+                    attn_vals = beta_np[h, i, :10]  # First 10 positions
+                    print(f"    Token {i} ({repr(token)}): {attn_vals}")
+                except:
+                    attn_vals = beta_np[h, i, :10]
+                    print(f"    Token {i}: {attn_vals}")
+
+    # Overall summary
+    print("\n" + "=" * 70)
+    print("OVERALL SUMMARY")
+    print("=" * 70)
+
+    all_dists = []
+    for h in range(H):
+        for i in range(min(N, 20)):
+            for j in range(i + 1, min(N, 20)):
+                dist = np.linalg.norm(beta_np[h, i, :] - beta_np[h, j, :])
+                all_dists.append(dist)
+
+    if len(all_dists) > 0:
+        overall_mean = np.mean(all_dists)
+        print(f"Average query variation across all heads: {overall_mean:.6f}")
+
+        if overall_mean < 0.001:
+            print("\n❌ CRITICAL: Truly uniform attention!")
+            print("   All queries attend identically to all keys.")
+            print("   Model cannot differentiate context based on query token.")
+            print("   → How does this work?! Mystery!")
+        elif overall_mean < 0.01:
+            print("\n⚠️  Very weak query variation.")
+            print("   Different tokens attend almost identically.")
+            print("   Differentiation must come from elsewhere (φ, FFN, etc.)")
+        elif overall_mean < 0.05:
+            print("\n⚠️  Weak query variation.")
+            print("   Some differentiation exists but is subtle.")
+        else:
+            print("\n✓ Significant query variation!")
+            print("   Different tokens attend to different context patterns.")
+
+
+def test_belief_similarity(model, input_ids):
+    """
+    Check if embeddings are truly compressed (all similar).
+    """
+    print("\n" + "=" * 70)
+    print("BELIEF SPACE ANALYSIS")
+    print("=" * 70)
+
+    with torch.no_grad():
+        # Get initial embeddings
+        mu, sigma, phi = model.token_embed(input_ids)
+
+        # Compute pairwise distances in μ space
+        mu_batch = mu[0]  # (N, K)
+        N, K = mu_batch.shape
+
+        dists = []
+        for i in range(min(N, 20)):
+            for j in range(i + 1, min(N, 20)):
+                dist = torch.norm(mu_batch[i] - mu_batch[j]).item()
+                dists.append(dist)
+
+        mean_dist = np.mean(dists)
+        print(f"Average pairwise distance in μ space: {mean_dist:.4f}")
+
+        if mean_dist < 0.5:
+            print("  → ❌ Embeddings COLLAPSED! All tokens very similar.")
+        elif mean_dist < 1.0:
+            print("  → ⚠️  Embeddings compressed but distinct.")
+        else:
+            print("  → ✓ Embeddings well-separated.")
+
+        # Show sample embeddings
+        print(f"\nFirst 3 token embeddings (μ only, first 5 dims):")
+        for i in range(min(3, N)):
+            print(f"  Token {i}: {mu_batch[i, :5].cpu().numpy()}")
+
+
+def main():
+    print("Loading model...")
+
+    # Load your config
+    config_dict = {
+        'vocab_size': 50257,
+        'embed_dim': 28,
+        'n_heads': 9,
+        'n_layers': 6,
+        'max_seq_len': 128,
+        'irrep_spec': [('ℓ0', 5, 1), ('ℓ1', 3, 3), ('ℓ2', 1, 5)],
+        'use_diagonal_covariance': True,
+        'ffn_mode': 'variational_gradient_engine',
+        # Add other config params as needed
+    }
+
+    config = TransformerConfig(**config_dict)
+    model = GaugeEquivariantTransformer(config)
+
+    # Load checkpoint (modify path as needed)
+    checkpoint_path = "checkpoints_publication/ffn_variational_gradient_engine/best_model.pt"
+    if Path(checkpoint_path).exists():
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
+        print(f"Loaded checkpoint from {checkpoint_path}")
+    else:
+        print(f"Warning: Checkpoint not found at {checkpoint_path}")
+        print("Using randomly initialized model for demonstration")
+
+    model.eval()
+
+    # Create test input
+    try:
+        from transformers import GPT2TokenizerFast
+        tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+
+        text = "The cat sat on the mat while the dog chased the ball"
+        input_ids = tokenizer.encode(text, return_tensors='pt')
+        print(f"\nTest text: {text}")
+        print(f"Tokens: {tokenizer.convert_ids_to_tokens(input_ids[0].tolist())}")
+    except:
+        print("Warning: Could not load tokenizer, using random input")
+        input_ids = torch.randint(0, config.vocab_size, (1, 20))
+        tokenizer = None
+
+    # Get attention
+    print("\nComputing attention...")
+    with torch.no_grad():
+        _, attn_info = model.forward_with_attention(input_ids)
+        beta = attn_info['beta']  # (B, H, N, N)
+
+    print(f"Attention shape: {beta.shape}")
+
+    # Analyze query variation
+    analyze_query_variation(beta, input_ids, tokenizer)
+
+    # Analyze belief space
+    test_belief_similarity(model, input_ids)
+
+    print("\n" + "=" * 70)
+    print("DONE")
+    print("=" * 70)
+
+
+if __name__ == '__main__':
+    main()
