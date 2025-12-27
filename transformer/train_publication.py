@@ -604,7 +604,9 @@ class PublicationTrainer(FastTrainer):
             if hasattr(self.model, 'forward_with_attention'):
                 _, attn_info = self.model.forward_with_attention(input_ids, targets=None)
                 beta = attn_info.get('beta')
-                kl_matrix = attn_info.get('kl_matrix')
+                kl = attn_info.get('kl')  # Get per-head KL divergences
+                # Average over heads to get aggregate KL matrix
+                kl_matrix = kl.mean(dim=1) if kl is not None else None
 
                 if beta is not None:
                     # Get shape info
@@ -952,9 +954,11 @@ class PublicationTrainer(FastTrainer):
             # Get KL matrix if available
             if hasattr(self.model, 'forward_with_attention'):
                 _, attn_info = self.model.forward_with_attention(input_ids, targets=None)
-                kl_matrix = attn_info.get('kl_matrix')
+                kl = attn_info.get('kl')  # (B, n_heads, N, N) - per-head KL divergences
 
-                if kl_matrix is not None:
+                if kl is not None:
+                    # Average over heads to get aggregate KL matrix
+                    kl_matrix = kl.mean(dim=1)  # (B, N, N)
                     kl_batch = kl_matrix[0]  # (N, N)
 
                     # Exclude diagonal (KL(q||q) = 0)
