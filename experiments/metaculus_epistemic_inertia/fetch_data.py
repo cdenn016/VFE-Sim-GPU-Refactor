@@ -26,10 +26,17 @@ class MetaculusDataFetcher:
 
     BASE_URL = "https://www.metaculus.com/api/posts"
 
-    def __init__(self, output_dir: str = "data"):
+    def __init__(self, output_dir: str = "data", api_token: str = None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
         self.session = requests.Session()
+
+        # Add authentication if token provided
+        if api_token:
+            self.session.headers.update({
+                'Authorization': f'Token {api_token}'
+            })
+            print(f"✓ Using authenticated API access")
 
     def fetch_questions(self,
                        status: str = "resolved",
