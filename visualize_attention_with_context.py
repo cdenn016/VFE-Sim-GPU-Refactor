@@ -406,6 +406,9 @@ def main():
         'kappa_beta': 1.0,
         'mask_self_attention': True,
         'evolve_sigma': True,
+        # Irrep specification: (name, num_irreps, dimension)
+        # Total: 32*1 + 8*3 + 2*4 = 32 + 24 + 8 = 64
+        'irrep_spec': [('l0', 32, 1), ('l1', 8, 3), ('l2', 2, 4)],
     }
 
     print(f"\n[MODEL CONFIG]")
