@@ -926,6 +926,66 @@ class PublicationTrainer(FastTrainer):
 
         return norms
 
+    def _compute_diversity_metrics(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, float]:
+        """
+        Compute embedding diversity metrics to diagnose uniform attention.
+
+        Tracks:
+        - μ (belief) pairwise distance statistics
+        - φ (gauge frame) standard deviation statistics
+        - KL matrix standard deviation (if available)
+
+        Returns dict with diversity metrics.
+        """
+        self.model.eval()
+
+        input_ids, _ = batch
+        input_ids = input_ids.to(self.device)
+
+        diversity_metrics = {}
+
+        with torch.no_grad():
+            # Get embeddings
+            if hasattr(self.model, 'token_embed'):
+                mu, sigma, phi = self.model.token_embed(input_ids)
+
+                # μ diversity: pairwise distances
+                mu_batch = mu[0]  # (N, K)
+                mu_dists = torch.cdist(mu_batch, mu_batch, p=2)  # (N, N)
+
+                # Exclude diagonal
+                mask = ~torch.eye(mu_dists.shape[0], dtype=torch.bool, device=mu_dists.device)
+                mu_dists_off_diag = mu_dists[mask]
+
+                diversity_metrics['mu_dist_mean'] = mu_dists_off_diag.mean().item()
+                diversity_metrics['mu_dist_std'] = mu_dists_off_diag.std().item()
+
+                # φ diversity: standard deviation across positions
+                phi_batch = phi[0]  # (N, 3)
+                phi_std_per_dim = phi_batch.std(dim=0)  # (3,)
+                diversity_metrics['phi_std_mean'] = phi_std_per_dim.mean().item()
+
+            # Get KL matrix if available
+            if hasattr(self.model, 'forward_with_attention'):
+                _, attn_info = self.model.forward_with_attention(input_ids, targets=None)
+                kl_matrix = attn_info.get('kl_matrix')
+
+                if kl_matrix is not None:
+                    kl_batch = kl_matrix[0]  # (N, N)
+
+                    # Exclude diagonal (KL(q||q) = 0)
+                    kl_safe = kl_batch.clone()
+                    kl_safe.fill_diagonal_(float('nan'))
+
+                    # Compute statistics
+                    kl_flat = kl_safe[~torch.isnan(kl_safe)]
+                    if len(kl_flat) > 0:
+                        diversity_metrics['kl_mean'] = kl_flat.mean().item()
+                        diversity_metrics['kl_std'] = kl_flat.std().item()
+
+        self.model.train()
+        return diversity_metrics
+
     def sample_text(
         self,
         prompt: str = "The",
@@ -1007,7 +1067,7 @@ class PublicationTrainer(FastTrainer):
             # Get learning rates
             lrs = {group['name']: group['lr'] for group in self.optimizer.param_groups}
 
-            # Log to basic tracker (only at log intervals)
+            # Log to basic tracker and console (only at log intervals)
             if is_log_step:
                 batch_size = batch[0].shape[0]
                 seq_len = batch[0].shape[1]
@@ -1015,9 +1075,23 @@ class PublicationTrainer(FastTrainer):
                     step + 1, metrics, lrs, grad_norms, step_time, batch_size, seq_len
                 )
 
+                # Compute diversity metrics for tracking
+                diversity_metrics = self._compute_diversity_metrics(batch)
+
                 # Log to comprehensive publication metrics (if enabled)
                 if self.pub_metrics:
                     diagnostics = metrics.get('hamiltonian_diagnostics', None)
+                    # Add diversity metrics to diagnostics
+                    if diagnostics is None:
+                        diagnostics = {}
+                    diagnostics.update({
+                        'mu_dist_mean': diversity_metrics.get('mu_dist_mean', 0),
+                        'mu_dist_std': diversity_metrics.get('mu_dist_std', 0),
+                        'phi_std_mean': diversity_metrics.get('phi_std_mean', 0),
+                        'kl_mean': diversity_metrics.get('kl_mean', 0),
+                        'kl_std': diversity_metrics.get('kl_std', 0),
+                    })
+
                     self.pub_metrics.record_training_step(
                         step=step + 1,
                         epoch=(step + 1) / len(self.train_loader),
@@ -1033,8 +1107,7 @@ class PublicationTrainer(FastTrainer):
                         seq_len=seq_len,
                     )
 
-            # Console logging
-            if is_log_step:
+                # Console logging
                 log_msg = (
                     f"Step {step+1}/{self.config.max_steps} | "
                     f"Loss: {metrics['train_loss_total']:.4f} | "
@@ -1050,12 +1123,30 @@ class PublicationTrainer(FastTrainer):
                         tqdm.write(f"  [GRAD] total: {grad_norms['total']:.3e} | "
                                    f"mu: {grad_norms['mu']:.3e} | sigma: {grad_norms['sigma']:.3e} | "
                                    f"phi: {grad_norms['phi']:.3e}")
+
+                    # Print diversity metrics (already computed above for CSV logging)
+                    if diversity_metrics:
+                        mu_dist = diversity_metrics.get('mu_dist_mean', 0)
+                        phi_std = diversity_metrics.get('phi_std_mean', 0)
+                        kl_std = diversity_metrics.get('kl_std', 0)
+
+                        tqdm.write(f"  [DIVERSITY] μ_dist: {mu_dist:.4f} | "
+                                   f"φ_std: {phi_std:.4f} | KL_std: {kl_std:.4f}")
                 else:
                     print(log_msg)
                     if grad_norms:
                         print(f"  [GRAD] total: {grad_norms['total']:.3e} | "
                               f"mu: {grad_norms['mu']:.3e} | sigma: {grad_norms['sigma']:.3e} | "
                               f"phi: {grad_norms['phi']:.3e}")
+
+                    # Print diversity metrics (already computed above for CSV logging)
+                    if diversity_metrics:
+                        mu_dist = diversity_metrics.get('mu_dist_mean', 0)
+                        phi_std = diversity_metrics.get('phi_std_mean', 0)
+                        kl_std = diversity_metrics.get('kl_std', 0)
+
+                        print(f"  [DIVERSITY] μ_dist: {mu_dist:.4f} | "
+                              f"φ_std: {phi_std:.4f} | KL_std: {kl_std:.4f}")
 
             # Validation
             if (step + 1) % self.config.eval_interval == 0:
