@@ -151,8 +151,8 @@ def test_belief_similarity(model, input_ids):
 def main():
     print("Loading model...")
 
-    # Load checkpoint (modify path as needed)
-    checkpoint_path = "checkpoints_publication/ffn_variational_gradient_engine/best_model.pt"
+    # Load checkpoint (UPDATE THIS PATH!)
+    checkpoint_path = "checkpoints_publication/185_K=19_scalarN=64__ffn_step=1_ffn_VFE_dynamic/best_model.pt"
 
     if not Path(checkpoint_path).exists():
         print(f"ERROR: Checkpoint not found at {checkpoint_path}")
