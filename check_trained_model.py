@@ -44,34 +44,41 @@ from transformer.model import GaugeTransformerLM
 # Copy the config from your training script here:
 
 config = {
-    'vocab_size': 50257,  # Your vocab size
-    'embed_dim': 255,  # CRITICAL: What is your actual embed_dim?
-    'n_layers': 4,
-    'hidden_dim': 1024,
-    'max_seq_len': 128,
-    'kappa_beta': 1.0,  # CRITICAL: Is this your actual kappa?
+    'vocab_size': 50257,  # GPT-2 BPE vocab
+    'embed_dim': 19,  # Your actual embed_dim from the config you showed
+    'n_layers': 1,   # From your GPU_OPTIMIZED_CONFIG
+    'hidden_dim': 508,  # From your config
+    'max_seq_len': 64,  # From your config
+
+    # Temperature (with auto-scaling)
+    'kappa_beta_auto_scale': True,
+    'kappa_beta_base': 0.25,
+    'kappa_beta_k_ref': 11,
+    # Effective kappa = 0.25 * (19/11) ≈ 0.43
+
     'mask_self_attention': True,
     'evolve_sigma': True,
+    'evolve_phi': True,
+    'diagonal_covariance': True,
 
-    # CRITICAL: You MUST provide your irrep_spec!
-    # You said "spin-0 ...19 heads" - what is the actual spec?
-    # Examples:
-    # - 19 spin-0 heads: [('l0', 19, 1)]  (total dim = 19)
-    # - Mixed: [('l0', 10, 1), ('l1', 3, 3), ...]
-    # - Spin-0 through spin-9: [('l0', 1, 1), ('l1', 1, 3), ('l2', 1, 5), ...]
+    # Positional encoding
+    'use_positional_embedding': True,
+    'pos_encoding_mode': 'none',
+    'pos_encoding_scale': 0.3,
 
+    # Embedding initialization
+    'mu_init_std': 7.0,  # Very high! (part of the problem)
+    'mu_normalize': False,
+
+    # THIS IS THE PROBLEM: Single spin-9 irrep (dim 19)
     'irrep_spec': [
-        # REPLACE THIS with your actual irrep_spec!
-        # For now, assuming 19 spin-0 heads:
-        ('l0', 19, 1),
-        # If total embed_dim = 255, remaining dims need other irreps:
-        # 255 - 19 = 236 remaining dimensions
-        # You might have something like:
-        # ('l1', 10, 3),  # 10 spin-1 heads × 3 dims = 30
-        # ('l2', 8, 5),   # 8 spin-2 heads × 5 dims = 40
-        # etc.
-        # Total must equal embed_dim!
+        ('ℓ9', 1, 19),  # ONE 19-dimensional head
     ],
+    # Total: 1×19 = 19 ✓
+
+    # Gauge group
+    'gauge_group': 'SO3',
+    'use_multi_irrep': True,
 }
 
 print("\n⚠️  WARNING: Using hardcoded config!")
