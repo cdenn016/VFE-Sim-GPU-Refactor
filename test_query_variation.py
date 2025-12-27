@@ -208,6 +208,13 @@ def main():
                 'ffn_mode': 'variational_gradient_engine',
             }
 
+    # Add missing keys with sensible defaults if needed
+    if 'kappa_beta' not in config and 'kappa_beta_base' in config:
+        config['kappa_beta'] = config['kappa_beta_base']
+
+    if 'use_diagonal_covariance' not in config and 'diagonal_covariance' in config:
+        config['use_diagonal_covariance'] = config['diagonal_covariance']
+
     # Show the actual config we're using
     print(f"\nConfig:")
     for key in ['vocab_size', 'embed_dim', 'n_layers', 'irrep_spec', 'kappa_beta', 'ffn_mode']:
