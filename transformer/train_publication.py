@@ -951,6 +951,22 @@ class PublicationTrainer(FastTrainer):
                 phi_std_per_dim = phi_batch.std(dim=0)  # (3,)
                 diversity_metrics['phi_std_mean'] = phi_std_per_dim.mean().item()
 
+                # σ (variance) statistics - critical for understanding KL magnitudes
+                sigma_batch = sigma[0]  # (N, K) for diagonal or (N, K, K) for full
+                if sigma_batch.dim() == 2:  # Diagonal covariance
+                    sigma_vals = sigma_batch  # (N, K)
+                    diversity_metrics['sigma_mean'] = sigma_vals.mean().item()
+                    diversity_metrics['sigma_std'] = sigma_vals.std().item()
+                    diversity_metrics['sigma_min'] = sigma_vals.min().item()
+                    diversity_metrics['sigma_max'] = sigma_vals.max().item()
+                elif sigma_batch.dim() == 3:  # Full covariance
+                    # Extract diagonal elements
+                    sigma_diag = torch.diagonal(sigma_batch, dim1=-2, dim2=-1)  # (N, K)
+                    diversity_metrics['sigma_mean'] = sigma_diag.mean().item()
+                    diversity_metrics['sigma_std'] = sigma_diag.std().item()
+                    diversity_metrics['sigma_min'] = sigma_diag.min().item()
+                    diversity_metrics['sigma_max'] = sigma_diag.max().item()
+
             # Get KL matrix if available
             if hasattr(self.model, 'forward_with_attention'):
                 _, attn_info = self.model.forward_with_attention(input_ids, targets=None)
@@ -1081,6 +1097,10 @@ class PublicationTrainer(FastTrainer):
                         'mu_dist_mean': diversity_metrics.get('mu_dist_mean', 0),
                         'mu_dist_std': diversity_metrics.get('mu_dist_std', 0),
                         'phi_std_mean': diversity_metrics.get('phi_std_mean', 0),
+                        'sigma_mean': diversity_metrics.get('sigma_mean', 0),
+                        'sigma_std': diversity_metrics.get('sigma_std', 0),
+                        'sigma_min': diversity_metrics.get('sigma_min', 0),
+                        'sigma_max': diversity_metrics.get('sigma_max', 0),
                         'kl_mean': diversity_metrics.get('kl_mean', 0),
                         'kl_std': diversity_metrics.get('kl_std', 0),
                         'kl_min': diversity_metrics.get('kl_min', 0),
@@ -1128,9 +1148,14 @@ class PublicationTrainer(FastTrainer):
                         kl_min = diversity_metrics.get('kl_min', 0)
                         kl_max = diversity_metrics.get('kl_max', 0)
 
+                        sigma_mean = diversity_metrics.get('sigma_mean', 0)
+                        sigma_min = diversity_metrics.get('sigma_min', 0)
+                        sigma_max = diversity_metrics.get('sigma_max', 0)
+
                         tqdm.write(f"  [DIVERSITY] μ_dist: {mu_dist:.4f} | "
                                    f"φ_std: {phi_std:.4f} | KL_std: {kl_std:.4f}")
                         tqdm.write(f"              KL range: [{kl_min:.4f}, {kl_max:.4f}] | mean: {kl_mean:.4f}")
+                        tqdm.write(f"              σ range: [{sigma_min:.6f}, {sigma_max:.6f}] | mean: {sigma_mean:.6f}")
 
                         # Print KL matrix sample every 500 steps for detailed diagnosis
                         if (step + 1) % 500 == 0 and 'kl_sample' in diversity_metrics:
@@ -1155,9 +1180,14 @@ class PublicationTrainer(FastTrainer):
                         kl_min = diversity_metrics.get('kl_min', 0)
                         kl_max = diversity_metrics.get('kl_max', 0)
 
+                        sigma_mean = diversity_metrics.get('sigma_mean', 0)
+                        sigma_min = diversity_metrics.get('sigma_min', 0)
+                        sigma_max = diversity_metrics.get('sigma_max', 0)
+
                         print(f"  [DIVERSITY] μ_dist: {mu_dist:.4f} | "
                               f"φ_std: {phi_std:.4f} | KL_std: {kl_std:.4f}")
                         print(f"              KL range: [{kl_min:.4f}, {kl_max:.4f}] | mean: {kl_mean:.4f}")
+                        print(f"              σ range: [{sigma_min:.6f}, {sigma_max:.6f}] | mean: {sigma_mean:.6f}")
 
                         # Print KL matrix sample every 500 steps for detailed diagnosis
                         if (step + 1) % 500 == 0 and 'kl_sample' in diversity_metrics:
