@@ -164,6 +164,15 @@ class ManifoldDataFetcher:
             response.raise_for_status()
             user = response.json()
 
+            # Handle creatorTraders which might be dict, int, or missing
+            creator_traders = user.get('creatorTraders', 0)
+            if isinstance(creator_traders, dict):
+                trader_count = len(creator_traders)
+            elif isinstance(creator_traders, (int, float)):
+                trader_count = int(creator_traders)
+            else:
+                trader_count = 0
+
             return {
                 'user_id': user_id,
                 'username': user.get('username'),
@@ -172,7 +181,7 @@ class ManifoldDataFetcher:
                 'total_profit': user.get('profitCached', {}).get('allTime', 0),
                 'follower_count': user.get('followerCountCached', 0),
                 'following_count': user.get('followingCount', 0),
-                'trader_count': user.get('creatorTraders', 0),  # People who trade on their markets
+                'trader_count': trader_count,  # People who trade on their markets
                 'balance': user.get('balance', 0),
                 'total_deposits': user.get('totalDeposits', 0)
             }
