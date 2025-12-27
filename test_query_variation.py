@@ -13,8 +13,7 @@ import sys
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from transformer.model import GaugeEquivariantTransformer
-from transformer.config import TransformerConfig
+from transformer.model import GaugeTransformerLM
 
 
 def analyze_query_variation(beta, input_ids=None, tokenizer=None):
@@ -151,34 +150,48 @@ def test_belief_similarity(model, input_ids):
 def main():
     print("Loading model...")
 
-    # Load your config
-    config_dict = {
-        'vocab_size': 50257,
-        'embed_dim': 28,
-        'n_heads': 9,
-        'n_layers': 6,
-        'max_seq_len': 128,
-        'irrep_spec': [('ℓ0', 5, 1), ('ℓ1', 3, 3), ('ℓ2', 1, 5)],
-        'use_diagonal_covariance': True,
-        'ffn_mode': 'variational_gradient_engine',
-        # Add other config params as needed
-    }
-
-    config = TransformerConfig(**config_dict)
-    model = GaugeEquivariantTransformer(config)
-
     # Load checkpoint (modify path as needed)
     checkpoint_path = "checkpoints_publication/ffn_variational_gradient_engine/best_model.pt"
-    if Path(checkpoint_path).exists():
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model.load_state_dict(checkpoint)
-        print(f"Loaded checkpoint from {checkpoint_path}")
+
+    if not Path(checkpoint_path).exists():
+        print(f"ERROR: Checkpoint not found at {checkpoint_path}")
+        print("\nPlease update the checkpoint_path in this script to point to your λ_β=1.0 model.")
+        print("Exiting...")
+        return
+
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    # Extract config from checkpoint
+    if 'config' in checkpoint:
+        config = checkpoint['config']
     else:
-        print(f"Warning: Checkpoint not found at {checkpoint_path}")
-        print("Using randomly initialized model for demonstration")
+        print("Warning: No config in checkpoint, using default config")
+        config = {
+            'vocab_size': 50257,
+            'embed_dim': 28,
+            'n_layers': 6,
+            'irrep_spec': [('ℓ0', 5, 1), ('ℓ1', 3, 3), ('ℓ2', 1, 5)],
+            'hidden_dim': 112,
+            'max_seq_len': 128,
+            'kappa_beta': 1.0,
+            'dropout': 0.1,
+            'pos_encoding_mode': 'learned',
+            'evolve_sigma': True,
+            'evolve_phi': False,
+            'tie_embeddings': True,
+            'use_diagonal_covariance': True,
+            'ffn_mode': 'variational_gradient_engine',
+        }
+
+    model = GaugeTransformerLM(config)
+
+    # Load model weights
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
+
+    print(f"Loaded checkpoint from {checkpoint_path}")
 
     model.eval()
 
