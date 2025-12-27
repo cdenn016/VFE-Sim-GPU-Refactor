@@ -62,23 +62,32 @@ class EpistemicInertiaAnalyzer:
         """
         users = users_df.copy()
 
+        # Ensure numeric columns
+        users['follower_count'] = pd.to_numeric(users['follower_count'], errors='coerce').fillna(0)
+        users['total_profit'] = pd.to_numeric(users['total_profit'], errors='coerce').fillna(0)
+        users['trader_count'] = pd.to_numeric(users['trader_count'], errors='coerce').fillna(0)
+
         # Normalize each component to [0, 1]
-        users['follower_norm'] = (users['follower_count'] - users['follower_count'].min()) / \
-                                 (users['follower_count'].max() - users['follower_count'].min() + 1e-10)
+        def safe_normalize(series):
+            """Normalize to [0,1] handling edge cases."""
+            min_val = series.min()
+            max_val = series.max()
+            range_val = max_val - min_val
+            if range_val < 1e-10:  # All values the same
+                return pd.Series(0.5, index=series.index)
+            return (series - min_val) / range_val
 
-        users['profit_norm'] = (users['total_profit'] - users['total_profit'].min()) / \
-                              (users['total_profit'].max() - users['total_profit'].min() + 1e-10)
-
-        users['trader_norm'] = (users['trader_count'] - users['trader_count'].min()) / \
-                               (users['trader_count'].max() - users['trader_count'].min() + 1e-10)
+        users['follower_norm'] = safe_normalize(users['follower_count'])
+        users['profit_norm'] = safe_normalize(users['total_profit'])
+        users['trader_norm'] = safe_normalize(users['trader_count'])
 
         # Compute experience (days since account creation)
-        users['created_time'] = pd.to_datetime(users['created_time'])
+        users['created_time'] = pd.to_datetime(users['created_time'], errors='coerce')
         now = pd.Timestamp.now()
         users['experience_days'] = (now - users['created_time']).dt.total_seconds() / 86400
+        users['experience_days'] = users['experience_days'].fillna(0)
 
-        users['experience_norm'] = (users['experience_days'] - users['experience_days'].min()) / \
-                                   (users['experience_days'].max() - users['experience_days'].min() + 1e-10)
+        users['experience_norm'] = safe_normalize(users['experience_days'])
 
         # Composite mass score (weighted average)
         users['mass_score'] = (
