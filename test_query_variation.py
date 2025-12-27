@@ -164,32 +164,33 @@ def main():
     checkpoint_dir = Path(checkpoint_path).parent
     config_json_path = checkpoint_dir / "experiment_config.json"
 
-    config = None
+    # Start with default config
+    config = {
+        'vocab_size': 50257,
+        'embed_dim': 28,
+        'n_layers': 6,
+        'irrep_spec': [('ℓ0', 5, 1), ('ℓ1', 3, 3), ('ℓ2', 1, 5)],
+        'hidden_dim': 112,
+        'max_seq_len': 128,
+        'kappa_beta': 1.0,
+        'dropout': 0.1,
+        'pos_encoding_mode': 'learned',
+        'evolve_sigma': True,
+        'evolve_phi': False,
+        'tie_embeddings': True,
+        'use_diagonal_covariance': True,
+        'ffn_mode': 'variational_gradient_engine',
+    }
+
     if config_json_path.exists():
         print(f"Loading config from {config_json_path}")
         with open(config_json_path, 'r') as f:
-            config = json.load(f)
+            json_config = json.load(f)
+        # Merge JSON config into defaults (JSON values override defaults)
+        config.update(json_config)
         print(f"✓ Loaded config from experiment_config.json")
     else:
         print(f"Warning: {config_json_path} not found, trying to extract from checkpoint...")
-
-        # Fallback: Default config
-        config = {
-            'vocab_size': 50257,
-            'embed_dim': 28,
-            'n_layers': 6,
-            'irrep_spec': [('ℓ0', 5, 1), ('ℓ1', 3, 3), ('ℓ2', 1, 5)],
-            'hidden_dim': 112,
-            'max_seq_len': 128,
-            'kappa_beta': 1.0,
-            'dropout': 0.1,
-            'pos_encoding_mode': 'learned',
-            'evolve_sigma': True,
-            'evolve_phi': False,
-            'tie_embeddings': True,
-            'use_diagonal_covariance': True,
-            'ffn_mode': 'variational_gradient_engine',
-        }
 
         # Try to extract config from checkpoint pickle
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
