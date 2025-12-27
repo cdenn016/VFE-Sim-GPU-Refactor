@@ -1513,7 +1513,19 @@ class VariationalFFNDynamic(nn.Module):
         # =====================================================================
         # VFE Descent Loop with Dynamic β
         # =====================================================================
+        # CRITICAL FIX: Scale base learning rate by 1/n_iterations
+        # Without this, n_iterations=10 causes ~10x total displacement vs n_iterations=1
+        # This ensures total integrated step size is approximately constant regardless of n_iterations
+        base_lr = self.lr / self.n_iterations
+
         for iteration in range(self.n_iterations):
+            # Additional decay within loop: lr decreases as we approach convergence
+            # iteration 0: factor=1.0, iteration n-1: factor=0.5 (for n>1)
+            if self.n_iterations > 1:
+                decay_factor = 1.0 - 0.5 * (iteration / (self.n_iterations - 1))
+            else:
+                decay_factor = 1.0
+            effective_lr = base_lr * decay_factor
             # =================================================================
             # STEP 1: Recompute attention β from current beliefs
             # =================================================================
@@ -1594,7 +1606,7 @@ class VariationalFFNDynamic(nn.Module):
             # =================================================================
             # The natural gradient nat_grad_mu = Σ @ grad scales with σ
             # Use whitened trust region: ||δμ / √σ|| instead of raw norm
-            delta_mu = -self.lr * nat_grad_mu
+            delta_mu = -effective_lr * nat_grad_mu
 
             # Whitened trust region for mu
             if is_diagonal:
@@ -1613,7 +1625,7 @@ class VariationalFFNDynamic(nn.Module):
             if self.update_sigma:
                 # Use SPD-preserving retraction for stability with multiple iterations
                 # Much smaller lr for sigma (matches simulation_runner: 0.005 vs 0.1)
-                sigma_lr = self.lr * 0.05
+                sigma_lr = effective_lr * 0.05
                 if is_diagonal:
                     sigma_current = retract_spd_diagonal_torch(
                         sigma_diag=sigma_current,
