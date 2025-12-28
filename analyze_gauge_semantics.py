@@ -53,7 +53,7 @@ if not ckpt_path.exists():
     print(f"ERROR: Checkpoint not found: {ckpt_path}")
     sys.exit(1)
 
-checkpoint = torch.load(ckpt_path, map_location='cpu')
+checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
 if 'model_state_dict' in checkpoint:
     state_dict = checkpoint['model_state_dict']
