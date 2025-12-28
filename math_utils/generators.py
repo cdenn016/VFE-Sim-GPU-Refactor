@@ -781,6 +781,34 @@ def _validate_block_diagonal_soN_generators(
 # SO(N) Lie Algebra Operations (PyTorch)
 # =============================================================================
 
+def _get_soN_gauge_generators(n_gen: int, device, dtype) -> 'torch.Tensor':
+    """
+    Get N×N generators for SO(N) gauge group based on n_gen.
+
+    These are the canonical so(N) basis elements L_{ij}, NOT the K×K transport generators.
+    Used internally for BCH composition.
+    """
+    import torch
+    import math
+
+    # Infer N from n_gen: n_gen = N(N-1)/2
+    N = int((1 + math.sqrt(1 + 8 * n_gen)) / 2)
+
+    if N * (N - 1) // 2 != n_gen:
+        raise ValueError(f"n_gen={n_gen} doesn't correspond to valid SO(N)")
+
+    # Build canonical generators L_{ij} for i < j
+    generators = torch.zeros(n_gen, N, N, device=device, dtype=dtype)
+    idx = 0
+    for i in range(N):
+        for j in range(i + 1, N):
+            generators[idx, i, j] = 1.0
+            generators[idx, j, i] = -1.0
+            idx += 1
+
+    return generators
+
+
 def soN_bracket_torch(
     phi1: 'torch.Tensor',
     phi2: 'torch.Tensor',
@@ -797,24 +825,28 @@ def soN_bracket_torch(
     Args:
         phi1: First Lie algebra element coordinates (..., n_gen)
         phi2: Second Lie algebra element coordinates (..., n_gen)
-        generators: Lie algebra generators (n_gen, N, N)
+        generators: Lie algebra generators (n_gen, K, K) - used only for n_gen count
+                   The actual N×N generators are computed internally.
 
     Returns:
         bracket_coords: Coordinates of [φ₁·G, φ₂·G] in generator basis (..., n_gen)
     """
     import torch
 
-    # Build skew-symmetric matrices
-    A1 = torch.einsum('...a,aij->...ij', phi1, generators)  # (..., N, N)
-    A2 = torch.einsum('...a,aij->...ij', phi2, generators)  # (..., N, N)
+    n_gen = generators.shape[0]
+
+    # Get proper N×N generators for the gauge group (not K×K transport generators!)
+    gauge_gens = _get_soN_gauge_generators(n_gen, phi1.device, phi1.dtype)
+
+    # Build skew-symmetric matrices using N×N gauge generators
+    A1 = torch.einsum('...a,aij->...ij', phi1, gauge_gens)  # (..., N, N)
+    A2 = torch.einsum('...a,aij->...ij', phi2, gauge_gens)  # (..., N, N)
 
     # Lie bracket: [A, B] = AB - BA
     bracket = A1 @ A2 - A2 @ A1  # (..., N, N)
 
-    # Extract coordinates: bracket_coords[a] = bracket[i,j] for generator L_{ij}
-    # For canonical basis: G[a] has G[a,i,j] = 1, G[a,j,i] = -1 for some i < j
-    # So bracket_coords[a] = bracket[i,j] where (i,j) corresponds to generator a
-    bracket_coords = extract_soN_coords_torch(bracket, generators)
+    # Extract coordinates from upper triangular
+    bracket_coords = extract_soN_coords_torch(bracket, gauge_gens)
 
     return bracket_coords
 
@@ -832,16 +864,31 @@ def extract_soN_coords_torch(
     the upper-triangular elements of A: φ_a = A[i, j].
 
     Args:
-        A: Skew-symmetric matrix (..., N, N)
-        generators: Lie algebra generators (n_gen, N, N)
+        A: Skew-symmetric matrix (..., M, M) where M is matrix dimension
+        generators: Lie algebra generators (n_gen, K, K)
+                   Note: K may be embedding dim, not gauge group dim!
 
     Returns:
         phi: Lie algebra coordinates (..., n_gen)
     """
     import torch
+    import math
 
     n_gen = generators.shape[0]
-    N = generators.shape[1]
+    M = A.shape[-1]  # Matrix dimension of A
+
+    # Infer gauge group dimension N from n_gen: n_gen = N(N-1)/2
+    # Solving: N = (1 + sqrt(1 + 8*n_gen)) / 2
+    N = int((1 + math.sqrt(1 + 8 * n_gen)) / 2)
+
+    # Validate
+    if N * (N - 1) // 2 != n_gen:
+        raise ValueError(f"n_gen={n_gen} doesn't correspond to valid SO(N). "
+                        f"Expected N*(N-1)/2 for some integer N.")
+
+    if M != N:
+        raise ValueError(f"Matrix A has dimension {M}x{M} but gauge group is SO({N}). "
+                        f"For BCH composition, need {N}x{N} matrices.")
 
     # Build index mapping: generator a -> (i, j) with i < j
     # For canonical basis, generator a corresponds to pair (i, j) in order
