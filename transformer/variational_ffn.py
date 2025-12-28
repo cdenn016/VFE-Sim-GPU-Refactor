@@ -70,6 +70,13 @@ from gradients.retraction import retract_spd  # For SPD manifold updates
 # Import attention computation for dynamic β
 from transformer.attention import compute_attention_weights
 
+# Import SO(N) retraction for proper phi updates
+try:
+    from math_utils.generators import retract_soN_torch
+    SON_RETRACTION_AVAILABLE = True
+except ImportError:
+    SON_RETRACTION_AVAILABLE = False
+
 
 # =============================================================================
 # Memory-Efficient VFE Gradient Helpers
@@ -1704,16 +1711,38 @@ class VariationalFFNDynamic(nn.Module):
                 retain_graph=False,
             )[0]
 
-            # Gradient descent on phi
-            phi_current = phi - self.phi_lr * grad_phi
+            # Proper SO(N) retraction with trust region
+            # This ensures updates stay on the Lie algebra manifold
+            if SON_RETRACTION_AVAILABLE:
+                # Use BCH composition with trust region for stable updates
+                phi_current = retract_soN_torch(
+                    phi=phi,
+                    delta_phi=-grad_phi,  # Negative gradient for descent
+                    generators=self.generators,
+                    step_size=self.phi_lr,
+                    trust_region=0.3,  # Max 30% relative change per update
+                    max_norm=self.phi_max_norm,
+                    bch_order=1,  # First-order BCH (good balance of accuracy/speed)
+                )
+            else:
+                # Fallback: simple gradient descent with trust region
+                delta_phi = -self.phi_lr * grad_phi
 
-            # Clamp to max norm (retraction to ball)
-            phi_norm = torch.norm(phi_current, dim=-1, keepdim=True)
-            phi_current = torch.where(
-                phi_norm > self.phi_max_norm,
-                phi_current * (self.phi_max_norm / phi_norm),
-                phi_current
-            )
+                # Trust region: limit step size relative to current phi
+                phi_norm = torch.norm(phi, dim=-1, keepdim=True).clamp(min=0.1)
+                delta_norm = torch.norm(delta_phi, dim=-1, keepdim=True)
+                trust_scale = torch.clamp(0.3 * phi_norm / (delta_norm + 1e-6), max=1.0)
+                delta_phi = trust_scale * delta_phi
+
+                phi_current = phi + delta_phi
+
+                # Clamp to max norm
+                phi_new_norm = torch.norm(phi_current, dim=-1, keepdim=True)
+                phi_current = torch.where(
+                    phi_new_norm > self.phi_max_norm,
+                    phi_current * (self.phi_max_norm / (phi_new_norm + 1e-6)),
+                    phi_current
+                )
 
         # Return results
         # NOTE: Previously returned .detach() which BREAKS gradient flow!
