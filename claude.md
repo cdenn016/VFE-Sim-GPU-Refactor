@@ -394,6 +394,119 @@ Only essential components have learnable parameters:
 
 ---
 
+---
+
+## Code Output Preferences
+
+**When user asks for code:**
+- Provide simple `.py` scripts with configuration at the top
+- **AVOID**: CLI tools, GUIs (tkinter, etc.), Jupyter notebooks
+- User prefers: self-contained scripts that can be run directly with `python script.py`
+- Put configurable paths/parameters at the top of the file, not as CLI arguments
+
+---
+
+## SO(N) Gauge Groups (Dec 2025)
+
+### Experimental Results: SO(N) vs SO(3)
+
+Validation PPL at 20k steps (1 VFE step per iteration):
+
+| Config | φ_dim | embed_dim | PPL |
+|--------|-------|-----------|-----|
+| SO(10) @ 50 | 45 | 50 | 341 |
+| SO(10) @ 80 | 45 | 80 | 324 |
+| SO(10) @ 100 | 45 | 100 | 180 |
+| SO(20) @ 20 | 190 | 20 | 410 |
+| SO(20) @ 60 | 190 | 60 | 364 |
+| SO(20) @ 100 | 190 | 100 | **166** |
+
+**Key findings:**
+1. SO(20) @ embed_dim=100 achieves best PPL (166) with just 1 VFE step
+2. Higher gauge dimensions (more φ directions) encode richer semantic structure
+3. embed_dim must be sufficient — SO(20) needs at least ~100 to outperform SO(10)
+4. The transport Ω_ij with 190 directions captures word-word relationships that SO(3) with 3 directions cannot
+
+### Architecture: Two Types of Generators
+
+**CRITICAL DISTINCTION:**
+
+| Generator Type | Shape | Purpose |
+|---------------|-------|---------|
+| **Transport generators** | (n_gen, K, K) | Act on K-dimensional fiber (embeddings) |
+| **Gauge generators** | (n_gen, N, N) | Define so(N) Lie algebra structure |
+
+For SO(20) with embed_dim=100:
+- Transport: (190, 100, 100) — for computing Ω_ij = exp(φ·G)
+- Gauge: (190, 20, 20) — for BCH composition in so(20)
+
+**φ has n_gen = N(N-1)/2 components** (coordinates in so(N)), NOT K(K-1)/2.
+
+### SO(N) Retraction with Trust Region
+
+Phi updates now use proper Lie group composition:
+
+```python
+# Old (unstable, breaks with 10+ VFE steps):
+phi = phi - lr * grad_phi  # Simple addition in ℝ^n_gen
+
+# New (stable):
+phi = retract_soN_torch(
+    phi=phi,
+    delta_phi=-grad_phi,
+    generators=generators,  # Only used for n_gen count
+    step_size=lr,
+    trust_region=0.3,       # Max 30% relative change
+    bch_order=1,            # BCH: φ + δφ + ½[φ,δφ]
+)
+```
+
+The BCH formula for so(N) uses the **matrix commutator**:
+```
+[A, B] = AB - BA   (NOT cross product like SO(3))
+```
+
+### Config for SO(N) Training
+
+```python
+config = {
+    'gauge_group': 'SO(N)',      # Not 'SO3'
+    'gauge_dim': 20,             # N for SO(N) → φ_dim = 190
+    'embed_dim': 100,            # K for fiber dimension
+
+    # Position encoding (avoid BCH issues for now)
+    'use_positional_embedding': True,  # Position in μ, not φ
+    'pos_encoding_mode': 'none',       # No position in φ
+
+    # VFE dynamics
+    'n_vfe_iterations': 1,       # Start with 1, increase if stable
+    'evolve_phi': True,          # Enable φ evolution via ∂F/∂φ
+    'phi_lr': 0.05,
+}
+```
+
+### Why Uniform Attention Works
+
+With λ_β > 0 (belief alignment), the embedding space compresses:
+- Tokens pulled toward consensus by Σ β_ij KL(q_i || Ω_ij[q_j])
+- This leads to uniform attention (all KL_ij ≈ constant)
+
+But semantic structure survives in **transport operators**:
+- Message `m_i = Σ_j β_ij Ω_ij[μ_j]` is NOT a simple average
+- The rotation Ω_ij = exp(φ_i·G)exp(-φ_j·G) encodes word-word relationships
+- Confirmed: φ embeddings cluster by semantic class (letters vs punctuation)
+
+### Files Modified for SO(N) Support
+
+| File | Changes |
+|------|---------|
+| `math_utils/generators.py` | Added `soN_bracket_torch`, `soN_compose_bch_torch`, `retract_soN_torch` |
+| `transformer/variational_ffn.py` | Phi updates use `retract_soN_torch` with trust region |
+| `transformer/embeddings.py` | `GaugePositionalEncoding` supports SO(N) BCH composition |
+| `transformer/model.py` | Passes generators to position encoding |
+
+---
+
 ## References
 
 - PyTorch Autograd: https://pytorch.org/docs/stable/autograd.html
