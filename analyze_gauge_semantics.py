@@ -2,293 +2,234 @@
 """
 Analyze whether gauge frames φ encode semantic relationships.
 
-Hypothesis: Semantically related tokens have similar φ (gauge frames),
-so transport Ω_ij ≈ I between them.
-
-Tests:
-1. Do φ embeddings cluster semantically (like μ does)?
-2. Is ||φ_cat - φ_cute|| < ||φ_cat - φ_airplane||?
-3. Compare φ distances for related vs unrelated word pairs.
+SET THESE PATHS, then run: python analyze_gauge_semantics.py
 """
 
 import torch
 import numpy as np
+import json
 from pathlib import Path
 import sys
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
+
+# =============================================================================
+# CONFIGURATION - SET THESE PATHS
+# =============================================================================
+
+EXPERIMENT_CONFIG_PATH = "runs/your_experiment/experiment_config.json"  # <-- CHANGE THIS
+CHECKPOINT_PATH = "runs/your_experiment/best_model.pt"                   # <-- CHANGE THIS
+
+# =============================================================================
+# LOAD TOKENIZER
+# =============================================================================
 
 try:
     import tiktoken
-    HAS_TIKTOKEN = True
+    tokenizer = tiktoken.get_encoding("gpt2")
+    print("Loaded GPT-2 tokenizer")
 except ImportError:
-    HAS_TIKTOKEN = False
-    print("tiktoken not available, using manual token IDs")
+    print("ERROR: Install tiktoken: pip install tiktoken")
+    sys.exit(1)
+
+# =============================================================================
+# LOAD MODEL
+# =============================================================================
+
+print(f"\nLoading config: {EXPERIMENT_CONFIG_PATH}")
+config_path = Path(EXPERIMENT_CONFIG_PATH)
+if config_path.exists():
+    with open(config_path) as f:
+        config = json.load(f)
+    print(f"  embed_dim: {config.get('embed_dim', 'N/A')}")
+    print(f"  lambda_beta: {config.get('lambda_beta', 'N/A')}")
+else:
+    print(f"  WARNING: Config not found")
+    config = {}
+
+print(f"\nLoading checkpoint: {CHECKPOINT_PATH}")
+ckpt_path = Path(CHECKPOINT_PATH)
+if not ckpt_path.exists():
+    print(f"ERROR: Checkpoint not found: {ckpt_path}")
+    sys.exit(1)
+
+checkpoint = torch.load(ckpt_path, map_location='cpu')
+
+if 'model_state_dict' in checkpoint:
+    state_dict = checkpoint['model_state_dict']
+elif 'state_dict' in checkpoint:
+    state_dict = checkpoint['state_dict']
+else:
+    state_dict = checkpoint
+
+mu_embed = None
+phi_embed = None
+
+for key, value in state_dict.items():
+    if 'mu_embed' in key and 'weight' in key:
+        mu_embed = value
+        print(f"  Found mu_embed: {value.shape}")
+    if 'phi_embed' in key and 'weight' in key:
+        phi_embed = value
+        print(f"  Found phi_embed: {value.shape}")
+
+if mu_embed is None:
+    print("ERROR: No mu_embed found!")
+    sys.exit(1)
+
+if phi_embed is None:
+    print("WARNING: No phi_embed found (model may use fixed gauge frames)")
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def dist(t1, t2, embed):
+    """Euclidean distance between embeddings."""
+    if embed is None or t1 >= len(embed) or t2 >= len(embed):
+        return float('nan')
+    return torch.norm(embed[t1] - embed[t2]).item()
 
 
-def load_model_embeddings(checkpoint_path: str):
-    """Load μ and φ embeddings from checkpoint."""
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-
-    # Try different checkpoint formats
-    if 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
-    elif 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
-
-    # Extract embeddings
-    mu_embed = None
-    phi_embed = None
-
-    for key, value in state_dict.items():
-        if 'mu_embed' in key and 'weight' in key:
-            mu_embed = value
-            print(f"Found μ embeddings: {key}, shape {value.shape}")
-        if 'phi_embed' in key and 'weight' in key:
-            phi_embed = value
-            print(f"Found φ embeddings: {key}, shape {value.shape}")
-
-    return mu_embed, phi_embed
-
-
-def get_token_id(word: str, tokenizer=None):
-    """Get BPE token ID for a word."""
-    if tokenizer is not None:
-        tokens = tokenizer.encode(word)
-        return tokens[0] if tokens else None
+def get_token_id(word):
+    """Get token ID if word is a single BPE token."""
+    tokens = tokenizer.encode(word)
+    if len(tokens) == 1:
+        return tokens[0]
     return None
 
+# =============================================================================
+# ANALYSIS 1: BPE VOCABULARY CHECK
+# =============================================================================
 
-def analyze_semantic_distances(mu_embed, phi_embed, tokenizer=None):
-    """Compare distances for semantically related vs unrelated pairs."""
+print("\n" + "=" * 60)
+print("BPE VOCABULARY CHECK")
+print("=" * 60)
 
-    # Define test pairs
-    # Format: (word1, word2, relationship)
-    related_pairs = [
-        ("cat", "kitten", "same concept"),
-        ("cat", "dog", "both animals"),
-        ("cat", "furry", "attribute"),
-        ("happy", "joy", "synonyms"),
-        ("run", "running", "same verb"),
-        ("big", "large", "synonyms"),
-        ("hot", "cold", "antonyms but same domain"),
-    ]
-
-    unrelated_pairs = [
-        ("cat", "airplane", "unrelated"),
-        ("cat", "democracy", "unrelated"),
-        ("happy", "concrete", "unrelated"),
-        ("run", "purple", "unrelated"),
-        ("big", "Wednesday", "unrelated"),
-    ]
-
-    print("\n" + "="*70)
-    print("SEMANTIC DISTANCE ANALYSIS")
-    print("="*70)
-
-    if tokenizer is None:
-        print("\nNo tokenizer available. Using GPT-2 encoding...")
-        if HAS_TIKTOKEN:
-            tokenizer = tiktoken.get_encoding("gpt2")
-        else:
-            print("Cannot proceed without tiktoken. Install with: pip install tiktoken")
-            return
-
-    def get_embeddings(word):
-        """Get μ and φ for a word."""
-        tokens = tokenizer.encode(word)
-        if not tokens:
-            return None, None
-        token_id = tokens[0]
-        if token_id >= len(mu_embed):
-            return None, None
-        return mu_embed[token_id], phi_embed[token_id] if phi_embed is not None else None
-
-    def compute_distance(embed1, embed2):
-        """Euclidean distance between embeddings."""
-        if embed1 is None or embed2 is None:
-            return float('nan')
-        return torch.norm(embed1 - embed2).item()
-
-    print("\n--- Related Pairs ---")
-    related_mu_dists = []
-    related_phi_dists = []
-
-    for word1, word2, relation in related_pairs:
-        mu1, phi1 = get_embeddings(word1)
-        mu2, phi2 = get_embeddings(word2)
-
-        mu_dist = compute_distance(mu1, mu2)
-        phi_dist = compute_distance(phi1, phi2)
-
-        if not np.isnan(mu_dist):
-            related_mu_dists.append(mu_dist)
-        if not np.isnan(phi_dist):
-            related_phi_dists.append(phi_dist)
-
-        print(f"  {word1:12} - {word2:12} ({relation:20}): μ_dist={mu_dist:.4f}, φ_dist={phi_dist:.4f}")
-
-    print("\n--- Unrelated Pairs ---")
-    unrelated_mu_dists = []
-    unrelated_phi_dists = []
-
-    for word1, word2, relation in unrelated_pairs:
-        mu1, phi1 = get_embeddings(word1)
-        mu2, phi2 = get_embeddings(word2)
-
-        mu_dist = compute_distance(mu1, mu2)
-        phi_dist = compute_distance(phi1, phi2)
-
-        if not np.isnan(mu_dist):
-            unrelated_mu_dists.append(mu_dist)
-        if not np.isnan(phi_dist):
-            unrelated_phi_dists.append(phi_dist)
-
-        print(f"  {word1:12} - {word2:12} ({relation:20}): μ_dist={mu_dist:.4f}, φ_dist={phi_dist:.4f}")
-
-    # Summary statistics
-    print("\n" + "="*70)
-    print("SUMMARY")
-    print("="*70)
-
-    if related_mu_dists and unrelated_mu_dists:
-        print(f"\nμ embeddings:")
-        print(f"  Related pairs mean distance:   {np.mean(related_mu_dists):.4f}")
-        print(f"  Unrelated pairs mean distance: {np.mean(unrelated_mu_dists):.4f}")
-        print(f"  Ratio (unrelated/related):     {np.mean(unrelated_mu_dists)/np.mean(related_mu_dists):.2f}x")
-
-    if related_phi_dists and unrelated_phi_dists:
-        print(f"\nφ embeddings (gauge frames):")
-        print(f"  Related pairs mean distance:   {np.mean(related_phi_dists):.4f}")
-        print(f"  Unrelated pairs mean distance: {np.mean(unrelated_phi_dists):.4f}")
-        print(f"  Ratio (unrelated/related):     {np.mean(unrelated_phi_dists)/np.mean(related_phi_dists):.2f}x")
-
-        if np.mean(unrelated_phi_dists) > np.mean(related_phi_dists) * 1.2:
-            print("\n  ✓ φ encodes semantic relationships!")
-            print("    Related tokens have similar gauge frames.")
-        else:
-            print("\n  ✗ φ does NOT clearly encode semantic relationships.")
-            print("    Gauge frames may serve a different purpose.")
-
-    return {
-        'related_mu': related_mu_dists,
-        'unrelated_mu': unrelated_mu_dists,
-        'related_phi': related_phi_dists,
-        'unrelated_phi': unrelated_phi_dists,
-    }
-
-
-def analyze_phi_clustering(phi_embed, tokenizer=None):
-    """Check if φ embeddings cluster by token type (letters, digits, punctuation)."""
-
-    print("\n" + "="*70)
-    print("φ CLUSTERING BY TOKEN TYPE")
-    print("="*70)
-
-    if tokenizer is None and HAS_TIKTOKEN:
-        tokenizer = tiktoken.get_encoding("gpt2")
-
-    if tokenizer is None:
-        print("No tokenizer available")
-        return
-
-    # Categorize tokens
-    categories = {
-        'lowercase': [],
-        'uppercase': [],
-        'digits': [],
-        'punctuation': [],
-        'space_tokens': [],
-    }
-
-    for token_id in range(min(1000, len(phi_embed))):  # Check first 1000 tokens
-        try:
-            token_str = tokenizer.decode([token_id])
-
-            if token_str.strip().isalpha() and token_str.islower():
-                categories['lowercase'].append(token_id)
-            elif token_str.strip().isalpha() and token_str.isupper():
-                categories['uppercase'].append(token_id)
-            elif token_str.strip().isdigit():
-                categories['digits'].append(token_id)
-            elif token_str.strip() and not token_str.strip().isalnum():
-                categories['punctuation'].append(token_id)
-            elif token_str.startswith(' '):
-                categories['space_tokens'].append(token_id)
-        except:
-            continue
-
-    # Compute mean φ for each category
-    print("\nCategory statistics:")
-    category_means = {}
-
-    for cat_name, token_ids in categories.items():
-        if len(token_ids) > 5:
-            cat_phis = phi_embed[token_ids]
-            cat_mean = cat_phis.mean(dim=0)
-            cat_std = cat_phis.std(dim=0).mean()
-            category_means[cat_name] = cat_mean
-
-            print(f"  {cat_name:15}: n={len(token_ids):4}, "
-                  f"mean_φ={cat_mean.numpy()}, "
-                  f"intra_std={cat_std:.4f}")
-
-    # Compute inter-category distances
-    print("\nInter-category φ distances:")
-    cat_names = list(category_means.keys())
-
-    for i, cat1 in enumerate(cat_names):
-        for cat2 in cat_names[i+1:]:
-            dist = torch.norm(category_means[cat1] - category_means[cat2]).item()
-            print(f"  {cat1:15} - {cat2:15}: {dist:.4f}")
-
-
-def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Analyze gauge frame semantics")
-    parser.add_argument("checkpoint", nargs="?", help="Path to model checkpoint")
-    parser.add_argument("--random", action="store_true", help="Test with random embeddings")
-    args = parser.parse_args()
-
-    if args.random:
-        print("Testing with RANDOM embeddings (baseline)...")
-        print("If φ encodes semantics, trained model should show different pattern.\n")
-
-        vocab_size = 50257
-        embed_dim = 32
-        phi_dim = 3
-
-        mu_embed = torch.randn(vocab_size, embed_dim)
-        phi_embed = torch.randn(vocab_size, phi_dim) * 0.1
-
-    elif args.checkpoint:
-        print(f"Loading checkpoint: {args.checkpoint}")
-        mu_embed, phi_embed = load_model_embeddings(args.checkpoint)
-
-        if mu_embed is None:
-            print("ERROR: Could not find μ embeddings in checkpoint")
-            return
-        if phi_embed is None:
-            print("WARNING: No φ embeddings found (model may not use learnable_phi)")
-
+test_words = ["cat", "dog", "the", "and", "run", "big", "kitten", "airplane", "happy"]
+for word in test_words:
+    tokens = tokenizer.encode(word)
+    if len(tokens) == 1:
+        print(f"  '{word}' -> token {tokens[0]} (single)")
     else:
-        print("Usage:")
-        print("  python analyze_gauge_semantics.py <checkpoint.pt>")
-        print("  python analyze_gauge_semantics.py --random  # baseline test")
-        return
+        decoded = [tokenizer.decode([t]) for t in tokens]
+        print(f"  '{word}' -> {decoded} (multi-token)")
 
-    # Run analyses
-    if phi_embed is not None:
-        analyze_semantic_distances(mu_embed, phi_embed)
-        analyze_phi_clustering(phi_embed)
+# =============================================================================
+# ANALYSIS 2: TOKEN CLASS DISTANCES
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("TOKEN CLASS ANALYSIS")
+print("=" * 60)
+print("Comparing: letters vs digits vs punctuation")
+
+letter_ids = []
+digit_ids = []
+punct_ids = []
+
+for tid in range(256):
+    try:
+        s = tokenizer.decode([tid])
+        if len(s) == 1:
+            if s.isalpha():
+                letter_ids.append(tid)
+            elif s.isdigit():
+                digit_ids.append(tid)
+            elif not s.isalnum() and not s.isspace():
+                punct_ids.append(tid)
+    except:
+        pass
+
+print(f"\nFound: {len(letter_ids)} letters, {len(digit_ids)} digits, {len(punct_ids)} punct")
+
+# Intra-class (letter-letter)
+intra_mu, intra_phi = [], []
+for i, t1 in enumerate(letter_ids[:10]):
+    for t2 in letter_ids[i+1:10]:
+        intra_mu.append(dist(t1, t2, mu_embed))
+        intra_phi.append(dist(t1, t2, phi_embed))
+
+# Inter-class (letter-digit, letter-punct)
+inter_mu, inter_phi = [], []
+for t1 in letter_ids[:10]:
+    for t2 in digit_ids[:5] + punct_ids[:5]:
+        inter_mu.append(dist(t1, t2, mu_embed))
+        inter_phi.append(dist(t1, t2, phi_embed))
+
+# Clean NaNs
+intra_mu = [x for x in intra_mu if not np.isnan(x)]
+intra_phi = [x for x in intra_phi if not np.isnan(x)]
+inter_mu = [x for x in inter_mu if not np.isnan(x)]
+inter_phi = [x for x in inter_phi if not np.isnan(x)]
+
+print(f"\nmu embeddings:")
+print(f"  Intra-class (letter-letter): {np.mean(intra_mu):.4f}")
+print(f"  Inter-class (letter-other):  {np.mean(inter_mu):.4f}")
+if intra_mu and inter_mu:
+    print(f"  Ratio: {np.mean(inter_mu) / np.mean(intra_mu):.2f}x")
+
+if intra_phi and inter_phi:
+    print(f"\nphi embeddings (gauge frames):")
+    print(f"  Intra-class (letter-letter): {np.mean(intra_phi):.4f}")
+    print(f"  Inter-class (letter-other):  {np.mean(inter_phi):.4f}")
+    ratio = np.mean(inter_phi) / np.mean(intra_phi)
+    print(f"  Ratio: {ratio:.2f}x")
+
+    if ratio > 1.2:
+        print(f"\n  --> phi DOES show class structure!")
     else:
-        print("\nNo φ embeddings to analyze. Model may use fixed gauge frames.")
-        print("Analyzing μ embeddings only...")
-        analyze_semantic_distances(mu_embed, None)
+        print(f"\n  --> phi does NOT show clear class structure.")
 
+# =============================================================================
+# ANALYSIS 3: WORD PAIR DISTANCES
+# =============================================================================
 
-if __name__ == "__main__":
-    main()
+print("\n" + "=" * 60)
+print("WORD PAIR ANALYSIS (single-token words only)")
+print("=" * 60)
+
+pairs = [
+    ("cat", "dog", "related"),
+    ("cat", "the", "unrelated"),
+    ("man", "day", "unrelated"),
+    ("big", "new", "unrelated"),
+    ("run", "see", "related (verbs)"),
+    ("has", "had", "related"),
+]
+
+related_phi = []
+unrelated_phi = []
+
+for w1, w2, rel in pairs:
+    t1 = get_token_id(w1)
+    t2 = get_token_id(w2)
+
+    if t1 is None or t2 is None:
+        print(f"  {w1:8} - {w2:8}: SKIP (multi-token)")
+        continue
+
+    phi_d = dist(t1, t2, phi_embed) if phi_embed is not None else float('nan')
+    mu_d = dist(t1, t2, mu_embed)
+
+    print(f"  {w1:8} - {w2:8} [{rel:15}]: phi={phi_d:.4f}, mu={mu_d:.4f}")
+
+    if not np.isnan(phi_d):
+        if "related" in rel:
+            related_phi.append(phi_d)
+        else:
+            unrelated_phi.append(phi_d)
+
+if related_phi and unrelated_phi:
+    print(f"\nRelated mean:   {np.mean(related_phi):.4f}")
+    print(f"Unrelated mean: {np.mean(unrelated_phi):.4f}")
+    ratio = np.mean(unrelated_phi) / np.mean(related_phi)
+    print(f"Ratio: {ratio:.2f}x")
+
+# =============================================================================
+# DONE
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("ANALYSIS COMPLETE")
+print("=" * 60)
