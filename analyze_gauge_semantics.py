@@ -227,6 +227,161 @@ if related_phi and unrelated_phi:
     print(f"Ratio: {ratio:.2f}x")
 
 # =============================================================================
+# VISUALIZATION
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("VISUALIZATION")
+print("=" * 60)
+
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from mpl_toolkits.mplot3d import Axes3D
+
+def categorize_token(tid):
+    """Categorize a token by type."""
+    try:
+        s = tokenizer.decode([tid])
+        if len(s) == 1:
+            if s.isalpha():
+                return 'letter'
+            elif s.isdigit():
+                return 'digit'
+            elif not s.isalnum() and not s.isspace():
+                return 'punct'
+        if s.strip() in {'the', 'a', 'an', 'is', 'are', 'was', 'of', 'to', 'in', 'for', 'and', 'or'}:
+            return 'function'
+        return 'content'
+    except:
+        return 'other'
+
+# Get tokens to visualize (first 500 for speed)
+n_viz = min(500, len(phi_embed) if phi_embed is not None else 0)
+
+if phi_embed is not None and n_viz > 0:
+    phi_np = phi_embed[:n_viz].numpy()
+    phi_dim = phi_np.shape[1]
+
+    # Categorize tokens
+    categories = [categorize_token(tid) for tid in range(n_viz)]
+    category_colors = {
+        'letter': '#E74C3C',    # red
+        'digit': '#3498DB',     # blue
+        'punct': '#2ECC71',     # green
+        'function': '#9B59B6',  # purple
+        'content': '#F39C12',   # orange
+        'other': '#95A5A6',     # gray
+    }
+    colors = [category_colors.get(c, '#95A5A6') for c in categories]
+
+    print(f"phi_dim = {phi_dim} ({'SO(3)' if phi_dim == 3 else f'SO(N) with N(N-1)/2={phi_dim}'})")
+
+    # Normalize to unit sphere for visualization
+    phi_norms = np.linalg.norm(phi_np, axis=1, keepdims=True)
+    phi_norms = np.clip(phi_norms, 1e-8, None)  # avoid div by zero
+    phi_unit = phi_np / phi_norms
+
+    if phi_dim == 3:
+        # SO(3): Direct 3D visualization on sphere
+        fig = plt.figure(figsize=(14, 6))
+
+        # 3D sphere plot
+        ax1 = fig.add_subplot(121, projection='3d')
+
+        # Draw unit sphere wireframe
+        u = np.linspace(0, 2 * np.pi, 30)
+        v = np.linspace(0, np.pi, 20)
+        x_sphere = np.outer(np.cos(u), np.sin(v))
+        y_sphere = np.outer(np.sin(u), np.sin(v))
+        z_sphere = np.outer(np.ones(np.size(u)), np.cos(v))
+        ax1.plot_wireframe(x_sphere, y_sphere, z_sphere, alpha=0.1, color='gray')
+
+        # Plot points
+        for cat in category_colors:
+            mask = [c == cat for c in categories]
+            if any(mask):
+                idx = [i for i, m in enumerate(mask) if m]
+                ax1.scatter(phi_unit[idx, 0], phi_unit[idx, 1], phi_unit[idx, 2],
+                           c=category_colors[cat], label=cat, alpha=0.6, s=20)
+
+        ax1.set_xlabel('φ₁')
+        ax1.set_ylabel('φ₂')
+        ax1.set_zlabel('φ₃')
+        ax1.set_title('SO(3) Gauge Frames on Unit Sphere')
+        ax1.legend(loc='upper left', fontsize=8)
+
+        # 2D projection (first two components)
+        ax2 = fig.add_subplot(122)
+        for cat in category_colors:
+            mask = [c == cat for c in categories]
+            if any(mask):
+                idx = [i for i, m in enumerate(mask) if m]
+                ax2.scatter(phi_np[idx, 0], phi_np[idx, 1],
+                           c=category_colors[cat], label=cat, alpha=0.6, s=20)
+
+        ax2.set_xlabel('φ₁')
+        ax2.set_ylabel('φ₂')
+        ax2.set_title('SO(3) Gauge Frames (φ₁ vs φ₂)')
+        ax2.legend(loc='upper left', fontsize=8)
+        ax2.grid(True, alpha=0.3)
+        ax2.set_aspect('equal')
+
+    else:
+        # SO(N): Use PCA to reduce to 2D/3D
+        print(f"Using PCA to reduce {phi_dim}D -> 3D for visualization")
+
+        pca = PCA(n_components=min(3, phi_dim))
+        phi_pca = pca.fit_transform(phi_np)
+
+        var_explained = pca.explained_variance_ratio_
+        print(f"PCA variance explained: {var_explained[0]:.1%} + {var_explained[1]:.1%} + {var_explained[2] if len(var_explained) > 2 else 0:.1%}")
+
+        fig = plt.figure(figsize=(14, 6))
+
+        if phi_pca.shape[1] >= 3:
+            # 3D PCA plot
+            ax1 = fig.add_subplot(121, projection='3d')
+            for cat in category_colors:
+                mask = [c == cat for c in categories]
+                if any(mask):
+                    idx = [i for i, m in enumerate(mask) if m]
+                    ax1.scatter(phi_pca[idx, 0], phi_pca[idx, 1], phi_pca[idx, 2],
+                               c=category_colors[cat], label=cat, alpha=0.6, s=20)
+
+            ax1.set_xlabel(f'PC1 ({var_explained[0]:.1%})')
+            ax1.set_ylabel(f'PC2 ({var_explained[1]:.1%})')
+            ax1.set_zlabel(f'PC3 ({var_explained[2]:.1%})')
+            ax1.set_title(f'SO(N) Gauge Frames (PCA from {phi_dim}D)')
+            ax1.legend(loc='upper left', fontsize=8)
+
+        # 2D PCA plot
+        ax2 = fig.add_subplot(122)
+        for cat in category_colors:
+            mask = [c == cat for c in categories]
+            if any(mask):
+                idx = [i for i, m in enumerate(mask) if m]
+                ax2.scatter(phi_pca[idx, 0], phi_pca[idx, 1],
+                           c=category_colors[cat], label=cat, alpha=0.6, s=20)
+
+        ax2.set_xlabel(f'PC1 ({var_explained[0]:.1%})')
+        ax2.set_ylabel(f'PC2 ({var_explained[1]:.1%})')
+        ax2.set_title(f'SO(N) Gauge Frames (PCA from {phi_dim}D)')
+        ax2.legend(loc='upper left', fontsize=8)
+        ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # Save figure
+    save_path = Path(CHECKPOINT_PATH).parent / 'gauge_frame_clustering.png'
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"\nSaved: {save_path}")
+
+    plt.show()
+
+else:
+    print("No phi embeddings to visualize")
+
+# =============================================================================
 # DONE
 # =============================================================================
 
