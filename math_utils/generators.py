@@ -1037,6 +1037,11 @@ def retract_soN_exact_torch(
     """
     import torch
 
+    n_gen = generators.shape[0]
+
+    # Get proper N×N generators for the gauge group (not K×K transport generators!)
+    gauge_gens = _get_soN_gauge_generators(n_gen, phi.device, phi.dtype)
+
     # Scale update with trust region
     update = step_size * delta_phi
     phi_norm = torch.norm(phi, dim=-1, keepdim=True).clamp(min=0.1)
@@ -1044,9 +1049,9 @@ def retract_soN_exact_torch(
     scale = torch.clamp(trust_region * phi_norm / (update_norm + eps), max=1.0)
     update = scale * update
 
-    # Build skew-symmetric matrices
-    A_phi = torch.einsum('...a,aij->...ij', phi, generators)
-    A_delta = torch.einsum('...a,aij->...ij', update, generators)
+    # Build skew-symmetric matrices using N×N gauge generators
+    A_phi = torch.einsum('...a,aij->...ij', phi, gauge_gens)
+    A_delta = torch.einsum('...a,aij->...ij', update, gauge_gens)
 
     # Matrix exponentials
     R_phi = torch.matrix_exp(A_phi)
@@ -1060,7 +1065,7 @@ def retract_soN_exact_torch(
     A_new = _matrix_log_orthogonal_torch(R_new, eps=eps)
 
     # Extract coordinates
-    phi_new = extract_soN_coords_torch(A_new, generators)
+    phi_new = extract_soN_coords_torch(A_new, gauge_gens)
 
     # Clamp to max norm
     phi_new_norm = torch.norm(phi_new, dim=-1, keepdim=True)
