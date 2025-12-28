@@ -27,6 +27,13 @@ import torch
 import torch.nn as nn
 from typing import Tuple, Optional
 
+# Import SO(N) BCH composition for proper Lie group operations
+try:
+    from math_utils.generators import soN_compose_bch_torch
+    SON_BCH_AVAILABLE = True
+except ImportError:
+    SON_BCH_AVAILABLE = False
+
 
 class GaugeTokenEmbedding(nn.Module):
     """
@@ -444,6 +451,7 @@ class GaugePositionalEncoding(nn.Module):
         scale: float = 0.1,
         composition: str = 'exact',  # Default: full SO(3) composition (most accurate)
         phi_dim: int = 3,  # 3 for SO(3), N(N-1)/2 for SO(N)
+        generators: Optional[torch.Tensor] = None,  # Required for SO(N) BCH composition
     ):
         """
         Initialize positional encoding in gauge space.
@@ -457,10 +465,11 @@ class GaugePositionalEncoding(nn.Module):
             scale: Scaling factor for positional encodings (ignored if mode='none')
             composition: How to combine token φ with positional φ:
                 - 'add': Simple addition (φ_base + φ_pos) - fast but only valid for small angles
-                - 'bch1': BCH order 1 correction (SO(3) only)
-                - 'bch2': BCH order 2 correction (SO(3) only)
+                - 'bch1': BCH order 1 correction (works for SO(3) and SO(N) with generators)
+                - 'bch2': BCH order 2 correction (works for SO(3) and SO(N) with generators)
                 - 'exact': Full SO(3) composition (SO(3) only)
             phi_dim: Dimension of gauge frame φ. 3 for SO(3), N(N-1)/2 for SO(N).
+            generators: Lie algebra generators (n_gen, N, N). Required for SO(N) BCH when N > 3.
         """
         super().__init__()
         self.max_seq_len = max_seq_len
@@ -468,11 +477,22 @@ class GaugePositionalEncoding(nn.Module):
         self.scale = scale
         self.phi_dim = phi_dim
 
-        # For SO(N) with N > 3, only 'add' composition is supported
-        if phi_dim != 3 and composition not in ['add']:
-            print(f"[WARNING] Composition '{composition}' only supported for SO(3) (phi_dim=3). "
-                  f"Falling back to 'add' for phi_dim={phi_dim}.")
-            composition = 'add'
+        # Store generators for SO(N) BCH composition
+        if generators is not None:
+            self.register_buffer('generators', generators)
+        else:
+            self.generators = None
+
+        # For SO(N) with N > 3, BCH requires generators; 'exact' is SO(3)-only
+        if phi_dim != 3:
+            if composition == 'exact':
+                print(f"[WARNING] Composition 'exact' only supported for SO(3) (phi_dim=3). "
+                      f"Falling back to 'bch1' for phi_dim={phi_dim}.")
+                composition = 'bch1'
+            if composition in ['bch1', 'bch2'] and generators is None and not SON_BCH_AVAILABLE:
+                print(f"[WARNING] SO(N) BCH requires generators. "
+                      f"Falling back to 'add' for phi_dim={phi_dim}.")
+                composition = 'add'
         self.composition = composition
 
         if mode == 'none':
@@ -593,11 +613,27 @@ class GaugePositionalEncoding(nn.Module):
 
         elif self.composition == 'bch1':
             # First-order BCH correction
-            return so3_compose_bch(phi, pos_phi, order=1)
+            if self.phi_dim == 3:
+                # Use SO(3)-specific BCH (cross product)
+                return so3_compose_bch(phi, pos_phi, order=1)
+            elif SON_BCH_AVAILABLE and self.generators is not None:
+                # Use general SO(N) BCH (matrix commutator)
+                return soN_compose_bch_torch(phi, pos_phi, self.generators, order=1)
+            else:
+                # Fallback to addition
+                return phi + pos_phi
 
         elif self.composition == 'bch2':
             # Second-order BCH correction
-            return so3_compose_bch(phi, pos_phi, order=2)
+            if self.phi_dim == 3:
+                # Use SO(3)-specific BCH (cross product)
+                return so3_compose_bch(phi, pos_phi, order=2)
+            elif SON_BCH_AVAILABLE and self.generators is not None:
+                # Use general SO(N) BCH (matrix commutator)
+                return soN_compose_bch_torch(phi, pos_phi, self.generators, order=2)
+            else:
+                # Fallback to addition
+                return phi + pos_phi
 
         elif self.composition == 'exact':
             # Full SO(3) composition: log(exp(φ) · exp(φ_pos))
