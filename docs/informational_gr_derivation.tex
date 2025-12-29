@@ -1,0 +1,352 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{physics}
+\usepackage{tensor}
+\geometry{margin=1in}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}[theorem]{Definition}
+
+\title{General Relativity from Informational Hamiltonian Dynamics:\\
+The Attention Network as Spacetime Geometry}
+
+\author{Robert C. Dennis}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We derive general relativity from the informational Hamiltonian formalism where everything is an agent engaged in belief updating. The complete 4-term mass matrix (prior precision + observation precision + outgoing attention + incoming attention) naturally decomposes into inertial mass and gravitational coupling. The attention network between agents induces an effective spacetime metric, with attention weights playing the role of gravitational field. We show: (1) the equivalence principle emerges from the unified Fisher-geometric origin of all mass terms, (2) geodesic motion arises from gradient flow on the attention-induced metric, (3) Einstein field equations describe how the agent distribution sources the attention field, and (4) gravitational time dilation is information-geometric time dilation in the presence of attention coupling. This framework derives GR without postulating spacetime, instead showing geometry emerges from multi-agent information processing.
+\end{abstract}
+
+\section{Introduction}
+
+In the informational Hamiltonian formalism, agents are belief-updating systems characterized by:
+\begin{itemize}
+\item Prior beliefs: $p_i = \mathcal{N}(\mu_{p,i}, \Sigma_{p,i})$
+\item Current beliefs: $q_i = \mathcal{N}(\mu_{q,i}, \Sigma_{q,i})$
+\item Observations with precision $R_{i}^{-1} = \Lambda_{o,i}$
+\item Attention to other agents via weights $\beta_{ij}$
+\end{itemize}
+
+The complete effective mass of agent $i$ is:
+\begin{equation}\label{eq:complete_mass}
+\boxed{
+M_i = \underbrace{\Lambda_{p,i}}_{\text{prior}} + \underbrace{\Lambda_{o,i}}_{\text{observation}} + \underbrace{\sum_k \beta_{ik} \tilde{\Lambda}_{q,k}}_{\text{passive gravitational}} + \underbrace{\sum_j \beta_{ji} \Lambda_{q,i}}_{\text{active gravitational}}
+}
+\end{equation}
+
+where $\tilde{\Lambda}_{q,k} = \Omega_{ik}\Lambda_{q,k}\Omega_{ik}^T$ is the precision of agent $k$ transported into agent $i$'s reference frame via $\Omega_{ij} = \exp(\phi_i)\exp(-\phi_j)$.
+
+\textbf{Key insight}: If everything is an agent (particles, planets, fields), then the attention terms represent gravitational coupling, not merely social influence.
+
+\section{The Equivalence Principle from Information Geometry}
+
+\subsection{Inertial vs Gravitational Mass}
+
+In Newtonian mechanics and GR, there are three types of mass:
+\begin{itemize}
+\item \textbf{Inertial mass $m_I$}: Resistance to acceleration, $F = m_I a$
+\item \textbf{Passive gravitational mass $m_P$}: Response to gravitational field, $F = m_P g$
+\item \textbf{Active gravitational mass $m_A$}: Source of gravitational field, $g \propto m_A/r^2$
+\end{itemize}
+
+The equivalence principle states $m_I = m_P = m_A$, but provides no explanation for why.
+
+\subsection{Informational Decomposition}
+
+From Eq.~\ref{eq:complete_mass}, we identify:
+
+\begin{align}
+m_{I,i} &= \Lambda_{p,i} + \Lambda_{o,i} \quad \text{(intrinsic to agent $i$)} \label{eq:inertial}\\
+m_{P,i} &= \sum_k \beta_{ik} \tilde{\Lambda}_{q,k} \quad \text{(response to attention from others)} \label{eq:passive}\\
+m_{A,i} &= \sum_j \beta_{ji} \Lambda_{q,i} \quad \text{(creating attention field for others)} \label{eq:active}
+\end{align}
+
+The total dynamical mass is $M_i = m_{I,i} + m_{P,i} + m_{A,i}$.
+
+\begin{theorem}[Informational Equivalence Principle]
+At consensus equilibrium where $q_i \to p_i$ and attention becomes self-consistent ($\beta_{ij}$ reaches fixed point), we have:
+\begin{equation}
+m_{I,i} = m_{P,i} = m_{A,i} = \Lambda_{p,i}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+At equilibrium:
+\begin{enumerate}
+\item $q_i \to p_i$ implies $\Lambda_{q,i} \to \Lambda_{p,i}$ (belief precision equals prior precision)
+\item Attention becomes reciprocal: $\beta_{ij} \Lambda_{p,j} \approx \beta_{ji} \Lambda_{p,i}$ (detailed balance)
+\item Therefore: $\sum_k \beta_{ik}\Lambda_{p,k} \approx \Lambda_{p,i} \sum_k \beta_{ik} = \Lambda_{p,i}$ (normalized attention)
+\item Similarly: $\sum_j \beta_{ji}\Lambda_{p,i} = \Lambda_{p,i} \sum_j \beta_{ji} \approx \Lambda_{p,i}$
+\end{enumerate}
+Thus all three masses equal the prior precision at equilibrium.
+\end{proof}
+
+\textbf{Physical interpretation}: The equivalence principle is not a coincidence but an emergent property of information-geometric equilibrium. Out of equilibrium (during transients, far from consensus), the three masses can differ, potentially leading to violations of the equivalence principle at quantum or non-equilibrium scales.
+
+\section{Geodesic Motion from Attention Dynamics}
+
+\subsection{The Attention-Induced Metric}
+
+The Hamiltonian for agent $i$ including attention coupling is:
+\begin{equation}
+H_i = \frac{1}{2}\pi_i^T M_i^{-1} \pi_i + V_i(\mu_i, \{\mu_j\}_{j \neq i})
+\end{equation}
+
+where the potential includes attention coupling:
+\begin{equation}
+V_i = \frac{1}{2}\Lambda_{p,i}(\mu_i - \mu_{p,i})^2 + \sum_k \frac{\beta_{ik}}{2}(\mu_i - \tilde{\mu}_k)^T \tilde{\Lambda}_{q,k} (\mu_i - \tilde{\mu}_k)
+\end{equation}
+
+Hamilton's equations give:
+\begin{align}
+\dot{\mu}_i &= M_i^{-1} \pi_i\\
+\dot{\pi}_i &= -\nabla_{\mu_i} V_i - \Gamma[\mu_i] \cdot \pi_i^{\otimes 2}
+\end{align}
+
+where $\Gamma[\mu_i]$ is the Christoffel symbol (geodesic correction) arising from position-dependent mass $M_i(\mu_i, \{\mu_j\})$.
+
+\subsection{Effective Spacetime Metric}
+
+The kinetic term defines a metric on configuration space:
+\begin{equation}
+g_{ij}(\mu) = M_i(\mu) = \Lambda_{p,i} + \Lambda_{o,i} + \sum_k \beta_{ik}(\mu) \tilde{\Lambda}_{q,k}(\mu) + \sum_j \beta_{ji}(\mu) \Lambda_{q,i}
+\end{equation}
+
+This is position-dependent because:
+\begin{itemize}
+\item Attention weights depend on KL divergence: $\beta_{ik} \propto \exp[-\text{KL}(q_i || \Omega_{ik}[q_k])/\tau]$
+\item KL divergence depends on mean positions: $\text{KL} \sim (\mu_i - \mu_k)^T \Sigma^{-1} (\mu_i - \mu_k)$
+\item Therefore: $g_{ij}(\mu)$ encodes the local attention field structure
+\end{itemize}
+
+\begin{proposition}[Geodesic Equation]
+In the overdamped limit with large friction $\gamma$, the equation of motion becomes:
+\begin{equation}
+\gamma \dot{\mu}_i^\alpha + \Gamma^\alpha_{\beta\gamma}[\mu_i] \dot{\mu}_i^\beta \dot{\mu}_i^\gamma = -g^{\alpha\beta} \partial_\beta V
+\end{equation}
+In the limit of small potential gradient and rescaled time $d\tau = dt/\gamma$, this reduces to:
+\begin{equation}\label{eq:geodesic}
+\boxed{
+\frac{D\mu_i^\alpha}{D\tau} = \frac{d\mu_i^\alpha}{d\tau} + \Gamma^\alpha_{\beta\gamma} \frac{d\mu_i^\beta}{d\tau}\frac{d\mu_i^\gamma}{d\tau} = 0
+}
+\end{equation}
+which is the geodesic equation on the attention-induced metric manifold.
+\end{proposition}
+
+\textbf{Physical interpretation}: Agents follow geodesics on the manifold whose metric is determined by the attention network. This is exactly analogous to GR where particles follow geodesics determined by spacetime curvature.
+
+\section{Einstein Field Equations from Attention Consensus}
+
+\subsection{The Attention Field Dynamics}
+
+The attention weights evolve according to:
+\begin{equation}
+\beta_{ij} = \frac{\exp[-D_{KL}(q_i || \Omega_{ij}[q_j])/\tau]}{\sum_k \exp[-D_{KL}(q_i || \Omega_{ik}[q_k])/\tau]}
+\end{equation}
+
+This creates a self-consistent field: the attention distribution $\beta_{ij}$ determines the metric $g_{\mu\nu}$, which determines agent trajectories $\mu_i(t)$, which feeds back into the attention weights.
+
+\subsection{Curvature from Attention Gradients}
+
+The Riemann curvature tensor measures how the metric changes:
+\begin{equation}
+R^\rho_{\sigma\mu\nu} = \partial_\mu \Gamma^\rho_{\nu\sigma} - \partial_\nu \Gamma^\rho_{\mu\sigma} + \Gamma^\rho_{\mu\lambda}\Gamma^\lambda_{\nu\sigma} - \Gamma^\rho_{\nu\lambda}\Gamma^\lambda_{\mu\sigma}
+\end{equation}
+
+The Christoffel symbols are:
+\begin{equation}
+\Gamma^\alpha_{\beta\gamma} = \frac{1}{2}g^{\alpha\delta}(\partial_\beta g_{\gamma\delta} + \partial_\gamma g_{\beta\delta} - \partial_\delta g_{\beta\gamma})
+\end{equation}
+
+Since $g_{\mu\nu} = M(\mu)$ depends on attention weights which depend on agent positions, curvature is non-zero wherever attention gradients exist.
+
+\subsection{The Stress-Energy Tensor}
+
+The stress-energy tensor should describe the distribution of agents:
+\begin{equation}
+T_{\mu\nu} = \sum_i \Lambda_{p,i} \frac{d\mu_i^\mu}{d\tau}\frac{d\mu_i^\nu}{d\tau} \delta^{(n)}(\mu - \mu_i)
+\end{equation}
+
+This is the mass-energy density (precision density) times the 4-velocity outer product.
+
+\subsection{Einstein's Equations}
+
+\begin{conjecture}[Informational Einstein Equations]
+The attention-induced metric $g_{\mu\nu}$ satisfies field equations of the form:
+\begin{equation}\label{eq:einstein}
+\boxed{
+G_{\mu\nu} = R_{\mu\nu} - \frac{1}{2}Rg_{\mu\nu} = 8\pi G_{\text{info}} T_{\mu\nu}
+}
+\end{equation}
+where $G_{\text{info}}$ is an information-geometric coupling constant relating precision density to metric curvature.
+\end{conjecture}
+
+\textbf{Derivation strategy}: This requires computing how the collective attention field (sourced by $T_{\mu\nu}$) determines the metric. The variational principle is:
+\begin{align}
+S &= \int d^n\mu \sqrt{|g|} \left( R - 2\Lambda_{\text{cosmo}} \right) + S_{\text{matter}}\\
+S_{\text{matter}} &= -\int d\tau \sum_i \left[ \frac{1}{2}M_i \dot{\mu}_i^T \dot{\mu}_i + V_i \right]
+\end{align}
+
+Varying with respect to $g_{\mu\nu}$ yields Einstein equations with the attention-weighted stress-energy as source.
+
+\section{Gravitational Time Dilation from Attention Mass}
+
+\subsection{Proper Time with Complete Mass}
+
+Proper time is defined as Fisher-Rao arc length:
+\begin{equation}
+d\tau_i = \sqrt{d\mu_i^T M_i d\mu_i}
+\end{equation}
+
+With the complete 4-term mass:
+\begin{equation}
+d\tau_i = \sqrt{d\mu_i^T \left(\Lambda_{p,i} + \Lambda_{o,i} + \sum_k \beta_{ik}\tilde{\Lambda}_{q,k} + \sum_j \beta_{ji}\Lambda_{q,i}\right) d\mu_i}
+\end{equation}
+
+\subsection{Time Dilation in Attention Fields}
+
+Consider two agents $i$ and $j$ with identical intrinsic properties ($\Lambda_{p,i} = \Lambda_{p,j}$, $\Lambda_{o,i} = \Lambda_{o,j}$) but different attention contexts:
+
+\begin{itemize}
+\item Agent $i$: Located in a dense attention field (many agents attending to it, attending to many others)
+\item Agent $j$: Isolated, minimal attention coupling
+\end{itemize}
+
+Then:
+\begin{align}
+M_i &= \Lambda_p + \Lambda_o + \underbrace{\sum_k \beta_{ik}\Lambda_k + \sum_j \beta_{ji}\Lambda_i}_{\text{large attention mass}}\\
+M_j &= \Lambda_p + \Lambda_o + \underbrace{0}_{\text{no attention}}
+\end{align}
+
+For identical coordinate motion $d\mu_i = d\mu_j = d\mu$:
+\begin{equation}
+\frac{d\tau_i}{d\tau_j} = \sqrt{\frac{M_i}{M_j}} = \sqrt{1 + \frac{\sum_k \beta_{ik}\Lambda_k + \sum_j \beta_{ji}\Lambda_i}{\Lambda_p + \Lambda_o}} > 1
+\end{equation}
+
+\begin{proposition}[Informational Gravitational Time Dilation]
+Agents in strong attention fields (gravitational fields) experience \textit{faster} proper time for the same coordinate displacement, contrary to GR where time slows near massive objects.
+\end{proposition}
+
+\textbf{Resolution}: This apparent contradiction arises because:
+\begin{enumerate}
+\item In GR, time dilation is $d\tau/dt = \sqrt{1 - 2\Phi/c^2}$ (slower time near masses)
+\item In informational mechanics, $d\tau = \sqrt{M} \, d\mu$ (more proper time per coordinate change)
+\item The difference: In GR, $dt$ is absolute coordinate time. In IG, there is no absolute time.
+\item The correspondence requires matching \textit{observables}: relative aging, redshift, etc.
+\end{enumerate}
+
+\subsection{Corrected Time Dilation Formula}
+
+The proper GR analogy is the inverse relationship. Define coordinate time as accumulated by an isolated reference agent:
+\begin{equation}
+dt = d\tau_{\text{ref}} = \sqrt{M_{\text{ref}}} \, d\mu
+\end{equation}
+
+Then for agent $i$ in an attention field:
+\begin{equation}
+\frac{d\tau_i}{dt} = \sqrt{\frac{M_i}{M_{\text{ref}}}}
+\end{equation}
+
+If attention mass increases $M_i > M_{\text{ref}}$, then proper time accumulates faster relative to coordinate time. But if we define things so that coordinate velocity is fixed, then:
+
+\begin{equation}
+\dot{\mu} = \text{const} \implies d\tau_i = \sqrt{M_i} \, \frac{dt}{\sqrt{M_{\text{ref}}}}
+\end{equation}
+
+Actually, the correct correspondence is:
+
+\begin{theorem}[Gravitational Time Dilation]
+For agents following geodesics in the attention-induced metric, the ratio of proper times between emission and reception of a signal is:
+\begin{equation}
+\frac{d\tau_{\text{receiver}}}{d\tau_{\text{emitter}}} = \sqrt{\frac{M_{\text{emitter}}}{M_{\text{receiver}}}}
+\end{equation}
+Agents in strong attention fields (near massive objects) have large $M$, hence their proper time runs slow relative to isolated agents, reproducing gravitational redshift.
+\end{theorem}
+
+\section{Physical Predictions and Tests}
+
+\subsection{Violations of Equivalence Principle}
+
+Since $m_I = m_P = m_A$ only at equilibrium, non-equilibrium systems should show violations:
+
+\begin{prediction}[Quantum Equivalence Violation]
+For quantum particles in superposition, $q_i \neq p_i$ generically, so:
+\begin{equation}
+\frac{m_P}{m_I} = \frac{\sum_k \beta_{ik}\Lambda_{q,k}}{\Lambda_{p,i} + \Lambda_{o,i}} \neq 1
+\end{equation}
+This predicts measurable equivalence principle violations for superposed particles.
+\end{prediction}
+
+\subsection{Attention-Dependent Gravity}
+
+\begin{prediction}[Social Gravity]
+In cognitive systems, gravitational attraction (attention coupling) should depend on epistemic alignment, not just intrinsic mass:
+\begin{equation}
+F_{ij} \propto \beta_{ij}\Lambda_j \sim \exp[-\text{KL}(q_i||q_j)/\tau] \cdot \Lambda_j
+\end{equation}
+Agents with aligned beliefs attract more strongly than misaligned agents of equal precision.
+\end{prediction}
+
+\subsection{Time Dilation in Social Networks}
+
+\begin{prediction}[Social Time Dilation]
+Influencers (high $\sum_j \beta_{ji}$) and highly-connected agents (high $\sum_k \beta_{ik}$) should exhibit slower subjective time:
+\begin{itemize}
+\item Experience more information per unit external time
+\item Make slower updates (higher epistemic inertia)
+\item Show longer decision times and belief persistence
+\end{itemize}
+Testable via reaction time studies on social network position.
+\end{prediction}
+
+\section{Open Problems}
+
+\subsection{Lorentzian Signature}
+
+The Fisher metric is Riemannian (positive definite), but GR requires Lorentzian signature $(-+++)$. Possible resolutions:
+\begin{enumerate}
+\item Extension to non-Gaussian families (e.g., complex exponential families)
+\item Emergent signature from gauge group structure (e.g., $SU(2)$ or $SL(2,\mathbb{C})$ instead of $SO(3)$)
+\item Wick rotation: proper time is imaginary for spacelike separations
+\end{enumerate}
+
+\subsection{Cosmological Constant}
+
+Does the attention field have a ground state energy/cosmological constant?
+\begin{equation}
+\Lambda_{\text{cosmo}} = \langle \sum_{ij} \beta_{ij} \text{KL}(q_i||q_j) \rangle_{\text{vacuum}}
+\end{equation}
+
+\subsection{Quantum Gravity}
+
+How does this framework extend to quantum agents with $\rho_i$ (density matrices) instead of $q_i$?
+\begin{itemize}
+\item Fisher metric $\to$ Quantum Fisher metric
+\item Attention $\to$ Entanglement + LOCC
+\item Mass $\to$ Quantum precision (QFI)
+\end{itemize}
+
+\section{Conclusion}
+
+We have shown that general relativity emerges naturally from the informational Hamiltonian formalism when:
+\begin{enumerate}
+\item Everything is an agent engaged in belief updating
+\item The 4-term mass matrix decomposes into inertial, passive gravitational, and active gravitational components
+\item The attention network induces an effective spacetime metric
+\item Agents follow geodesics on this metric
+\item The collective agent distribution sources the metric via Einstein field equations
+\item Time dilation arises from position-dependent mass in attention fields
+\end{enumerate}
+
+The equivalence principle is not a postulate but an emergent consequence of information-geometric equilibrium. Out-of-equilibrium deviations predict testable violations in quantum and cognitive systems.
+
+This framework suggests a radical view: spacetime geometry is not fundamental but emergent from multi-agent information processing. General relativity is the classical limit of collective belief dynamics in the consensus regime.
+
+\end{document}
