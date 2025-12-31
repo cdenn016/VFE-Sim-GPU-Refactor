@@ -1593,9 +1593,9 @@ def main():
     parser.add_argument('--use_wandb', action='store_true')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for reproducibility (default: None = random)')
-    parser.add_argument('--dataset', type=str, default='wikitext-2',
+    parser.add_argument('--dataset', type=str, default='wikitext-103',
                         choices=['wikitext-2', 'wikitext-103'],
-                        help='Dataset to use: wikitext-2 (~2M tokens) or wikitext-103 (~103M tokens)')
+                        help='Dataset to use: wikitext-2 (~2M tokens) or wikitext-103 (~103M tokens, default)')
 
     args = parser.parse_args()
 
