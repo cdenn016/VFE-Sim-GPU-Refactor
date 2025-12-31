@@ -274,14 +274,60 @@ if phi_embed is not None and n_viz > 0:
     }
     colors = [category_colors.get(c, '#95A5A6') for c in categories]
 
-    print(f"phi_dim = {phi_dim} ({'SO(3)' if phi_dim == 3 else f'SO(N) with N(N-1)/2={phi_dim}'})")
+    # Identify gauge group from dimension
+    # SO(2): 1 generator, SO(3): 3 generators, SO(N): N(N-1)/2 generators
+    if phi_dim == 1:
+        gauge_str = "SO(2)"
+    elif phi_dim == 3:
+        gauge_str = "SO(3)"
+    else:
+        # Solve N(N-1)/2 = phi_dim for N
+        n_approx = int((1 + np.sqrt(1 + 8 * phi_dim)) / 2)
+        gauge_str = f"SO({n_approx})"
+    print(f"phi_dim = {phi_dim} ({gauge_str})")
 
     # Normalize to unit sphere for visualization
     phi_norms = np.linalg.norm(phi_np, axis=1, keepdims=True)
     phi_norms = np.clip(phi_norms, 1e-8, None)  # avoid div by zero
     phi_unit = phi_np / phi_norms
 
-    if phi_dim == 3:
+    if phi_dim == 1:
+        # SO(2): 1D gauge frames - show as histogram and jittered scatter
+        fig = plt.figure(figsize=(14, 6))
+
+        # Histogram of phi values by category
+        ax1 = fig.add_subplot(121)
+        for cat in category_colors:
+            mask = [c == cat for c in categories]
+            if any(mask):
+                idx = [i for i, m in enumerate(mask) if m]
+                vals = phi_np[idx, 0]
+                ax1.hist(vals, bins=30, alpha=0.5, label=cat, color=category_colors[cat])
+
+        ax1.set_xlabel('φ (SO(2) angle)')
+        ax1.set_ylabel('Count')
+        ax1.set_title('SO(2) Gauge Frame Distribution')
+        ax1.legend(loc='upper right', fontsize=8)
+
+        # Jittered scatter plot (add random y for visibility)
+        ax2 = fig.add_subplot(122)
+        np.random.seed(42)
+        for cat in category_colors:
+            mask = [c == cat for c in categories]
+            if any(mask):
+                idx = [i for i, m in enumerate(mask) if m]
+                x_vals = phi_np[idx, 0]
+                y_jitter = np.random.uniform(-0.4, 0.4, len(idx))
+                ax2.scatter(x_vals, y_jitter, c=category_colors[cat], label=cat, alpha=0.6, s=20)
+
+        ax2.set_xlabel('φ (SO(2) angle)')
+        ax2.set_ylabel('(jittered for visibility)')
+        ax2.set_title('SO(2) Gauge Frames by Token Type')
+        ax2.legend(loc='upper right', fontsize=8)
+        ax2.grid(True, alpha=0.3, axis='x')
+        ax2.set_ylim(-0.6, 0.6)
+
+    elif phi_dim == 3:
         # SO(3): Direct 3D visualization on sphere
         fig = plt.figure(figsize=(14, 6))
 
@@ -327,18 +373,20 @@ if phi_embed is not None and n_viz > 0:
         ax2.set_aspect('equal')
 
     else:
-        # SO(N): Use PCA to reduce to 2D/3D
-        print(f"Using PCA to reduce {phi_dim}D -> 3D for visualization")
+        # SO(N) with N > 3: Use PCA to reduce to 2D/3D
+        n_components = min(3, phi_dim)
+        print(f"Using PCA to reduce {phi_dim}D -> {n_components}D for visualization")
 
-        pca = PCA(n_components=min(3, phi_dim))
+        pca = PCA(n_components=n_components)
         phi_pca = pca.fit_transform(phi_np)
 
         var_explained = pca.explained_variance_ratio_
-        print(f"PCA variance explained: {var_explained[0]:.1%} + {var_explained[1]:.1%} + {var_explained[2] if len(var_explained) > 2 else 0:.1%}")
+        var_str = " + ".join([f"{v:.1%}" for v in var_explained])
+        print(f"PCA variance explained: {var_str}")
 
         fig = plt.figure(figsize=(14, 6))
 
-        if phi_pca.shape[1] >= 3:
+        if n_components >= 3:
             # 3D PCA plot
             ax1 = fig.add_subplot(121, projection='3d')
             for cat in category_colors:
@@ -351,23 +399,31 @@ if phi_embed is not None and n_viz > 0:
             ax1.set_xlabel(f'PC1 ({var_explained[0]:.1%})')
             ax1.set_ylabel(f'PC2 ({var_explained[1]:.1%})')
             ax1.set_zlabel(f'PC3 ({var_explained[2]:.1%})')
-            ax1.set_title(f'SO(N) Gauge Frames (PCA from {phi_dim}D)')
+            ax1.set_title(f'{gauge_str} Gauge Frames (PCA from {phi_dim}D)')
             ax1.legend(loc='upper left', fontsize=8)
 
-        # 2D PCA plot
-        ax2 = fig.add_subplot(122)
-        for cat in category_colors:
-            mask = [c == cat for c in categories]
-            if any(mask):
-                idx = [i for i, m in enumerate(mask) if m]
-                ax2.scatter(phi_pca[idx, 0], phi_pca[idx, 1],
-                           c=category_colors[cat], label=cat, alpha=0.6, s=20)
+            # 2D PCA plot
+            ax2 = fig.add_subplot(122)
+        elif n_components == 2:
+            # Only 2D available
+            ax2 = fig.add_subplot(111)
+        else:
+            # Only 1D - shouldn't happen here but handle gracefully
+            ax2 = fig.add_subplot(111)
 
-        ax2.set_xlabel(f'PC1 ({var_explained[0]:.1%})')
-        ax2.set_ylabel(f'PC2 ({var_explained[1]:.1%})')
-        ax2.set_title(f'SO(N) Gauge Frames (PCA from {phi_dim}D)')
-        ax2.legend(loc='upper left', fontsize=8)
-        ax2.grid(True, alpha=0.3)
+        if n_components >= 2:
+            for cat in category_colors:
+                mask = [c == cat for c in categories]
+                if any(mask):
+                    idx = [i for i, m in enumerate(mask) if m]
+                    ax2.scatter(phi_pca[idx, 0], phi_pca[idx, 1],
+                               c=category_colors[cat], label=cat, alpha=0.6, s=20)
+
+            ax2.set_xlabel(f'PC1 ({var_explained[0]:.1%})')
+            ax2.set_ylabel(f'PC2 ({var_explained[1]:.1%})')
+            ax2.set_title(f'{gauge_str} Gauge Frames (PCA from {phi_dim}D)')
+            ax2.legend(loc='upper left', fontsize=8)
+            ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
