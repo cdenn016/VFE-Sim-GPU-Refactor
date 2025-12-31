@@ -198,11 +198,11 @@ DEFAULT_USE_GPU_OPTIMIZED = True  # Set True for RTX 5090 / high-end GPU setting
 STANDARD_TRANSFORMER_CONFIG = {
     # Model architecture - match gauge VFE dimensions
     'vocab_size': 2000000,        # Will be overridden by tokenizer
-    'embed_dim': 25,              # Same K as gauge VFE
+    'embed_dim': 100,             # Larger than VFE K=25 (standard needs more dims)
     'n_layers': 1,                # Same depth
-    'hidden_dim': 100,            # 4×embed_dim standard ratio
+    'hidden_dim': 400,            # 4×embed_dim standard ratio
     'max_seq_len': 94,            # Same context length
-    'n_heads': 5,                 # embed_dim / head_dim (5 heads of dim 5)
+    'n_heads': 10,                # 10 heads of dim 10
 
     # GPU Training - same as gauge VFE
     'batch_size': 24,
