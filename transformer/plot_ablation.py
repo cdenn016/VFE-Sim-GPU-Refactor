@@ -2,16 +2,16 @@
 Ablation Study Figures: Gauge VFE vs Standard Transformer
 ==========================================================
 
-Generates publication-quality comparison figures:
-1. Step Comparison: PPL vs training steps (same steps, different compute)
-2. Compute Comparison: PPL vs wall-clock time (fair compute comparison)
+Simple functions to generate comparison figures. No CLI needed.
 
 Usage:
-    python transformer/plot_ablation.py --vfe_dir checkpoints_publication/vfe_run \
-                                         --std_dir checkpoints_publication/standard_run
+    from transformer.plot_ablation import plot_ablation
 
-    # Or auto-detect latest runs
-    python transformer/plot_ablation.py --auto
+    # Just call with two directories
+    plot_ablation(
+        vfe_dir='checkpoints_publication/vfe_run',
+        std_dir='checkpoints_publication/standard_baseline',
+    )
 
 Author: Ablation study for gauge transformer paper
 Date: December 2025
@@ -20,10 +20,8 @@ Date: December 2025
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-import argparse
 import json
 import csv
-import math
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import numpy as np
@@ -481,80 +479,49 @@ def plot_combined_ablation(
     return fig
 
 
-def find_latest_runs(base_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
-    """Auto-detect latest VFE and standard runs."""
-    base_dir = Path(base_dir)
+def plot_ablation(
+    vfe_dir: str,
+    std_dir: str,
+    output_dir: str = 'outputs/ablation',
+    vfe_name: str = 'Gauge VFE',
+    std_name: str = 'Standard',
+):
+    """
+    Generate all ablation figures with one call.
 
-    vfe_dirs = list(base_dir.glob("*vfe*")) + list(base_dir.glob("*gauge*"))
-    std_dirs = list(base_dir.glob("*standard*")) + list(base_dir.glob("*baseline*"))
+    Args:
+        vfe_dir: Path to VFE training results
+        std_dir: Path to standard transformer results
+        output_dir: Where to save figures
+        vfe_name: Label for VFE model
+        std_name: Label for standard model
 
-    # Sort by modification time
-    vfe_dirs = sorted(vfe_dirs, key=lambda p: p.stat().st_mtime, reverse=True)
-    std_dirs = sorted(std_dirs, key=lambda p: p.stat().st_mtime, reverse=True)
-
-    vfe_dir = vfe_dirs[0] if vfe_dirs else None
-    std_dir = std_dirs[0] if std_dirs else None
-
-    return vfe_dir, std_dir
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Generate ablation study figures')
-    parser.add_argument('--vfe_dir', type=str, default=None,
-                        help='Directory containing VFE training results')
-    parser.add_argument('--std_dir', type=str, default=None,
-                        help='Directory containing standard transformer results')
-    parser.add_argument('--output_dir', type=str, default='outputs/ablation',
-                        help='Directory to save figures')
-    parser.add_argument('--auto', action='store_true',
-                        help='Auto-detect latest runs from checkpoints_publication/')
-    parser.add_argument('--base_dir', type=str, default='checkpoints_publication',
-                        help='Base directory for auto-detection')
-    args = parser.parse_args()
-
+    Example:
+        plot_ablation(
+            'checkpoints_publication/vfe_so2',
+            'checkpoints_publication/standard_baseline',
+        )
+    """
     plt.rcParams.update(PUBLICATION_STYLE)
 
-    # Find run directories
-    if args.auto:
-        vfe_dir, std_dir = find_latest_runs(Path(args.base_dir))
-        if vfe_dir:
-            print(f"Found VFE run: {vfe_dir}")
-        if std_dir:
-            print(f"Found Standard run: {std_dir}")
-    else:
-        vfe_dir = Path(args.vfe_dir) if args.vfe_dir else None
-        std_dir = Path(args.std_dir) if args.std_dir else None
-
-    if not vfe_dir or not std_dir:
-        print("ERROR: Could not find both VFE and standard runs.")
-        print("Please specify --vfe_dir and --std_dir, or ensure runs exist for --auto")
-        return
-
-    # Load training histories
-    print("\nLoading training histories...")
-    vfe_run = load_training_history(vfe_dir, name="SO(2)")
-    std_run = load_training_history(std_dir, name="Baseline")
+    vfe_run = load_training_history(Path(vfe_dir), name=vfe_name)
+    std_run = load_training_history(Path(std_dir), name=std_name)
 
     if not vfe_run or not std_run:
         print("ERROR: Could not load training histories")
-        return
+        return None
 
-    print(f"\nVFE Run: {len(vfe_run.steps)} steps, final PPL={vfe_run.final_ppl:.1f}")
-    print(f"Std Run: {len(std_run.steps)} steps, final PPL={std_run.final_ppl:.1f}")
+    print(f"VFE: {len(vfe_run.steps)} steps, final PPL={vfe_run.final_ppl:.1f}")
+    print(f"Std: {len(std_run.steps)} steps, final PPL={std_run.final_ppl:.1f}")
 
-    # Generate figures
-    output_dir = Path(args.output_dir)
-
-    print("\nGenerating ablation figures...")
+    output_dir = Path(output_dir)
     plot_step_comparison(vfe_run, std_run, output_dir)
     plot_compute_comparison(vfe_run, std_run, output_dir)
-    plot_combined_ablation(vfe_run, std_run, output_dir)
+    fig = plot_combined_ablation(vfe_run, std_run, output_dir)
 
-    print(f"\nAll figures saved to {output_dir}/")
-    print("  - ablation_step_comparison.png/pdf")
-    print("  - ablation_compute_comparison.png/pdf")
-    print("  - ablation_combined.png/pdf")
+    return fig
 
 
+# Quick test
 if __name__ == '__main__':
-    main()
+    print("Use: plot_ablation(vfe_dir, std_dir)")
