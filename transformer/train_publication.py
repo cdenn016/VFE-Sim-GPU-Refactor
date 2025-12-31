@@ -1592,23 +1592,27 @@ def main():
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints_publication')
     parser.add_argument('--use_wandb', action='store_true')
     parser.add_argument('--seed', type=int, default=None,
-                        help='Random seed for reproducibility (default: None = random)')
+                        help='Random seed for reproducibility (default: 42 for determinism)')
     parser.add_argument('--dataset', type=str, default='wikitext-103',
                         choices=['wikitext-2', 'wikitext-103'],
                         help='Dataset to use: wikitext-2 (~2M tokens) or wikitext-103 (~103M tokens, default)')
 
     args = parser.parse_args()
 
-    # Set random seed if specified
-    if args.seed is not None:
-        import random
-        import numpy as np
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
-        print(f"Random seed set to: {args.seed}")
+    # Set random seed for reproducibility
+    # Default to seed=42 if not specified, for consistent results
+    seed = args.seed if args.seed is not None else 42
+    import random
+    import numpy as np
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        # Enable deterministic CUDA operations (may slow down training slightly)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to: {seed}")
 
     # Device
     if args.device == 'auto':
