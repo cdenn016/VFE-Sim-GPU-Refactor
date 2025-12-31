@@ -178,7 +178,7 @@ class TrainingTracker:
         val_bpcs = [s.val_bpc for s in self.history if s.val_bpc is not None]
 
         return {
-            'total_steps': len(self.history),
+            'total_steps': self.history[-1].step,  # Use actual step number, not entry count
             'final_train_loss': self.history[-1].train_loss,
             'final_train_ppl': self.history[-1].train_ppl,
             'final_train_bpc': self.history[-1].train_bpc,
