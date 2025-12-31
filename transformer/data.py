@@ -2,21 +2,29 @@
 Data Pipeline for Gauge-Theoretic Transformer
 ===============================================
 
-WikiText-2 dataset loading and preprocessing for language modeling.
+WikiText dataset loading and preprocessing for language modeling.
+Supports both WikiText-2 and WikiText-103 (default).
 
 Dataset Details:
-    - WikiText-2 (2.08M tokens)
-    - Train: ~2M tokens
-    - Valid: ~217K tokens
-    - Test: ~245K tokens
+    - WikiText-103 (103M tokens, default)
+    - WikiText-2 (2.08M tokens, smaller alternative)
 
 Usage:
     from transformer.data import create_dataloaders
 
+    # Default: WikiText-103 (~103M tokens)
     train_loader, val_loader, vocab_size = create_dataloaders(
         max_seq_len=128,
         batch_size=8,
         vocab_size=5000,
+    )
+
+    # Smaller dataset for quick experiments
+    train_loader, val_loader, vocab_size = create_dataloaders(
+        max_seq_len=128,
+        batch_size=8,
+        vocab_size=5000,
+        dataset='wikitext-2',
     )
 
 Author: Implementation for gauge transformer
@@ -1244,7 +1252,7 @@ def create_dataloaders(
     num_workers: int = 0,
     cache_dir: Optional[str] = None,
     tokenizer_name: str = 'gpt2',
-    dataset: str = 'wikitext-2',
+    dataset: str = 'wikitext-103',
 ) -> Tuple[DataLoader, DataLoader, int]:
     """
     Create train and validation dataloaders for WikiText.
@@ -1259,7 +1267,7 @@ def create_dataloaders(
         num_workers: Number of data loading workers
         cache_dir: Optional cache directory
         tokenizer_name: HuggingFace tokenizer name (only used if tiktoken unavailable)
-        dataset: 'wikitext-2' (~2M tokens) or 'wikitext-103' (~103M tokens)
+        dataset: 'wikitext-2' (~2M tokens) or 'wikitext-103' (~103M tokens, default)
 
     Returns:
         train_loader: Training dataloader
